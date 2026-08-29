@@ -1,0 +1,45 @@
+[package]
+name = "wellos-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "wellos-server"
+
+[dependencies]
+wellos-domain = { path = "../wellos-domain" }
+dmind-gateway = { path = "../dmind-gateway" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+http-body-util = "0.1.5"
+tower = { workspace = true, features = ["util"] }
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "wellos-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"

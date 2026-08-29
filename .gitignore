@@ -1,0 +1,9 @@
+/target
+node_modules/
+.next/
+out/
+dist/
+.env
+*.log
+.DS_Store
+coverage/
