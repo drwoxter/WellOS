@@ -171,6 +171,7 @@ impl RemoteJwks {
             anyhow::bail!("OIDC discovery metadata issuer does not match the configured issuer");
         }
         require_safe_url(&doc.jwks_uri, self.allow_http, "OIDC jwks_uri")?;
+        require_same_host(&self.issuer, &doc.jwks_uri)?;
         let jwks = self.fetch_jwks(&doc.jwks_uri).await?;
         state.jwks_uri = Some(doc.jwks_uri);
         state.cache = Some(CachedJwks {
@@ -194,6 +195,23 @@ fn require_safe_url(url: &str, allow_http: bool, what: &str) -> anyhow::Result<(
     anyhow::bail!("{what} must be an https:// URL (http:// is allowed only toward loopback hosts in development)");
 }
 
+/// The advertised `jwks_uri` must live on the pinned issuer's host: key
+/// material is only ever fetched from the identity provider itself, so a
+/// compromised or misconfigured discovery document cannot direct signing-key
+/// fetches at unrelated (e.g. internal) services.
+fn require_same_host(issuer: &str, jwks_uri: &str) -> anyhow::Result<()> {
+    let issuer_host = url::Url::parse(issuer)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase));
+    let jwks_host = url::Url::parse(jwks_uri)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase));
+    match (issuer_host, jwks_host) {
+        (Some(a), Some(b)) if a == b => Ok(()),
+        _ => anyhow::bail!("OIDC jwks_uri host does not match the configured issuer host"),
+    }
+}
+
 fn is_loopback_host(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
@@ -208,7 +226,7 @@ fn is_loopback_host(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::require_safe_url;
+    use super::{require_safe_url, require_same_host};
 
     #[test]
     fn https_is_always_accepted() {
@@ -230,5 +248,28 @@ mod tests {
         assert!(require_safe_url("http://idp.example.test", true, "issuer").is_err());
         assert!(require_safe_url("http://10.0.0.5", true, "issuer").is_err());
         assert!(require_safe_url("http://192.168.1.1:8080", true, "issuer").is_err());
+    }
+
+    #[test]
+    fn jwks_uri_is_pinned_to_the_issuer_host() {
+        assert!(
+            require_same_host("https://idp.example.test", "https://idp.example.test/keys").is_ok()
+        );
+        assert!(require_same_host(
+            "https://idp.example.test:8443",
+            "https://IDP.EXAMPLE.TEST/oauth/jwks"
+        )
+        .is_ok());
+        assert!(require_same_host(
+            "https://idp.example.test",
+            "https://other.example.test/keys"
+        )
+        .is_err());
+        assert!(require_same_host(
+            "https://idp.example.test",
+            "https://169.254.169.254/latest/meta-data"
+        )
+        .is_err());
+        assert!(require_same_host("https://idp.example.test", "not a url").is_err());
     }
 }

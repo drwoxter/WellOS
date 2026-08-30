@@ -27,6 +27,19 @@ pub async fn tenant_meta(
     State(state): State<AppState>,
     ctx: AuthContext,
 ) -> Result<Json<Value>, ApiError> {
+    guard(
+        &state,
+        &ctx,
+        actions::TENANT_META_READ,
+        "tenant",
+        Some(ResourceCtx {
+            tenant_id: ctx.tenant_id,
+            patient_id: None,
+        }),
+    )
+    .await?
+    .record_on_pool(&state, &ctx)
+    .await?;
     let row = sqlx::query("SELECT name, brand, cell FROM tenants WHERE id = $1")
         .bind(ctx.tenant_id)
         .fetch_one(&state.pool)

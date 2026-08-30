@@ -3,6 +3,7 @@ import {
   API_URL,
   CSRF_COOKIE,
   SESSION_COOKIE,
+  apiUnavailable,
   csrfCookieOptions,
   sessionCookieOptions,
 } from "@/lib/bff";
@@ -18,11 +19,15 @@ export async function GET(req: NextRequest) {
   if (!session) {
     return NextResponse.json({ authenticated: false });
   }
-  const res = await fetch(`${API_URL}/api/v1/auth/session`, {
-    headers: { Authorization: `Bearer ${session}` },
-    cache: "no-store",
-  });
-  return NextResponse.json({ authenticated: res.ok });
+  try {
+    const res = await fetch(`${API_URL}/api/v1/auth/session`, {
+      headers: { Authorization: `Bearer ${session}` },
+      cache: "no-store",
+    });
+    return NextResponse.json({ authenticated: res.ok });
+  } catch {
+    return apiUnavailable();
+  }
 }
 
 /**
@@ -49,14 +54,19 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const res = await fetch(`${API_URL}/api/v1/auth/session`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/api/v1/auth/session`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
+    });
+  } catch {
+    return apiUnavailable();
+  }
   if (!res.ok) {
     const body = await res.text();
     return new NextResponse(body, {

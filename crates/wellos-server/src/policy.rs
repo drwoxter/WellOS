@@ -61,6 +61,7 @@ pub mod actions {
     pub const BREAK_GLASS_REVIEW: &str = "break_glass.review";
     pub const SERVICE_CREDENTIAL_MANAGE: &str = "service_credential.manage";
     pub const SERVICE_CREDENTIAL_READ: &str = "service_credential.read";
+    pub const TENANT_META_READ: &str = "tenant.meta_read";
 
     pub const ALL: &[&str] = &[
         PATIENT_REGISTER,
@@ -80,6 +81,7 @@ pub mod actions {
         BREAK_GLASS_REVIEW,
         SERVICE_CREDENTIAL_MANAGE,
         SERVICE_CREDENTIAL_READ,
+        TENANT_META_READ,
     ];
 
     /// Whether `s` names a known action (used to validate service scopes).
@@ -111,6 +113,12 @@ pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
         JOBS_RUN => &[Purpose::Operations],
         BREAK_GLASS_REVIEW => &[Purpose::Operations, Purpose::Quality],
         SERVICE_CREDENTIAL_MANAGE | SERVICE_CREDENTIAL_READ => &[Purpose::Operations],
+        TENANT_META_READ => &[
+            Purpose::Treatment,
+            Purpose::Operations,
+            Purpose::Quality,
+            Purpose::Emergency,
+        ],
         _ => &[],
     };
     allowed.contains(&purpose)
@@ -155,7 +163,12 @@ pub fn role_allows(role: &str, action: &str) -> bool {
     use actions::*;
     use roles::*;
     let allowed: &[&str] = match role {
-        REGISTRATION => &[PATIENT_REGISTER, PATIENT_READ, PATIENT_SEARCH],
+        REGISTRATION => &[
+            PATIENT_REGISTER,
+            PATIENT_READ,
+            PATIENT_SEARCH,
+            TENANT_META_READ,
+        ],
         PHYSICIAN => &[
             PATIENT_SEARCH,
             PATIENT_READ,
@@ -166,19 +179,43 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             LOOP_CLOSE,
             AI_REVIEW,
             WORKLIST_READ,
+            TENANT_META_READ,
         ],
-        NURSE => &[PATIENT_SEARCH, PATIENT_READ, PATIENT_NOTIFY, WORKLIST_READ],
-        LAB => &[RESULT_INGEST, WORKLIST_READ],
-        PHARMACIST => &[PATIENT_SEARCH, PATIENT_READ, WORKLIST_READ],
-        CLINICAL_ADMIN => &[PATIENT_SEARCH, PATIENT_READ, WORKLIST_READ, JOBS_RUN],
+        NURSE => &[
+            PATIENT_SEARCH,
+            PATIENT_READ,
+            PATIENT_NOTIFY,
+            WORKLIST_READ,
+            TENANT_META_READ,
+        ],
+        LAB => &[RESULT_INGEST, WORKLIST_READ, TENANT_META_READ],
+        PHARMACIST => &[
+            PATIENT_SEARCH,
+            PATIENT_READ,
+            WORKLIST_READ,
+            TENANT_META_READ,
+        ],
+        CLINICAL_ADMIN => &[
+            PATIENT_SEARCH,
+            PATIENT_READ,
+            WORKLIST_READ,
+            JOBS_RUN,
+            TENANT_META_READ,
+        ],
         PRIVACY_OFFICER => &[
             AUDIT_READ,
             CONSENT_WRITE,
             BREAK_GLASS_REVIEW,
             SERVICE_CREDENTIAL_MANAGE,
             SERVICE_CREDENTIAL_READ,
+            TENANT_META_READ,
         ],
-        SECURITY_AUDITOR => &[AUDIT_READ, BREAK_GLASS_REVIEW, SERVICE_CREDENTIAL_READ],
+        SECURITY_AUDITOR => &[
+            AUDIT_READ,
+            BREAK_GLASS_REVIEW,
+            SERVICE_CREDENTIAL_READ,
+            TENANT_META_READ,
+        ],
         // Research users have no direct-care access by design.
         RESEARCH => &[],
         PATIENT_REP => &[],

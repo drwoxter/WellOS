@@ -63,6 +63,19 @@ export function csrfCookieOptions(expiresAt?: string) {
   return { ...sessionCookieOptions(expiresAt), httpOnly: false };
 }
 
+/** Bounded 503 returned when the backend API cannot be reached. */
+export function apiUnavailable(): NextResponse {
+  return NextResponse.json(
+    {
+      error: {
+        code: "upstream_unavailable",
+        message: "the service is temporarily unavailable",
+      },
+    },
+    { status: 503 },
+  );
+}
+
 /**
  * Forward a browser request to the backend API, attaching the opaque session
  * identifier from the HttpOnly cookie as the bearer credential. The API
@@ -88,15 +101,20 @@ export async function proxyToApi(
     const value = req.headers.get(name);
     if (value) headers[name] = value;
   }
-  const res = await fetch(`${API_URL}${path}${req.nextUrl.search}`, {
-    method: req.method,
-    headers,
-    body:
-      req.method === "GET" || req.method === "HEAD"
-        ? undefined
-        : await req.text(),
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}${req.nextUrl.search}`, {
+      method: req.method,
+      headers,
+      body:
+        req.method === "GET" || req.method === "HEAD"
+          ? undefined
+          : await req.text(),
+      cache: "no-store",
+    });
+  } catch {
+    return apiUnavailable();
+  }
   const body = await res.text();
   return new NextResponse(body, {
     status: res.status,

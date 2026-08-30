@@ -915,6 +915,32 @@ async fn research_user_has_no_clinical_access() {
 }
 
 #[tokio::test]
+async fn tenant_meta_requires_authorization() {
+    let (state, _) = test_state().await;
+    let (st, _) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    // Roles without tenant metadata access (e.g. research) are denied.
+    let (st, _) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-research.diaz",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn audit_read_restricted_to_privacy_and_security_roles() {
     let (state, _) = test_state().await;
     let ops = [("X-Purpose-Of-Use", "operations")];
