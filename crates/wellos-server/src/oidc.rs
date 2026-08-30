@@ -1,0 +1,193 @@
+//! OIDC discovery and JWKS key management.
+//!
+//! Keys come either from a statically configured JWKS document or from the
+//! issuer's discovery metadata (`/.well-known/openid-configuration`). The
+//! remote path pins the issuer (metadata `issuer` must match the configured
+//! value exactly), requires HTTPS outside local development, caches the JWKS
+//! with a bounded refresh interval, and refreshes early when an unknown `kid`
+//! appears — rate-limited so unknown-kid storms cannot hammer the IdP.
+//! Refresh failures keep the last known good keys; signatures are still fully
+//! validated against them, and unknown keys simply fail authentication.
+
+use jsonwebtoken::jwk::{Jwk, JwkSet};
+use serde::Deserialize;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
+
+/// Signing keys for OIDC token validation.
+#[derive(Clone)]
+pub enum JwksKeys {
+    /// A statically configured JWKS document (no network fetches).
+    Static(JwkSet),
+    /// Keys resolved from issuer discovery metadata and cached.
+    Remote(std::sync::Arc<RemoteJwks>),
+}
+
+impl JwksKeys {
+    /// Find the key for `kid` (or the single key when no `kid` is present).
+    pub async fn find_key(&self, kid: Option<&str>) -> Option<Jwk> {
+        match self {
+            Self::Static(jwks) => select_key(jwks, kid).cloned(),
+            Self::Remote(remote) => remote.find_key(kid).await,
+        }
+    }
+}
+
+fn select_key<'a>(jwks: &'a JwkSet, kid: Option<&str>) -> Option<&'a Jwk> {
+    match kid {
+        Some(kid) => jwks.find(kid),
+        None if jwks.keys.len() == 1 => jwks.keys.first(),
+        None => None,
+    }
+}
+
+#[derive(Deserialize)]
+struct DiscoveryDocument {
+    issuer: String,
+    jwks_uri: String,
+}
+
+struct CachedJwks {
+    jwks: JwkSet,
+    fetched_at: Instant,
+}
+
+struct RemoteState {
+    jwks_uri: Option<String>,
+    cache: Option<CachedJwks>,
+    last_attempt: Option<Instant>,
+}
+
+/// JWKS resolved via OIDC discovery, cached with bounded refresh.
+pub struct RemoteJwks {
+    issuer: String,
+    allow_http: bool,
+    refresh: Duration,
+    min_refresh: Duration,
+    client: reqwest::Client,
+    state: RwLock<RemoteState>,
+}
+
+impl RemoteJwks {
+    pub fn new(
+        issuer: String,
+        allow_http: bool,
+        refresh_secs: u64,
+        min_refresh_secs: u64,
+    ) -> anyhow::Result<Self> {
+        require_safe_url(&issuer, allow_http, "OIDC issuer")?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(Self {
+            issuer,
+            allow_http,
+            refresh: Duration::from_secs(refresh_secs),
+            min_refresh: Duration::from_secs(min_refresh_secs),
+            client,
+            state: RwLock::new(RemoteState {
+                jwks_uri: None,
+                cache: None,
+                last_attempt: None,
+            }),
+        })
+    }
+
+    /// Run discovery and the initial JWKS fetch. Called at startup so a
+    /// misconfigured or unreachable provider aborts startup (fail closed).
+    pub async fn initialize(&self) -> anyhow::Result<()> {
+        let mut state = self.state.write().await;
+        state.last_attempt = Some(Instant::now());
+        self.initialize_locked(&mut state).await
+    }
+
+    async fn fetch_jwks(&self, jwks_uri: &str) -> anyhow::Result<JwkSet> {
+        let jwks: JwkSet = self
+            .client
+            .get(jwks_uri)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(jwks)
+    }
+
+    /// Resolve a key, refreshing the cache when it has expired or when the
+    /// requested `kid` is unknown. Refresh attempts are rate-limited by the
+    /// minimum refresh interval; on failure the last known keys are kept.
+    pub async fn find_key(&self, kid: Option<&str>) -> Option<Jwk> {
+        {
+            let state = self.state.read().await;
+            if let Some(cache) = &state.cache {
+                if cache.fetched_at.elapsed() < self.refresh {
+                    if let Some(key) = select_key(&cache.jwks, kid) {
+                        return Some(key.clone());
+                    }
+                }
+            }
+        }
+        // Cache expired or kid unknown: attempt a bounded refresh.
+        let mut state = self.state.write().await;
+        let may_attempt = state
+            .last_attempt
+            .map(|t| t.elapsed() >= self.min_refresh)
+            .unwrap_or(true);
+        if may_attempt {
+            state.last_attempt = Some(Instant::now());
+            if let Some(jwks_uri) = state.jwks_uri.clone() {
+                if let Ok(jwks) = self.fetch_jwks(&jwks_uri).await {
+                    state.cache = Some(CachedJwks {
+                        jwks,
+                        fetched_at: Instant::now(),
+                    });
+                }
+            } else if self.initialize_locked(&mut state).await.is_err() {
+                tracing::warn!("OIDC JWKS refresh failed; keeping cached keys");
+            }
+        }
+        state
+            .cache
+            .as_ref()
+            .and_then(|c| select_key(&c.jwks, kid))
+            .cloned()
+    }
+
+    async fn initialize_locked(&self, state: &mut RemoteState) -> anyhow::Result<()> {
+        let discovery_url = format!(
+            "{}/.well-known/openid-configuration",
+            self.issuer.trim_end_matches('/')
+        );
+        let doc: DiscoveryDocument = self
+            .client
+            .get(&discovery_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if doc.issuer.trim_end_matches('/') != self.issuer.trim_end_matches('/') {
+            anyhow::bail!("OIDC discovery metadata issuer does not match the configured issuer");
+        }
+        require_safe_url(&doc.jwks_uri, self.allow_http, "OIDC jwks_uri")?;
+        let jwks = self.fetch_jwks(&doc.jwks_uri).await?;
+        state.jwks_uri = Some(doc.jwks_uri);
+        state.cache = Some(CachedJwks {
+            jwks,
+            fetched_at: Instant::now(),
+        });
+        Ok(())
+    }
+}
+
+/// HTTPS is mandatory for identity endpoints outside local development.
+fn require_safe_url(url: &str, allow_http: bool, what: &str) -> anyhow::Result<()> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    if allow_http && url.starts_with("http://") {
+        return Ok(());
+    }
+    anyhow::bail!("{what} must be an https:// URL");
+}

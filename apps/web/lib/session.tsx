@@ -96,18 +96,31 @@ export function useSession(): Session {
   return s;
 }
 
+/** Read the double-submit CSRF token from its JavaScript-readable cookie. */
+function csrfToken(): string | undefined {
+  const match = document.cookie
+    .split("; ")
+    .find((c) => c.startsWith("wellos_csrf="));
+  return match?.slice("wellos_csrf=".length);
+}
+
 /**
- * Call the API through the same-origin BFF proxy. The bearer token lives in
- * an HttpOnly cookie, so it is never readable from browser JavaScript.
+ * Call the API through the same-origin BFF proxy. The opaque session
+ * identifier lives in an HttpOnly cookie (no access token ever reaches
+ * browser JavaScript); state-changing requests echo the CSRF token in the
+ * x-csrf-token header, which the API checks against the session record.
  */
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  const method = init?.method?.toUpperCase() ?? "GET";
+  const csrf = method === "GET" || method === "HEAD" ? undefined : csrfToken();
   const res = await fetch(path, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(csrf ? { "x-csrf-token": csrf } : {}),
       ...(init?.headers ?? {}),
     },
   });

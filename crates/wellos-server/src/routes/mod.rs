@@ -1,11 +1,13 @@
 pub mod admin;
 pub mod ai;
 pub mod consent;
+pub mod creds;
 pub mod encounters;
 pub mod fhir;
 pub mod lab;
 pub mod loops;
 pub mod patients;
+pub mod session;
 
 use crate::audit;
 use crate::auth::AuthContext;
@@ -17,12 +19,32 @@ use axum::http::Method;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/health", get(admin::health))
         .route("/ready", get(admin::ready))
         .route("/api/v1/meta/tenant", get(admin::tenant_meta))
+        .route(
+            "/api/v1/auth/session",
+            post(session::create)
+                .get(session::get)
+                .delete(session::delete),
+        )
+        .route("/api/v1/auth/session/rotate", post(session::rotate))
+        .route(
+            "/api/v1/admin/service-credentials",
+            post(creds::issue).get(creds::list),
+        )
+        .route(
+            "/api/v1/admin/service-credentials/:id/rotate",
+            post(creds::rotate),
+        )
+        .route(
+            "/api/v1/admin/service-credentials/:id/revoke",
+            post(creds::revoke),
+        )
         .route(
             "/api/v1/patients",
             post(patients::register).get(patients::search),
@@ -54,8 +76,35 @@ pub fn router(state: AppState) -> Router {
         .route("/fhir/r4/Patient/:id", get(fhir::patient))
         .route("/fhir/r4/Observation/:id", get(fhir::observation))
         .route("/fhir/r4/ServiceRequest/:id", get(fhir::service_request))
-        .layer(cors_layer())
-        .with_state(state)
+        .layer(cors_layer());
+    // Defense-in-depth response headers for the API surface. The API is
+    // JSON-only, so a restrictive CSP with frame protection is safe
+    // everywhere; HSTS is added outside development.
+    let router = router
+        .layer(header_layer("x-content-type-options", "nosniff"))
+        .layer(header_layer("referrer-policy", "no-referrer"))
+        .layer(header_layer("x-frame-options", "DENY"))
+        .layer(header_layer(
+            "content-security-policy",
+            "default-src 'none'; frame-ancestors 'none'",
+        ));
+    let env = std::env::var("WELLOS_ENV").unwrap_or_else(|_| "development".to_string());
+    let router = if env != "development" {
+        router.layer(header_layer(
+            "strict-transport-security",
+            "max-age=63072000; includeSubDomains",
+        ))
+    } else {
+        router
+    };
+    router.with_state(state)
+}
+
+fn header_layer(name: &'static str, value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(
+        HeaderName::from_static(name),
+        HeaderValue::from_static(value),
+    )
 }
 
 /// Restrict browser callers to an explicit origin allowlist
@@ -70,12 +119,13 @@ fn cors_layer() -> CorsLayer {
         .collect();
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([
             AUTHORIZATION,
             CONTENT_TYPE,
             HeaderName::from_static("x-purpose-of-use"),
             HeaderName::from_static("x-break-glass-reason"),
+            HeaderName::from_static("x-csrf-token"),
         ])
 }
 

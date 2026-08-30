@@ -19,6 +19,9 @@ auditable place.
   effective purpose.
 - Purpose of use is an enum (`treatment`, `operations`, `emergency`,
   `quality`); an asserted purpose can only narrow access, never widen it.
+  Asserting `emergency` for patient search/read additionally requires the
+  dedicated `break_glass_authorized` role, so emergency purpose never
+  grants tenant-wide lookup to ordinary users.
 - Break-glass: requires the dedicated `break_glass_authorized` role,
   `purpose_of_use=emergency`, a bounded reason, a patient-specific
   same-tenant resource; limited to emergency reads; per-user hourly rate
@@ -27,10 +30,18 @@ auditable place.
 - Cross-tenant denials surface as `404` (identical to nonexistent
   resources) to prevent resource-ID probing; the denial is still audited.
 - Identity is resolved server-side: OIDC/OAuth 2.1 JWTs validated against a
-  configured JWKS with the `sub` claim mapped to a local user (tenant/roles
-  come only from the database), hashed scoped `wsk_` service credentials for
-  machines, and development tokens (`dev-<username>`) only when
-  `WELLOS_ENV=development` and `WELLOS_DEV_AUTH=true`.
+  static or discovery-resolved JWKS (issuer-pinned, HTTPS-only, cached with
+  bounded auto-refresh) with the validated `(issuer, sub)` pair mapped to a
+  local user via `user_identities` (tenant/roles come only from the
+  database); optional MFA enforcement from validated `amr`/`acr` claims;
+  hashed scoped `wsk_` service credentials for machines (administered via
+  an audited privacy-officer-only API); opaque hashed `wss_` browser
+  sessions with absolute + inactivity timeouts, rotation, revocation and
+  CSRF double-submit protection; and development tokens (`dev-<username>`)
+  only when `WELLOS_ENV=development` and `WELLOS_DEV_AUTH=true`.
+- Service-credential administration (`service_credential.manage`/`.read`)
+  is restricted to `privacy_officer` (read also `security_auditor`) under
+  the `operations` purpose.
 
 - Role assignments carry an optional `facility_id`, but enforcement today is
   **tenant-wide**: a role grants its actions across the whole tenant.

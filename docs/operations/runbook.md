@@ -24,18 +24,33 @@ plaintext (only a SHA-256 hash is stored) and expires after 90 days.
 - **Local development**: `WELLOS_ENV=development` + `WELLOS_DEV_AUTH=true`
   enable `dev-<username>` tokens for seeded synthetic users. Both are set in
   `.env.example`.
-- **Staging/production**: set `WELLOS_OIDC_ISSUER`, `WELLOS_OIDC_AUDIENCE`,
-  and `WELLOS_OIDC_JWKS_JSON` or `WELLOS_OIDC_JWKS_PATH` (plus optional
-  `WELLOS_OIDC_LEEWAY_SECS`). The server **fails to start** if dev auth is
-  enabled outside development, or if neither dev auth nor OIDC is
-  configured. Provision users by inserting rows with the IdP's stable `sub`
-  in `users.oidc_subject`; roles are assigned in `role_assignments`.
-- **Service credentials** live in `service_credentials`: rotate by inserting
-  a new hashed credential and revoking the old one
-  (`UPDATE service_credentials SET revoked_at = now() WHERE id = ...`).
-  Expiry (`expires_at`) and last use (`last_used_at`) support rotation
-  hygiene. Scopes (e.g. `result.ingest`) bound what the credential can do.
-- **JWKS rotation**: update the configured JWKS (file or env) and restart.
+- **Staging/production**: set `WELLOS_OIDC_ISSUER` and
+  `WELLOS_OIDC_AUDIENCE`, then either a static JWKS
+  (`WELLOS_OIDC_JWKS_JSON`/`WELLOS_OIDC_JWKS_PATH`) or
+  `WELLOS_OIDC_DISCOVERY=true` (issuer metadata fetched at startup,
+  issuer-pinned, HTTPS-only `jwks_uri`; cache tuned with
+  `WELLOS_OIDC_JWKS_REFRESH_SECS` / `WELLOS_OIDC_JWKS_MIN_REFRESH_SECS`).
+  Optional: `WELLOS_OIDC_LEEWAY_SECS`, and MFA policy via
+  `WELLOS_OIDC_REQUIRE_MFA` + `WELLOS_OIDC_ACCEPTED_AMR` /
+  `WELLOS_OIDC_ACCEPTED_ACR`. The server **fails to start** if dev auth is
+  enabled outside development, if neither dev auth nor OIDC is configured,
+  or (outside development) if `DATABASE_URL` or `WELLOS_ALLOWED_ORIGINS`
+  is missing. Provision users by inserting `(issuer, subject)` rows in
+  `user_identities` (legacy `users.oidc_subject` still matches and is
+  migrated lazily); roles are assigned in `role_assignments`.
+- **Service credentials** are administered via the audited
+  privacy-officer API (`purpose=operations`):
+  `POST /api/v1/admin/service-credentials` (issue; plaintext shown once),
+  `GET` (metadata incl. expiry/last use), `POST .../:id/rotate` (revokes
+  old, returns new secret once), `POST .../:id/revoke`. Scopes (e.g.
+  `result.ingest`) bound what the credential can do.
+- **Browser sessions**: opaque `wss_` identifiers stored hashed in
+  `web_sessions`; lifetimes via `WELLOS_SESSION_ABSOLUTE_SECS` (default 8h)
+  and `WELLOS_SESSION_IDLE_SECS` (default 30m). Revoke a session
+  immediately with `UPDATE web_sessions SET revoked_at = now() WHERE ...`.
+- **JWKS rotation**: with discovery enabled, new key IDs are picked up
+  automatically (bounded by the min-refresh interval). With a static JWKS,
+  update the configured JWKS (file or env) and restart.
 - **Break-glass review**: privacy/security roles list pending events at
   `GET /api/v1/break-glass` and record the mandatory review with
   `POST /api/v1/break-glass/:id/review` (purpose `operations` or `quality`).
@@ -62,7 +77,7 @@ Seed is idempotent-ish for demos but intended for empty databases; to reset:
 | --- | --- |
 | `/ready` fails | DB container up? `DATABASE_URL` correct? migrations applied? |
 | Startup fails with auth error | `WELLOS_DEV_AUTH=true` outside development, or no IdP configured — intentional fail-closed behavior |
-| 401 responses | Dev token (`dev-<seeded username>`) with dev auth enabled, a live `wsk_` service credential, or a valid OIDC JWT with a mapped `oidc_subject` |
+| 401 responses | Dev token (`dev-<seeded username>`) with dev auth enabled, a live `wsk_` service credential, a live `wss_` session, or a valid OIDC JWT with a mapped identity (check MFA policy and JWKS freshness too) |
 | 403 responses | Role, scope, or purpose-of-use does not permit the action — see `policy.rs`; denials are audited |
 | 404 for a resource you expect | Nonexistent — or belongs to another tenant (cross-tenant probes are indistinguishable by design) |
 | 409 on transitions | Stale `version` — refetch the service request |

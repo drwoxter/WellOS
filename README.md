@@ -56,17 +56,24 @@ Sign in at http://localhost:3000 with a development token such as
 `dev-privacy.wolf` (privacy officer). Development tokens work only against
 seeded synthetic users and only when `WELLOS_ENV=development` and
 `WELLOS_DEV_AUTH=true` (the server refuses to start with dev auth enabled in
-any other environment). The browser session is held in an HttpOnly cookie by
-the Next.js BFF; tokens are never exposed to browser JavaScript, and signing
-out deletes the session.
+any other environment). On sign-in the Next.js BFF exchanges the credential
+for an opaque server-side session (`wss_`, stored hashed in PostgreSQL with
+absolute + inactivity timeouts, rotation and logout revocation) held in an
+HttpOnly cookie, plus a CSRF cookie for state-changing requests; access
+tokens are never exposed to browser JavaScript, and signing out revokes the
+server-side session.
 
 Production human identity uses OIDC/OAuth 2.1: configure
-`WELLOS_OIDC_ISSUER`, `WELLOS_OIDC_AUDIENCE` and `WELLOS_OIDC_JWKS_JSON` (or
-`_PATH`); the JWT `sub` claim is mapped to a local user, and tenant/roles are
-resolved only from the database. Machines authenticate with hashed, scoped,
-expiring, revocable `wsk_` service credentials (seeded for development,
-printed once by `make seed`). See `SECURITY.md` and
-`docs/operations/runbook.md`.
+`WELLOS_OIDC_ISSUER` and `WELLOS_OIDC_AUDIENCE`, then either a static JWKS
+(`WELLOS_OIDC_JWKS_JSON`/`_PATH`) or OIDC discovery
+(`WELLOS_OIDC_DISCOVERY=true`, with pinned issuer, HTTPS-only JWKS URI, and
+a cached, auto-refreshing key set). The validated `(issuer, sub)` pair maps
+to a local user, optional MFA enforcement reads validated `amr`/`acr`
+claims (`WELLOS_OIDC_REQUIRE_MFA`), and tenant/roles are resolved only from
+the database. Machines authenticate with hashed, scoped, expiring,
+revocable `wsk_` service credentials (seeded for development, printed once
+by `make seed`) administered via `/api/v1/admin/service-credentials`. See
+`SECURITY.md` and `docs/operations/runbook.md`.
 
 ## Tests
 
@@ -79,8 +86,10 @@ make test-integration   # API integration tests (requires running PostgreSQL)
 ## Limitations
 
 - Synthetic data only; no real PHI anywhere (code, fixtures, tests, logs).
-- The OIDC boundary uses statically configured JWKS (no auto-refresh or
-  discovery yet) and no external identity provider is bundled or contacted.
+- No external identity provider is bundled; OIDC discovery/JWKS refresh only
+  contacts the issuer you explicitly configure.
+- Role assignments are enforced tenant-wide, not facility-scoped (documented
+  in SECURITY.md).
 - This remains a development system: no production deployment, compliance or
   clinical claims.
 - The FHIR R4 endpoints are a minimal read-only facade, not a FHIR server.

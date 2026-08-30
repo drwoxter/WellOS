@@ -16,12 +16,24 @@ typed purpose-of-use enforcement; least-privilege break-glass (dedicated
 role, emergency purpose, read-only, rate limited, reviewed); anti-probing
 404s for cross-tenant resources; HttpOnly-cookie BFF browser sessions.
 
+Identity/authorization hardening (phase 2): OIDC discovery with issuer
+pinning, HTTPS-only JWKS resolution, cached auto-refreshing key sets with
+bounded refresh intervals and fail-safe behavior; provider-aware
+`(issuer, sub)` identity mapping with lazy migration from the legacy global
+subject column; configurable MFA enforcement from validated `amr`/`acr`
+claims; opaque hashed server-side browser sessions with absolute +
+inactivity timeouts, rotation, logout revocation and CSRF protection;
+service-credential admin API (issue/list/rotate/revoke, audited, one-time
+secrets); production startup hardening (required `DATABASE_URL` and CORS
+origins outside development) and security response headers; emergency
+purpose gated behind the dedicated break-glass role for patient
+search/read.
+
 ## Next 10 backlog items (priority order)
 
-1. **Identity phase 2**: JWKS auto-refresh/discovery, IdP-driven user
-   provisioning (SCIM), MFA enforcement policy, session inactivity
-   timeouts, service-credential admin API (issue/rotate/revoke without
-   SQL), general per-tenant rate limiting.
+1. **Identity phase 3**: browser OIDC authorization-code + PKCE flow,
+   IdP-driven user provisioning (SCIM), facility-scoped role enforcement,
+   general per-tenant rate limiting.
 2. **PostgreSQL row-level security** as a second tenant-isolation layer, plus
    audit hash-chaining for tamper evidence.
 3. **Outbox dispatcher + NATS JetStream**: publish outbox rows, consumer

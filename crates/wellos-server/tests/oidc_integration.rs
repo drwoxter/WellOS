@@ -13,6 +13,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceExt;
+use wellos_server::oidc::JwksKeys;
 use wellos_server::state::{AppState, AuthConfig, OidcConfig};
 
 const ISSUER: &str = "https://idp.example.test/";
@@ -62,8 +63,11 @@ async fn state_with(dev_auth: bool, jwks_json: Option<&str>) -> AppState {
     let oidc = jwks_json.map(|raw| OidcConfig {
         issuer: ISSUER.to_string(),
         audience: AUDIENCE.to_string(),
-        jwks: serde_json::from_str(raw).unwrap(),
+        keys: JwksKeys::Static(serde_json::from_str(raw).unwrap()),
         leeway_secs: 60,
+        require_mfa: false,
+        accepted_amr: vec!["mfa".into(), "otp".into(), "hwk".into()],
+        accepted_acr: vec!["phrh".into()],
     });
     AppState::with_auth(
         pool,
@@ -71,7 +75,7 @@ async fn state_with(dev_auth: bool, jwks_json: Option<&str>) -> AppState {
         AuthConfig {
             dev_auth_enabled: dev_auth,
             oidc,
-            break_glass_hourly_limit: 5,
+            ..AuthConfig::development()
         },
     )
 }

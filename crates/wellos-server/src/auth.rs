@@ -10,10 +10,16 @@
 //!   principals. Only a one-way SHA-256 hash is stored; credentials carry
 //!   explicit scopes, expiration, and revocation, and never authenticate
 //!   human users.
-//! - OIDC/OAuth 2.1 JWTs: validated against the configured JWKS, issuer,
-//!   audience, expiration, not-before, and issued-at (with bounded clock
-//!   skew). Only the stable `sub` is trusted: tenant, roles, and permissions
-//!   are resolved from the local database, never from client claims.
+//! - `wss_<secret>`: opaque server-side browser sessions issued by
+//!   `/api/v1/auth/session`. Only a hash is stored; sessions carry absolute
+//!   expiration, inactivity timeout, revocation, and a CSRF secret that
+//!   state-changing requests must echo in `x-csrf-token`.
+//! - OIDC/OAuth 2.1 JWTs: validated against the configured keys (static
+//!   JWKS or discovery-resolved, cached, rotating JWKS), issuer, audience,
+//!   expiration, not-before, and issued-at (with bounded clock skew), plus
+//!   an optional MFA (`amr`/`acr`) requirement. Only the stable
+//!   (issuer, `sub`) pair is trusted: tenant, roles, and permissions are
+//!   resolved from the local database, never from client claims.
 //!
 //! The rest of the system depends only on [`AuthContext`], so identity
 //! providers can be swapped without touching domain code.
@@ -24,7 +30,9 @@ use crate::state::{identity_provider_not_configured, AppState, OidcConfig};
 use axum::async_trait;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use axum::http::Method;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -43,6 +51,8 @@ pub struct AuthContext {
     pub purpose_of_use: Purpose,
     /// Break-glass reason, if the caller activated break-glass access.
     pub break_glass_reason: Option<String>,
+    /// Set when the caller authenticated with an opaque browser session.
+    pub web_session_id: Option<Uuid>,
     pub correlation_id: Uuid,
 }
 
@@ -78,6 +88,14 @@ pub fn hash_service_secret(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+/// Generate an opaque high-entropy secret with the given prefix
+/// (`wsk_` for service credentials, `wss_` for browser sessions).
+pub fn generate_secret(prefix: &str) -> String {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    format!("{prefix}{}", hex::encode(bytes))
+}
+
 struct Principal {
     user_id: Uuid,
     tenant_id: Uuid,
@@ -85,6 +103,7 @@ struct Principal {
     display_name: String,
     is_service: bool,
     scopes: Vec<String>,
+    web_session_id: Option<Uuid>,
 }
 
 /// Development human tokens: local development only, humans only.
@@ -112,6 +131,7 @@ async fn dev_principal(state: &AppState, username: &str) -> Result<Principal, Ap
         display_name,
         is_service: false,
         scopes: Vec::new(),
+        web_session_id: None,
     })
 }
 
@@ -176,6 +196,45 @@ async fn service_principal(state: &AppState, token: &str) -> Result<Principal, A
         display_name,
         is_service: true,
         scopes,
+        web_session_id: None,
+    })
+}
+
+/// Opaque browser sessions: hashed lookup with revocation, absolute expiry,
+/// and inactivity timeout, all enforced (and activity recorded) atomically.
+async fn web_session_principal(state: &AppState, token: &str) -> Result<Principal, ApiError> {
+    let hash = hash_service_secret(token);
+    let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "UPDATE web_sessions SET last_seen_at = now()
+         WHERE token_hash = $1
+           AND revoked_at IS NULL
+           AND expires_at > now()
+           AND last_seen_at > now() - make_interval(secs => $2)
+         RETURNING id, tenant_id, user_id",
+    )
+    .bind(&hash)
+    .bind(state.auth.session_idle_secs as f64)
+    .fetch_optional(&state.pool)
+    .await?;
+    let (session_id, tenant_id, user_id) = row.ok_or_else(ApiError::unauthorized)?;
+    let user: Option<(String, String, bool)> =
+        sqlx::query_as("SELECT username, display_name, is_service FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let (username, display_name, is_service) = user.ok_or_else(ApiError::unauthorized)?;
+    // Sessions are issued to humans only.
+    if is_service {
+        return Err(ApiError::unauthorized());
+    }
+    Ok(Principal {
+        user_id,
+        tenant_id,
+        username,
+        display_name,
+        is_service: false,
+        scopes: Vec::new(),
+        web_session_id: Some(session_id),
     })
 }
 
@@ -183,6 +242,8 @@ async fn service_principal(state: &AppState, token: &str) -> Result<Principal, A
 struct OidcClaims {
     sub: String,
     iat: Option<u64>,
+    amr: Option<serde_json::Value>,
+    acr: Option<serde_json::Value>,
 }
 
 /// Asymmetric signature algorithms accepted for OIDC tokens. Symmetric and
@@ -196,19 +257,50 @@ const OIDC_ALGORITHMS: &[Algorithm] = &[
     Algorithm::EdDSA,
 ];
 
-/// OIDC bearer tokens: signature via configured JWKS, then subject mapping.
+/// OIDC bearer tokens: signature via configured keys, then provider-aware
+/// (issuer, subject) mapping to a local identity. The legacy single-provider
+/// `users.oidc_subject` mapping is honored as a fallback and migrated into
+/// `user_identities` on first use.
 async fn oidc_principal(state: &AppState, token: &str) -> Result<Principal, ApiError> {
     let Some(cfg) = &state.auth.oidc else {
         return Err(identity_provider_not_configured());
     };
-    let claims = validate_oidc_token(cfg, token)?;
+    let claims = validate_oidc_token(cfg, token).await?;
     let row: Option<(Uuid, Uuid, String, String, bool)> = sqlx::query_as(
-        "SELECT id, tenant_id, username, display_name, is_service
-         FROM users WHERE oidc_subject = $1",
+        "SELECT u.id, u.tenant_id, u.username, u.display_name, u.is_service
+         FROM user_identities ui JOIN users u ON u.id = ui.user_id
+         WHERE ui.issuer = $1 AND ui.subject = $2",
     )
+    .bind(&cfg.issuer)
     .bind(&claims.sub)
     .fetch_optional(&state.pool)
     .await?;
+    let row = match row {
+        Some(row) => Some(row),
+        None => {
+            let legacy: Option<(Uuid, Uuid, String, String, bool)> = sqlx::query_as(
+                "SELECT id, tenant_id, username, display_name, is_service
+                 FROM users WHERE oidc_subject = $1",
+            )
+            .bind(&claims.sub)
+            .fetch_optional(&state.pool)
+            .await?;
+            if let Some((user_id, ..)) = &legacy {
+                sqlx::query(
+                    "INSERT INTO user_identities (id, user_id, issuer, subject)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (issuer, subject) DO NOTHING",
+                )
+                .bind(Uuid::now_v7())
+                .bind(user_id)
+                .bind(&cfg.issuer)
+                .bind(&claims.sub)
+                .execute(&state.pool)
+                .await?;
+            }
+            legacy
+        }
+    };
     let (user_id, tenant_id, username, display_name, is_service) =
         row.ok_or_else(ApiError::unauthorized)?;
     // OIDC subjects are human identities; machine principals use service
@@ -223,23 +315,48 @@ async fn oidc_principal(state: &AppState, token: &str) -> Result<Principal, ApiE
         display_name,
         is_service: false,
         scopes: Vec::new(),
+        web_session_id: None,
     })
 }
 
-fn validate_oidc_token(cfg: &OidcConfig, token: &str) -> Result<OidcClaims, ApiError> {
+/// MFA policy: an accepted signal must appear in the *validated* `amr`
+/// (array of strings) or `acr` (string) claim. Anything else — missing,
+/// malformed, or unaccepted values — fails closed. Nothing outside the
+/// signed token (headers, roles, email) can satisfy this requirement.
+fn mfa_satisfied(cfg: &OidcConfig, claims: &OidcClaims) -> bool {
+    match &claims.amr {
+        Some(serde_json::Value::Array(items)) => {
+            if !items.iter().all(|v| v.is_string()) {
+                return false;
+            }
+            if items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|m| cfg.accepted_amr.iter().any(|a| a == m))
+            {
+                return true;
+            }
+        }
+        Some(_) => return false,
+        None => {}
+    }
+    match &claims.acr {
+        Some(serde_json::Value::String(acr)) => cfg.accepted_acr.iter().any(|a| a == acr),
+        _ => false,
+    }
+}
+
+async fn validate_oidc_token(cfg: &OidcConfig, token: &str) -> Result<OidcClaims, ApiError> {
     let header = decode_header(token).map_err(|_| ApiError::unauthorized())?;
     if !OIDC_ALGORITHMS.contains(&header.alg) {
         return Err(ApiError::unauthorized());
     }
-    // Select the signing key by `kid` when present, otherwise the single
-    // configured key.
-    let jwk = match &header.kid {
-        Some(kid) => cfg.jwks.find(kid),
-        None if cfg.jwks.keys.len() == 1 => cfg.jwks.keys.first(),
-        None => None,
-    }
-    .ok_or_else(ApiError::unauthorized)?;
-    let key = DecodingKey::from_jwk(jwk).map_err(|_| ApiError::unauthorized())?;
+    let jwk = cfg
+        .keys
+        .find_key(header.kid.as_deref())
+        .await
+        .ok_or_else(ApiError::unauthorized)?;
+    let key = DecodingKey::from_jwk(&jwk).map_err(|_| ApiError::unauthorized())?;
     let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[&cfg.issuer]);
     validation.set_audience(&[&cfg.audience]);
@@ -256,6 +373,9 @@ fn validate_oidc_token(cfg: &OidcConfig, token: &str) -> Result<OidcClaims, ApiE
             return Err(ApiError::unauthorized());
         }
     }
+    if cfg.require_mfa && !mfa_satisfied(cfg, &data.claims) {
+        return Err(ApiError::unauthorized());
+    }
     Ok(data.claims)
 }
 
@@ -269,6 +389,8 @@ pub async fn load_auth(
         dev_principal(state, username).await?
     } else if token.starts_with("wsk_") {
         service_principal(state, token).await?
+    } else if token.starts_with("wss_") {
+        web_session_principal(state, token).await?
     } else if token.split('.').count() == 3 {
         oidc_principal(state, token).await?
     } else {
@@ -289,8 +411,37 @@ pub async fn load_auth(
         scopes: principal.scopes,
         purpose_of_use: validate_purpose(purpose_of_use)?,
         break_glass_reason,
+        web_session_id: principal.web_session_id,
         correlation_id: Uuid::now_v7(),
     })
+}
+
+/// CSRF enforcement for browser sessions: state-changing requests must echo
+/// the session's CSRF secret in `x-csrf-token`. Bearer credentials
+/// (dev/service/OIDC) are not cookie-attached, so they are not CSRF-exposed.
+async fn enforce_csrf(
+    state: &AppState,
+    session_id: Uuid,
+    method: &Method,
+    csrf_token: Option<&str>,
+) -> Result<(), ApiError> {
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return Ok(());
+    }
+    let Some(csrf_token) = csrf_token else {
+        return Err(ApiError::forbidden("missing x-csrf-token".to_string()));
+    };
+    let hash = hash_service_secret(csrf_token);
+    let row: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM web_sessions WHERE id = $1 AND csrf_hash = $2")
+            .bind(session_id)
+            .bind(&hash)
+            .fetch_optional(&state.pool)
+            .await?;
+    if row.is_none() {
+        return Err(ApiError::forbidden("invalid x-csrf-token".to_string()));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -320,6 +471,14 @@ impl FromRequestParts<AppState> for AuthContext {
             .and_then(|v| v.to_str().ok())
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string());
-        load_auth(state, token, purpose, break_glass).await
+        let ctx = load_auth(state, token, purpose, break_glass).await?;
+        if let Some(session_id) = ctx.web_session_id {
+            let csrf = parts
+                .headers
+                .get("x-csrf-token")
+                .and_then(|v| v.to_str().ok());
+            enforce_csrf(state, session_id, &parts.method, csrf).await?;
+        }
+        Ok(ctx)
     }
 }

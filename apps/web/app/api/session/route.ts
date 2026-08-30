@@ -1,17 +1,35 @@
 import { NextRequest, NextResponse } from "next/server";
-import { API_URL, SESSION_COOKIE, sessionCookieOptions } from "@/lib/bff";
+import {
+  API_URL,
+  CSRF_COOKIE,
+  SESSION_COOKIE,
+  csrfCookieOptions,
+  sessionCookieOptions,
+} from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
 
-/** Whether a server-side session exists. Never exposes the token itself. */
+/**
+ * Validate the server-side session (hash match, revocation, absolute expiry,
+ * inactivity) rather than merely checking cookie presence.
+ */
 export async function GET(req: NextRequest) {
-  const authenticated = Boolean(req.cookies.get(SESSION_COOKIE)?.value);
-  return NextResponse.json({ authenticated });
+  const session = req.cookies.get(SESSION_COOKIE)?.value;
+  if (!session) {
+    return NextResponse.json({ authenticated: false });
+  }
+  const res = await fetch(`${API_URL}/api/v1/auth/session`, {
+    headers: { Authorization: `Bearer ${session}` },
+    cache: "no-store",
+  });
+  return NextResponse.json({ authenticated: res.ok });
 }
 
 /**
- * Establish a session: validate the submitted credential against the API,
- * then store it only in an HttpOnly cookie.
+ * Sign in: exchange the submitted credential for a fresh opaque server-side
+ * session. Only the random session identifier and the CSRF token are stored
+ * as cookies; the credential itself is never persisted. Any prior session is
+ * revoked first (fixation protection).
  */
 export async function POST(req: NextRequest) {
   let token: unknown;
@@ -30,8 +48,16 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const res = await fetch(`${API_URL}/api/v1/meta/tenant`, {
-    headers: { Authorization: `Bearer ${token}` },
+  const previous = req.cookies.get(SESSION_COOKIE)?.value;
+  if (previous) {
+    await revokeSession(previous, req.cookies.get(CSRF_COOKIE)?.value);
+  }
+  const res = await fetch(`${API_URL}/api/v1/auth/session`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
     cache: "no-store",
   });
   if (!res.ok) {
@@ -41,17 +67,50 @@ export async function POST(req: NextRequest) {
       headers: { "Content-Type": "application/json" },
     });
   }
+  const session = (await res.json()) as {
+    session_token: string;
+    csrf_token: string;
+  };
   const response = NextResponse.json({ authenticated: true });
-  response.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
+  response.cookies.set(
+    SESSION_COOKIE,
+    session.session_token,
+    sessionCookieOptions(),
+  );
+  response.cookies.set(CSRF_COOKIE, session.csrf_token, csrfCookieOptions());
   return response;
 }
 
-/** Sign out: remove the session cookie. */
-export async function DELETE() {
+/** Sign out: revoke the server-side session and remove both cookies. */
+export async function DELETE(req: NextRequest) {
+  const session = req.cookies.get(SESSION_COOKIE)?.value;
+  if (session) {
+    await revokeSession(session, req.cookies.get(CSRF_COOKIE)?.value);
+  }
   const response = NextResponse.json({ authenticated: false });
   response.cookies.set(SESSION_COOKIE, "", {
     ...sessionCookieOptions(),
     maxAge: 0,
   });
+  response.cookies.set(CSRF_COOKIE, "", {
+    ...csrfCookieOptions(),
+    maxAge: 0,
+  });
   return response;
+}
+
+async function revokeSession(session: string, csrf: string | undefined) {
+  try {
+    await fetch(`${API_URL}/api/v1/auth/session`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${session}`,
+        ...(csrf ? { "x-csrf-token": csrf } : {}),
+      },
+      cache: "no-store",
+    });
+  } catch {
+    // Revocation is best-effort here; expired/invalid sessions are already
+    // unusable server-side.
+  }
 }

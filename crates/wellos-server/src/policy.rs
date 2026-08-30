@@ -59,6 +59,33 @@ pub mod actions {
     pub const WORKLIST_READ: &str = "worklist.read";
     pub const JOBS_RUN: &str = "jobs.run";
     pub const BREAK_GLASS_REVIEW: &str = "break_glass.review";
+    pub const SERVICE_CREDENTIAL_MANAGE: &str = "service_credential.manage";
+    pub const SERVICE_CREDENTIAL_READ: &str = "service_credential.read";
+
+    pub const ALL: &[&str] = &[
+        PATIENT_REGISTER,
+        PATIENT_READ,
+        PATIENT_SEARCH,
+        ENCOUNTER_START,
+        SERVICE_REQUEST_CREATE,
+        RESULT_INGEST,
+        RESULT_REVIEW,
+        PATIENT_NOTIFY,
+        LOOP_CLOSE,
+        AI_REVIEW,
+        AUDIT_READ,
+        CONSENT_WRITE,
+        WORKLIST_READ,
+        JOBS_RUN,
+        BREAK_GLASS_REVIEW,
+        SERVICE_CREDENTIAL_MANAGE,
+        SERVICE_CREDENTIAL_READ,
+    ];
+
+    /// Whether `s` names a known action (used to validate service scopes).
+    pub fn is_known_action(s: &str) -> bool {
+        ALL.contains(&s)
+    }
 }
 
 /// Action-to-purpose matrix: which asserted purposes may authorize each
@@ -83,6 +110,7 @@ pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
         WORKLIST_READ => &[Purpose::Treatment, Purpose::Operations, Purpose::Quality],
         JOBS_RUN => &[Purpose::Operations],
         BREAK_GLASS_REVIEW => &[Purpose::Operations, Purpose::Quality],
+        SERVICE_CREDENTIAL_MANAGE | SERVICE_CREDENTIAL_READ => &[Purpose::Operations],
         _ => &[],
     };
     allowed.contains(&purpose)
@@ -143,8 +171,14 @@ pub fn role_allows(role: &str, action: &str) -> bool {
         LAB => &[RESULT_INGEST, WORKLIST_READ],
         PHARMACIST => &[PATIENT_SEARCH, PATIENT_READ, WORKLIST_READ],
         CLINICAL_ADMIN => &[PATIENT_SEARCH, PATIENT_READ, WORKLIST_READ, JOBS_RUN],
-        PRIVACY_OFFICER => &[AUDIT_READ, CONSENT_WRITE, BREAK_GLASS_REVIEW],
-        SECURITY_AUDITOR => &[AUDIT_READ, BREAK_GLASS_REVIEW],
+        PRIVACY_OFFICER => &[
+            AUDIT_READ,
+            CONSENT_WRITE,
+            BREAK_GLASS_REVIEW,
+            SERVICE_CREDENTIAL_MANAGE,
+            SERVICE_CREDENTIAL_READ,
+        ],
+        SECURITY_AUDITOR => &[AUDIT_READ, BREAK_GLASS_REVIEW, SERVICE_CREDENTIAL_READ],
         // Research users have no direct-care access by design.
         RESEARCH => &[],
         PATIENT_REP => &[],
@@ -226,6 +260,21 @@ pub async fn authorize_with_limit(
                 "purpose_not_permitted:{}:{action}",
                 ctx.purpose_of_use.as_str()
             ),
+            used_break_glass: false,
+        });
+    }
+
+    // Emergency purpose never grants broad tenant-wide search to ordinary
+    // users: emergency lookup requires the dedicated break-glass role, and
+    // subsequent chart access still passes through the full break-glass path
+    // (patient-specific, same-tenant, read-only, rate-limited, reviewed).
+    if ctx.purpose_of_use == Purpose::Emergency
+        && matches!(action, actions::PATIENT_SEARCH | actions::PATIENT_READ)
+        && !ctx.has_role(roles::BREAK_GLASS_AUTHORIZED)
+    {
+        return Ok(Decision {
+            allowed: false,
+            reason: "emergency_requires_break_glass_role".into(),
             used_break_glass: false,
         });
     }
@@ -383,6 +432,39 @@ mod tests {
     fn dmind_agent_cannot_ingest_results() {
         assert!(!role_allows(roles::DMIND_SERVICE, actions::RESULT_INGEST));
         assert!(role_allows(roles::LAB_INTERFACE, actions::RESULT_INGEST));
+    }
+
+    #[test]
+    fn only_privacy_officer_manages_service_credentials() {
+        for role in roles::ALL {
+            let expected = *role == roles::PRIVACY_OFFICER;
+            assert_eq!(
+                role_allows(role, actions::SERVICE_CREDENTIAL_MANAGE),
+                expected,
+                "{role}"
+            );
+        }
+        assert!(role_allows(
+            roles::SECURITY_AUDITOR,
+            actions::SERVICE_CREDENTIAL_READ
+        ));
+    }
+
+    #[test]
+    fn service_credential_actions_require_operations_purpose() {
+        assert!(purpose_allows(
+            Purpose::Operations,
+            actions::SERVICE_CREDENTIAL_MANAGE
+        ));
+        for p in [Purpose::Treatment, Purpose::Emergency, Purpose::Quality] {
+            assert!(!purpose_allows(p, actions::SERVICE_CREDENTIAL_MANAGE));
+        }
+    }
+
+    #[test]
+    fn every_action_is_known() {
+        assert!(actions::is_known_action(actions::RESULT_INGEST));
+        assert!(!actions::is_known_action("no.such.action"));
     }
 
     #[test]
