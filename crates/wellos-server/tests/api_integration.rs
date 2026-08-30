@@ -986,3 +986,55 @@ async fn unknown_purpose_of_use_is_rejected() {
     assert_eq!(st, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_purpose_of_use");
 }
+
+#[tokio::test]
+async fn service_tokens_authenticate_machine_identities() {
+    let (state, _) = test_state().await;
+    let sr_id = create_order(&state).await;
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        "svc-svc.lab-adapter",
+        Some(json!({
+            "service_request_id": sr_id,
+            "code_loinc": "2823-3",
+            "value": 4.1,
+            "unit": "mmol/L",
+            "source_system": "fake-lab",
+            "idempotency_key": uniq("svc-token"),
+            "effective_at": chrono::Utc::now(),
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+
+    // The svc- prefix never authenticates human users.
+    let (st, _) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist",
+        "svc-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn patient_search_query_length_is_bounded() {
+    let (state, _) = test_state().await;
+    let (st, body) = call(
+        &state,
+        "GET",
+        "/api/v1/patients?query=a",
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "validation_failed");
+}

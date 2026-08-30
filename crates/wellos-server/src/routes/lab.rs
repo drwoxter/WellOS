@@ -48,7 +48,9 @@ async fn find_duplicate(
     body: &InboundResult,
 ) -> Result<Option<Value>, ApiError> {
     let row = sqlx::query(
-        "SELECT id, service_request_id, code_loinc, value_num, unit FROM observations
+        "SELECT id, service_request_id, code_loinc, value_num, unit, reference_range,
+                source_system, effective_at, amends
+         FROM observations
          WHERE tenant_id = $1 AND idempotency_key = $2",
     )
     .bind(tenant_id)
@@ -59,7 +61,13 @@ async fn find_duplicate(
     let same_delivery = r.get::<Uuid, _>("service_request_id") == body.service_request_id
         && r.get::<String, _>("code_loinc") == body.code_loinc
         && r.get::<Decimal, _>("value_num") == body.value
-        && r.get::<String, _>("unit") == body.unit;
+        && r.get::<String, _>("unit") == body.unit
+        && r.get::<Option<String>, _>("reference_range") == body.reference_range
+        && r.get::<String, _>("source_system") == body.source_system
+        // Postgres stores microsecond precision; compare within that grain.
+        && (r.get::<DateTime<Utc>, _>("effective_at") - body.effective_at).abs()
+            <= chrono::Duration::microseconds(1)
+        && r.get::<Option<Uuid>, _>("amends") == body.amends_observation_id;
     if !same_delivery {
         return Err(ApiError::conflict(
             "idempotency_key_reuse",
@@ -373,8 +381,11 @@ pub async fn ingest_result(
 
     tx.commit().await?;
 
-    // Post-commit AI generation (asynchronous relative to the clinical record).
-    generate_summary(
+    // Post-commit AI generation (asynchronous relative to the clinical
+    // record). The clinical result is already committed, so generation
+    // failures never fail the ingestion response; the artifact stays in a
+    // recoverable non-final state instead.
+    if let Err(e) = generate_summary(
         &state,
         &ctx,
         artifact_id,
@@ -385,7 +396,10 @@ pub async fn ingest_result(
         critical,
         unit_mismatch,
     )
-    .await?;
+    .await
+    {
+        tracing::warn!(%artifact_id, error = ?e, "post-commit ai summary generation failed");
+    }
 
     Ok(Json(json!({
         "observation_id": obs_id,

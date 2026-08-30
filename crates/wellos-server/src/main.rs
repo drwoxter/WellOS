@@ -12,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://wellos:wellos_dev@localhost:5432/wellos".into());
-    let bind_addr = std::env::var("WELLOS_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let bind_addr = std::env::var("WELLOS_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
 
     let pool = wellos_server::connect_pool(&database_url).await?;
     wellos_server::run_migrations(&pool).await?;

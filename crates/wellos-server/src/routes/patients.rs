@@ -132,7 +132,14 @@ pub async fn search(
     .await?
     .record_on_pool(&state, &ctx)
     .await?;
-    let like = format!("%{}%", params.query);
+    let query = params.query.trim();
+    if query.len() < 2 || query.len() > 64 {
+        return Err(ApiError::bad_request(
+            "validation_failed",
+            "query must be between 2 and 64 characters",
+        ));
+    }
+    let like = format!("%{query}%");
     let rows = sqlx::query(
         "SELECT id, family_name, given_name, birth_date, sex, identifier
          FROM patients

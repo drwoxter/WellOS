@@ -59,9 +59,16 @@ pub async fn load_auth(
     purpose_of_use: Option<String>,
     break_glass_reason: Option<String>,
 ) -> Result<AuthContext, ApiError> {
-    let username = token
-        .strip_prefix("dev-")
-        .ok_or_else(ApiError::unauthorized)?;
+    // Two development token prefixes: `dev-` for interactive human users,
+    // `svc-` for machine identities. Neither authenticates the other kind of
+    // principal; real deployments replace both (see ADR-0006).
+    let (username, service_token) = if let Some(u) = token.strip_prefix("dev-") {
+        (u, false)
+    } else if let Some(u) = token.strip_prefix("svc-") {
+        (u, true)
+    } else {
+        return Err(ApiError::unauthorized());
+    };
     let row: Option<(Uuid, Uuid, String, String, bool)> = sqlx::query_as(
         "SELECT id, tenant_id, username, display_name, is_service FROM users WHERE username = $1",
     )
@@ -70,9 +77,7 @@ pub async fn load_auth(
     .await?;
     let (user_id, tenant_id, username, display_name, is_service) =
         row.ok_or_else(ApiError::unauthorized)?;
-    // Interactive dev tokens never authenticate service principals; machine
-    // identities require their own credential mechanism (see ADR-0006).
-    if is_service {
+    if is_service != service_token {
         return Err(ApiError::unauthorized());
     }
     let roles: Vec<(String,)> =
