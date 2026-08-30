@@ -70,6 +70,69 @@ fn uniq(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::now_v7().simple())
 }
 
+/// Create a fresh emergency clinician (physician + break_glass_authorized)
+/// so per-user break-glass rate limits never leak between tests or runs.
+async fn create_emergency_user(state: &AppState) -> String {
+    let username = uniq("dr.em");
+    let (tenant_id, facility_id): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+        "SELECT u.tenant_id, f.id FROM users u\n         JOIN facilities f ON f.tenant_id = u.tenant_id\n         WHERE u.username = 'dr.garcia' LIMIT 1",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    let uid = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, username, display_name) VALUES ($1,$2,$3,'Emergency Test Clinician')",
+    )
+    .bind(uid)
+    .bind(tenant_id)
+    .bind(&username)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    for role in ["physician", "break_glass_authorized"] {
+        sqlx::query(
+            "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id) VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(tenant_id)
+        .bind(uid)
+        .bind(role)
+        .bind(facility_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    }
+    username
+}
+
+/// Issue a service credential for the seeded lab-adapter machine principal.
+async fn issue_service_credential(
+    state: &AppState,
+    scopes: &[&str],
+    expires_interval: Option<&str>,
+) -> String {
+    let token = wellos_server::seeddata::generate_service_secret();
+    let (uid, tid): (uuid::Uuid, uuid::Uuid) =
+        sqlx::query_as("SELECT id, tenant_id FROM users WHERE username = 'svc.lab-adapter'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO service_credentials (id, tenant_id, user_id, name, token_hash, scopes, expires_at)\n         VALUES ($1,$2,$3,'integration test',$4,$5,\n                 CASE WHEN $6::text IS NULL THEN NULL ELSE now() + $6::interval END)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tid)
+    .bind(uid)
+    .bind(wellos_server::auth::hash_service_secret(&token))
+    .bind(scopes.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    .bind(expires_interval)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    token
+}
+
 struct Loop {
     service_request_id: String,
     observation_id: String,
@@ -333,7 +396,7 @@ async fn cross_tenant_access_is_denied_even_with_break_glass() {
         &[],
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(st, StatusCode::NOT_FOUND);
 
     let (st, _) = call(
         &state,
@@ -341,10 +404,26 @@ async fn cross_tenant_access_is_denied_even_with_break_glass() {
         &format!("/api/v1/patients/{patient_id}"),
         "dev-dr.sur",
         None,
-        &[("X-Break-Glass-Reason", "attempted cross-tenant")],
+        &[
+            ("X-Break-Glass-Reason", "attempted cross-tenant access"),
+            ("X-Purpose-Of-Use", "emergency"),
+        ],
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
+    // Cross-tenant probes are indistinguishable from nonexistent resources.
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // Nonexistent resources return the same shape, so IDs are not probeable.
+    let (st, _) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{}", uuid::Uuid::now_v7()),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -365,8 +444,8 @@ async fn break_glass_same_tenant_requires_reason_and_is_audited() {
         .unwrap()
         .to_string();
 
-    // dr.lopez has no care relationship with this patient: denied without
-    // break-glass, permitted with a reason.
+    // dr.lopez has no care relationship and is not break-glass authorized:
+    // denied with or without an asserted emergency.
     let (st, _) = call(
         &state,
         "GET",
@@ -384,7 +463,61 @@ async fn break_glass_same_tenant_requires_reason_and_is_audited() {
         &format!("/api/v1/patients/{patient_id}"),
         "dev-dr.lopez",
         None,
-        &[("X-Break-Glass-Reason", "emergency coverage")],
+        &[
+            ("X-Break-Glass-Reason", "emergency department coverage"),
+            ("X-Purpose-Of-Use", "emergency"),
+        ],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // An authorized emergency clinician must also assert the emergency
+    // purpose and give a substantive reason.
+    let emergency = create_emergency_user(&state).await;
+    let em_token = format!("dev-{emergency}");
+    let (st, _) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{patient_id}"),
+        &em_token,
+        None,
+        &[("X-Break-Glass-Reason", "emergency department coverage")],
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "treatment purpose must not grant break-glass"
+    );
+
+    let (st, _) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{patient_id}"),
+        &em_token,
+        None,
+        &[
+            ("X-Break-Glass-Reason", "er"),
+            ("X-Purpose-Of-Use", "emergency"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "too-short reason must be rejected"
+    );
+
+    let (st, _) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{patient_id}"),
+        &em_token,
+        None,
+        &[
+            ("X-Break-Glass-Reason", "emergency department coverage"),
+            ("X-Purpose-Of-Use", "emergency"),
+        ],
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -395,16 +528,130 @@ async fn break_glass_same_tenant_requires_reason_and_is_audited() {
         "/api/v1/audit?limit=50",
         "dev-privacy.wolf",
         None,
-        &[],
+        &[("X-Purpose-Of-Use", "operations")],
     )
     .await;
     assert_eq!(st, StatusCode::OK);
     let events = audit["events"].as_array().unwrap();
     assert!(events.iter().any(|e| {
-        e["actor"] == "user:dr.lopez"
+        e["actor"] == Value::String(format!("user:{emergency}"))
             && e["break_glass"] == true
             && e["resource_id"] == Value::String(patient_id.clone())
     }));
+    // Denied attempts are audited too.
+    assert!(events.iter().any(|e| {
+        e["actor"] == "user:dr.lopez"
+            && e["decision"] == "deny"
+            && e["reason"] == "break_glass_not_authorized"
+    }));
+}
+
+#[tokio::test]
+async fn break_glass_is_rate_limited_and_reviewable() {
+    let (state, _) = test_state().await;
+    let mut limited = state.clone();
+    limited.auth = Arc::new(wellos_server::state::AuthConfig {
+        break_glass_hourly_limit: 1,
+        ..wellos_server::state::AuthConfig::development()
+    });
+    let lp = run_to_received(&limited, 4.0).await;
+    let (_, detail) = call(
+        &limited,
+        "GET",
+        &format!("/api/v1/service-requests/{}", lp.service_request_id),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    let patient_id = detail["service_request"]["patient"]["id"].as_str().unwrap();
+    let emergency = create_emergency_user(&limited).await;
+    let em_token = format!("dev-{emergency}");
+    let headers = [
+        ("X-Break-Glass-Reason", "emergency department coverage"),
+        ("X-Purpose-Of-Use", "emergency"),
+    ];
+    let (st, _) = call(
+        &limited,
+        "GET",
+        &format!("/api/v1/patients/{patient_id}"),
+        &em_token,
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = call(
+        &limited,
+        "GET",
+        &format!("/api/v1/patients/{patient_id}"),
+        &em_token,
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "per-user hourly limit must apply"
+    );
+
+    // Privacy officer reviews the pending event exactly once.
+    let (st, list) = call(
+        &limited,
+        "GET",
+        "/api/v1/break-glass",
+        "dev-privacy.wolf",
+        None,
+        &[("X-Purpose-Of-Use", "operations")],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{list}");
+    let event = list["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["actor"] == Value::String(emergency.clone()))
+        .expect("break-glass event listed")
+        .clone();
+    assert_eq!(event["review_status"], "pending");
+    let event_id = event["id"].as_str().unwrap();
+
+    // Physicians cannot review break-glass events.
+    let (st, _) = call(
+        &limited,
+        "POST",
+        &format!("/api/v1/break-glass/{event_id}/review"),
+        "dev-dr.garcia",
+        Some(json!({ "note": "self review attempt" })),
+        &[("X-Purpose-Of-Use", "operations")],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    let (st, reviewed) = call(
+        &limited,
+        "POST",
+        &format!("/api/v1/break-glass/{event_id}/review"),
+        "dev-privacy.wolf",
+        Some(json!({ "note": "validated with ED charge nurse" })),
+        &[("X-Purpose-Of-Use", "operations")],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{reviewed}");
+    assert_eq!(reviewed["review_status"], "reviewed");
+
+    // Review is once-only: the event itself stays immutable.
+    let (st, _) = call(
+        &limited,
+        "POST",
+        &format!("/api/v1/break-glass/{event_id}/review"),
+        "dev-privacy.wolf",
+        Some(json!({ "note": "second review" })),
+        &[("X-Purpose-Of-Use", "operations")],
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -557,10 +804,73 @@ async fn research_user_has_no_clinical_access() {
 #[tokio::test]
 async fn audit_read_restricted_to_privacy_and_security_roles() {
     let (state, _) = test_state().await;
-    let (st, _) = call(&state, "GET", "/api/v1/audit", "dev-dr.garcia", None, &[]).await;
+    let ops = [("X-Purpose-Of-Use", "operations")];
+    let (st, _) = call(&state, "GET", "/api/v1/audit", "dev-dr.garcia", None, &ops).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
-    let (st, _) = call(&state, "GET", "/api/v1/audit", "dev-audit.stone", None, &[]).await;
+    let (st, _) = call(
+        &state,
+        "GET",
+        "/api/v1/audit",
+        "dev-audit.stone",
+        None,
+        &ops,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn purpose_of_use_is_enforced_per_action() {
+    let (state, _) = test_state().await;
+    // Audit reads are operations/quality context, never treatment.
+    let (st, _) = call(&state, "GET", "/api/v1/audit", "dev-audit.stone", None, &[]).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "treatment purpose must not read audit"
+    );
+    let (st, _) = call(
+        &state,
+        "GET",
+        "/api/v1/audit",
+        "dev-audit.stone",
+        None,
+        &[("X-Purpose-Of-Use", "quality")],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    // Clinical writes require treatment context: an asserted emergency or
+    // operations purpose never widens access to them.
+    let sr_id = create_order(&state).await;
+    for purpose in ["emergency", "operations", "quality"] {
+        let (st, _) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/service-requests/{sr_id}/review"),
+            "dev-dr.garcia",
+            Some(json!({ "version": 1, "note": "purpose test" })),
+            &[("X-Purpose-Of-Use", purpose)],
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "purpose {purpose} must not review"
+        );
+    }
+    // Worklist reads are valid in treatment, operations and quality context.
+    for purpose in ["treatment", "quality"] {
+        let (st, _) = call(
+            &state,
+            "GET",
+            "/api/v1/worklist",
+            "dev-dr.garcia",
+            None,
+            &[("X-Purpose-Of-Use", purpose)],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "purpose {purpose} must read worklist");
+    }
 }
 
 #[tokio::test]
@@ -956,19 +1266,32 @@ async fn idempotency_key_reuse_with_different_payload_conflicts() {
 }
 
 #[tokio::test]
-async fn break_glass_cannot_close_loops_without_relationship() {
+async fn break_glass_cannot_mutate_clinical_state() {
     let (state, _) = test_state().await;
     let lp = run_to_received(&state, 7.2).await;
-    let (st, _) = call(
-        &state,
-        "POST",
-        &format!("/api/v1/service-requests/{}/review", lp.service_request_id),
-        "dev-dr.lopez",
-        Some(json!({ "version": lp.version, "note": "attempted via break-glass" })),
-        &[("x-break-glass-reason", "emergency coverage")],
-    )
-    .await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
+    let emergency = create_emergency_user(&state).await;
+    let em_token = format!("dev-{emergency}");
+    // Even a fully authorized emergency user cannot use break-glass for
+    // consequential transitions: review, notify, close.
+    for path in ["review", "notify", "close"] {
+        let (st, _) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/service-requests/{}/{path}", lp.service_request_id),
+            &em_token,
+            Some(json!({ "version": lp.version, "note": "attempted via break-glass", "method": "phone", "disposition": "repeat_test" })),
+            &[
+                ("x-break-glass-reason", "emergency department coverage"),
+                ("x-purpose-of-use", "emergency"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "break-glass must not allow {path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -987,35 +1310,118 @@ async fn unknown_purpose_of_use_is_rejected() {
     assert_eq!(body["error"]["code"], "invalid_purpose_of_use");
 }
 
+fn ingest_payload(sr_id: &str) -> Value {
+    json!({
+        "service_request_id": sr_id,
+        "code_loinc": "2823-3",
+        "value": 4.1,
+        "unit": "mmol/L",
+        "source_system": "fake-lab",
+        "idempotency_key": uniq("svc-cred"),
+        "effective_at": chrono::Utc::now(),
+    })
+}
+
 #[tokio::test]
-async fn service_tokens_authenticate_machine_identities() {
+async fn service_credentials_authenticate_machine_identities() {
     let (state, _) = test_state().await;
     let sr_id = create_order(&state).await;
+    let token = issue_service_credential(&state, &["result.ingest"], Some("1 hour")).await;
     let (st, body) = call(
         &state,
         "POST",
         "/api/v1/lab/results",
-        "svc-svc.lab-adapter",
-        Some(json!({
-            "service_request_id": sr_id,
-            "code_loinc": "2823-3",
-            "value": 4.1,
-            "unit": "mmol/L",
-            "source_system": "fake-lab",
-            "idempotency_key": uniq("svc-token"),
-            "effective_at": chrono::Utc::now(),
-        })),
+        &token,
+        Some(ingest_payload(&sr_id)),
         &[],
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{body}");
 
-    // The svc- prefix never authenticates human users.
+    // Usage metadata is recorded.
+    let (last_used,): (Option<chrono::DateTime<chrono::Utc>>,) =
+        sqlx::query_as("SELECT last_used_at FROM service_credentials WHERE token_hash = $1")
+            .bind(wellos_server::auth::hash_service_secret(&token))
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert!(last_used.is_some());
+
+    // The legacy predictable svc-<username> mechanism no longer authenticates.
+    let (st, _) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        "svc-svc.lab-adapter",
+        Some(ingest_payload(&sr_id)),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn service_credentials_enforce_scope_expiry_revocation_and_shape() {
+    let (state, _) = test_state().await;
+    let sr_id = create_order(&state).await;
+
+    // Wrong scope: authenticated but denied by policy.
+    let wrong_scope = issue_service_credential(&state, &["worklist.read"], None).await;
+    let (st, _) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        &wrong_scope,
+        Some(ingest_payload(&sr_id)),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Expired.
+    let expired = issue_service_credential(&state, &["result.ingest"], Some("-1 hour")).await;
+    let (st, _) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        &expired,
+        Some(ingest_payload(&sr_id)),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // Revoked.
+    let revoked = issue_service_credential(&state, &["result.ingest"], None).await;
+    sqlx::query("UPDATE service_credentials SET revoked_at = now() WHERE token_hash = $1")
+        .bind(wellos_server::auth::hash_service_secret(&revoked))
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (st, _) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        &revoked,
+        Some(ingest_payload(&sr_id)),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // Malformed / unknown secrets.
+    for bad in ["wsk_", "wsk_notahexsecret", "wsk_0000000000000000"] {
+        let (st, _) = call(&state, "GET", "/api/v1/worklist", bad, None, &[]).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "token {bad}");
+    }
+
+    // Service credentials never authenticate human users and human dev
+    // tokens never authenticate machine principals.
     let (st, _) = call(
         &state,
         "GET",
         "/api/v1/worklist",
-        "svc-dr.garcia",
+        "dev-svc.lab-adapter",
         None,
         &[],
     )

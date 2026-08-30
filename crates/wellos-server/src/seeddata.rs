@@ -1,6 +1,7 @@
 //! Synthetic development seed data. All names, identifiers, and clinical
 //! values are clearly synthetic. No real PHI anywhere.
 
+use rand::RngCore;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -11,6 +12,17 @@ pub struct Seeded {
     pub facility_b: Uuid,
     pub patient_a: Uuid,
     pub patient_b: Uuid,
+    /// Development-only lab-adapter service credential (random per seed run;
+    /// only its hash is stored). Real deployments issue credentials through
+    /// an operational process, never through seeding.
+    pub lab_adapter_token: String,
+}
+
+/// Generate a random high-entropy service credential (256 bits).
+pub fn generate_service_secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    format!("wsk_{}", hex::encode(bytes))
 }
 
 pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
@@ -132,16 +144,24 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
             true,
         ),
     ];
+    let mut lab_adapter_id = None;
     for (username, display, role, is_service) in users {
         let uid = Uuid::now_v7();
+        if *username == "svc.lab-adapter" {
+            lab_adapter_id = Some(uid);
+        }
+        // Human users get a synthetic OIDC subject mapping so the local
+        // identity record can be resolved from a validated token's `sub`.
+        let oidc_subject = (!is_service).then(|| format!("synthetic|{username}"));
         sqlx::query(
-            "INSERT INTO users (id, tenant_id, username, display_name, is_service) VALUES ($1,$2,$3,$4,$5)",
+            "INSERT INTO users (id, tenant_id, username, display_name, is_service, oidc_subject) VALUES ($1,$2,$3,$4,$5,$6)",
         )
         .bind(uid)
         .bind(tenant_a)
         .bind(username)
         .bind(display)
         .bind(is_service)
+        .bind(oidc_subject)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -155,6 +175,44 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
         .execute(&mut *tx)
         .await?;
     }
+    // An emergency clinician explicitly authorized for break-glass access
+    // (least privilege: ordinary physicians cannot self-assert emergencies).
+    let dr_emergency = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, username, display_name, oidc_subject)
+         VALUES ($1,$2,'dr.emergency','Dr. Elena Emergencia (Emergency)','synthetic|dr.emergency')",
+    )
+    .bind(dr_emergency)
+    .bind(tenant_a)
+    .execute(&mut *tx)
+    .await?;
+    for role in ["physician", "break_glass_authorized"] {
+        sqlx::query(
+            "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id) VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(tenant_a)
+        .bind(dr_emergency)
+        .bind(role)
+        .bind(facility_a)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Development-only service credential for the synthetic lab adapter.
+    let lab_adapter_token = generate_service_secret();
+    sqlx::query(
+        "INSERT INTO service_credentials (id, tenant_id, user_id, name, token_hash, scopes, expires_at)
+         VALUES ($1,$2,$3,'synthetic lab adapter (dev)',$4,$5, now() + interval '90 days')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant_a)
+    .bind(lab_adapter_id.expect("lab adapter user seeded"))
+    .bind(crate::auth::hash_service_secret(&lab_adapter_token))
+    .bind(vec!["result.ingest".to_string(), "worklist.read".to_string()])
+    .execute(&mut *tx)
+    .await?;
+
     // A physician in tenant B, to prove cross-tenant denial.
     let dr_b = Uuid::now_v7();
     sqlx::query(
@@ -250,5 +308,6 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
         facility_b,
         patient_a,
         patient_b,
+        lab_adapter_token,
     })
 }

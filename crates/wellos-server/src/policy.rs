@@ -11,6 +11,38 @@ use crate::error::ApiError;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Closed purpose-of-use vocabulary. The caller asserts a purpose, but the
+/// action-to-purpose matrix decides whether that purpose can authorize the
+/// requested action — asserting a different purpose never widens access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    Treatment,
+    Operations,
+    Emergency,
+    Quality,
+}
+
+impl Purpose {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "treatment" => Some(Self::Treatment),
+            "operations" => Some(Self::Operations),
+            "emergency" => Some(Self::Emergency),
+            "quality" => Some(Self::Quality),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Treatment => "treatment",
+            Self::Operations => "operations",
+            Self::Emergency => "emergency",
+            Self::Quality => "quality",
+        }
+    }
+}
+
 pub mod actions {
     pub const PATIENT_REGISTER: &str = "patient.register";
     pub const PATIENT_READ: &str = "patient.read";
@@ -26,6 +58,34 @@ pub mod actions {
     pub const CONSENT_WRITE: &str = "consent.write";
     pub const WORKLIST_READ: &str = "worklist.read";
     pub const JOBS_RUN: &str = "jobs.run";
+    pub const BREAK_GLASS_REVIEW: &str = "break_glass.review";
+}
+
+/// Action-to-purpose matrix: which asserted purposes may authorize each
+/// action. Clinical writes require treatment context; emergency purpose is
+/// read-only; operations/quality purposes cover administrative and review
+/// surfaces.
+pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
+    use actions::*;
+    let allowed: &[Purpose] = match action {
+        PATIENT_REGISTER => &[Purpose::Treatment, Purpose::Operations],
+        PATIENT_READ => &[Purpose::Treatment, Purpose::Emergency],
+        PATIENT_SEARCH => &[Purpose::Treatment, Purpose::Operations, Purpose::Emergency],
+        ENCOUNTER_START
+        | SERVICE_REQUEST_CREATE
+        | RESULT_REVIEW
+        | PATIENT_NOTIFY
+        | LOOP_CLOSE
+        | AI_REVIEW => &[Purpose::Treatment],
+        RESULT_INGEST => &[Purpose::Treatment, Purpose::Operations],
+        AUDIT_READ => &[Purpose::Operations, Purpose::Quality],
+        CONSENT_WRITE => &[Purpose::Treatment, Purpose::Operations],
+        WORKLIST_READ => &[Purpose::Treatment, Purpose::Operations, Purpose::Quality],
+        JOBS_RUN => &[Purpose::Operations],
+        BREAK_GLASS_REVIEW => &[Purpose::Operations, Purpose::Quality],
+        _ => &[],
+    };
+    allowed.contains(&purpose)
 }
 
 pub mod roles {
@@ -41,6 +101,9 @@ pub mod roles {
     pub const PATIENT_REP: &str = "patient_representative";
     pub const DMIND_SERVICE: &str = "dmind_service_agent";
     pub const LAB_INTERFACE: &str = "lab_interface_agent";
+    /// Grants no actions by itself: marks users allowed to invoke
+    /// break-glass emergency read access.
+    pub const BREAK_GLASS_AUTHORIZED: &str = "break_glass_authorized";
     pub const ALL: &[&str] = &[
         REGISTRATION,
         PHYSICIAN,
@@ -54,6 +117,7 @@ pub mod roles {
         PATIENT_REP,
         DMIND_SERVICE,
         LAB_INTERFACE,
+        BREAK_GLASS_AUTHORIZED,
     ];
 }
 
@@ -79,14 +143,15 @@ pub fn role_allows(role: &str, action: &str) -> bool {
         LAB => &[RESULT_INGEST, WORKLIST_READ],
         PHARMACIST => &[PATIENT_SEARCH, PATIENT_READ, WORKLIST_READ],
         CLINICAL_ADMIN => &[PATIENT_SEARCH, PATIENT_READ, WORKLIST_READ, JOBS_RUN],
-        PRIVACY_OFFICER => &[AUDIT_READ, CONSENT_WRITE],
-        SECURITY_AUDITOR => &[AUDIT_READ],
+        PRIVACY_OFFICER => &[AUDIT_READ, CONSENT_WRITE, BREAK_GLASS_REVIEW],
+        SECURITY_AUDITOR => &[AUDIT_READ, BREAK_GLASS_REVIEW],
         // Research users have no direct-care access by design.
         RESEARCH => &[],
         PATIENT_REP => &[],
         // dMind generates suggestions only; it never writes clinical results.
         DMIND_SERVICE => &[],
         LAB_INTERFACE => &[RESULT_INGEST],
+        BREAK_GLASS_AUTHORIZED => &[],
         _ => &[],
     };
     allowed.contains(&action)
@@ -105,13 +170,23 @@ pub struct Decision {
 }
 
 /// Central policy decision. Order: authentication (already done), tenant
-/// isolation, RBAC, then contextual care-relationship checks with break-glass
-/// as an audited exception path.
+/// isolation, RBAC, service scopes, purpose of use, then contextual
+/// care-relationship checks with break-glass as an audited exception path.
 pub async fn authorize(
     pool: &PgPool,
     ctx: &AuthContext,
     action: &str,
     resource: Option<&ResourceCtx>,
+) -> Result<Decision, ApiError> {
+    authorize_with_limit(pool, ctx, action, resource, 5).await
+}
+
+pub async fn authorize_with_limit(
+    pool: &PgPool,
+    ctx: &AuthContext,
+    action: &str,
+    resource: Option<&ResourceCtx>,
+    break_glass_hourly_limit: i64,
 ) -> Result<Decision, ApiError> {
     // Tenant isolation is absolute: break-glass never crosses tenants.
     if let Some(r) = resource {
@@ -128,6 +203,29 @@ pub async fn authorize(
         return Ok(Decision {
             allowed: false,
             reason: format!("role_lacks_permission:{action}"),
+            used_break_glass: false,
+        });
+    }
+
+    // Service credentials are additionally bounded by explicit scopes: the
+    // scope name is the action name.
+    if ctx.is_service && !ctx.has_scope(action) {
+        return Ok(Decision {
+            allowed: false,
+            reason: format!("scope_not_granted:{action}"),
+            used_break_glass: false,
+        });
+    }
+
+    // The asserted purpose must be valid for this action; changing the
+    // header never widens access beyond this matrix.
+    if !purpose_allows(ctx.purpose_of_use, action) {
+        return Ok(Decision {
+            allowed: false,
+            reason: format!(
+                "purpose_not_permitted:{}:{action}",
+                ctx.purpose_of_use.as_str()
+            ),
             used_break_glass: false,
         });
     }
@@ -172,29 +270,72 @@ pub async fn authorize(
                         used_break_glass: false,
                     });
                 }
-                if let Some(reason) = &ctx.break_glass_reason {
-                    // Break-glass: allowed, but recorded for mandatory review.
-                    sqlx::query(
-                        "INSERT INTO break_glass_events (id, tenant_id, user_id, patient_id, reason)
-                         VALUES ($1, $2, $3, $4, $5)",
-                    )
-                    .bind(Uuid::now_v7())
-                    .bind(ctx.tenant_id)
-                    .bind(ctx.user_id)
-                    .bind(patient_id)
-                    .bind(reason)
-                    .execute(pool)
-                    .await?;
+                let Some(reason) = &ctx.break_glass_reason else {
                     return Ok(Decision {
-                        allowed: true,
-                        reason: "break_glass".into(),
-                        used_break_glass: true,
+                        allowed: false,
+                        reason: "no_care_relationship".into(),
+                        used_break_glass: false,
+                    });
+                };
+                // Break-glass is least-privilege: a dedicated server-side
+                // role, an emergency purpose, a bounded non-empty reason,
+                // a patient-specific resource (guaranteed here), same-tenant
+                // access (enforced above), and a per-user rate limit.
+                if !ctx.has_role(roles::BREAK_GLASS_AUTHORIZED) {
+                    return Ok(Decision {
+                        allowed: false,
+                        reason: "break_glass_not_authorized".into(),
+                        used_break_glass: false,
                     });
                 }
+                if ctx.purpose_of_use != Purpose::Emergency {
+                    return Ok(Decision {
+                        allowed: false,
+                        reason: "break_glass_requires_emergency_purpose".into(),
+                        used_break_glass: false,
+                    });
+                }
+                let reason = reason.trim();
+                if reason.len() < 8 || reason.len() > 500 {
+                    return Ok(Decision {
+                        allowed: false,
+                        reason: "break_glass_reason_invalid".into(),
+                        used_break_glass: false,
+                    });
+                }
+                let (recent,): (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM break_glass_events
+                     WHERE user_id = $1 AND created_at > now() - interval '1 hour'",
+                )
+                .bind(ctx.user_id)
+                .fetch_one(pool)
+                .await?;
+                if recent >= break_glass_hourly_limit {
+                    return Ok(Decision {
+                        allowed: false,
+                        reason: "break_glass_rate_limited".into(),
+                        used_break_glass: false,
+                    });
+                }
+                // Immutable break-glass record, pending mandatory review.
+                sqlx::query(
+                    "INSERT INTO break_glass_events
+                     (id, tenant_id, user_id, patient_id, reason, correlation_id, purpose_of_use)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(Uuid::now_v7())
+                .bind(ctx.tenant_id)
+                .bind(ctx.user_id)
+                .bind(patient_id)
+                .bind(reason)
+                .bind(ctx.correlation_id)
+                .bind(ctx.purpose_of_use.as_str())
+                .execute(pool)
+                .await?;
                 return Ok(Decision {
-                    allowed: false,
-                    reason: "no_care_relationship".into(),
-                    used_break_glass: false,
+                    allowed: true,
+                    reason: "break_glass".into(),
+                    used_break_glass: true,
                 });
             }
         }

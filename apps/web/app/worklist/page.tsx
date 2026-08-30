@@ -18,22 +18,21 @@ type WorklistItem = {
 };
 
 export default function WorklistPage() {
-  const { token, lang } = useSession();
+  const { authenticated, lang } = useSession();
   const [items, setItems] = useState<WorklistItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
 
   useEffect(() => {
-    if (token === null) return;
-    apiFetch<{ items: WorklistItem[] }>(token, "/api/v1/worklist")
+    if (authenticated === null) return;
+    if (!authenticated) {
+      router.replace("/");
+      return;
+    }
+    apiFetch<{ items: WorklistItem[] }>("/api/v1/worklist")
       .then((d) => setItems(d.items))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [token]);
-
-  useEffect(() => {
-    const stored = sessionStorage.getItem("wellos.token");
-    if (!stored) router.replace("/");
-  }, [router]);
+  }, [authenticated, router]);
 
   return (
     <>

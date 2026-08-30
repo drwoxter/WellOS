@@ -33,7 +33,7 @@ pub async fn record<'e, E: PgExecutor<'e>>(
     .bind(resource_id)
     .bind(decision)
     .bind(reason)
-    .bind(&ctx.purpose_of_use)
+    .bind(ctx.purpose_of_use.as_str())
     .bind(ctx.break_glass_reason.is_some())
     .bind(ctx.break_glass_reason.as_deref())
     .bind(ctx.correlation_id)

@@ -17,5 +17,12 @@ async fn main() -> anyhow::Result<()> {
     println!("  tenant B (Clínica Demo Sur):    {}", seeded.tenant_b);
     println!("  patient A: {}", seeded.patient_a);
     println!("dev sign-in tokens: dev-<username>, e.g. dev-dr.garcia");
+    println!("  (dev tokens require WELLOS_ENV=development and WELLOS_DEV_AUTH=true)");
+    // Development-only credential: random per seed run, hash-stored, expires
+    // in 90 days. Printed once here so the local lab adapter can use it.
+    println!(
+        "lab adapter service credential (dev only, shown once): {}",
+        seeded.lab_adapter_token
+    );
     Ok(())
 }

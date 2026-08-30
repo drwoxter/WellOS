@@ -53,9 +53,20 @@ make web       # run the clinician UI on :3000 (separate shell)
 Sign in at http://localhost:3000 with a development token such as
 `dev-dr.garcia` (physician), `dev-reg.rivera` (registration),
 `dev-nurse.kim` (nurse), `dev-lab.chen` (laboratory),
-`dev-privacy.wolf` (privacy officer). Development tokens are a stand-in for a
-production OIDC/OAuth 2.1 integration and work only against seeded synthetic
-users.
+`dev-privacy.wolf` (privacy officer). Development tokens work only against
+seeded synthetic users and only when `WELLOS_ENV=development` and
+`WELLOS_DEV_AUTH=true` (the server refuses to start with dev auth enabled in
+any other environment). The browser session is held in an HttpOnly cookie by
+the Next.js BFF; tokens are never exposed to browser JavaScript, and signing
+out deletes the session.
+
+Production human identity uses OIDC/OAuth 2.1: configure
+`WELLOS_OIDC_ISSUER`, `WELLOS_OIDC_AUDIENCE` and `WELLOS_OIDC_JWKS_JSON` (or
+`_PATH`); the JWT `sub` claim is mapped to a local user, and tenant/roles are
+resolved only from the database. Machines authenticate with hashed, scoped,
+expiring, revocable `wsk_` service credentials (seeded for development,
+printed once by `make seed`). See `SECURITY.md` and
+`docs/operations/runbook.md`.
 
 ## Tests
 
@@ -68,7 +79,10 @@ make test-integration   # API integration tests (requires running PostgreSQL)
 ## Limitations
 
 - Synthetic data only; no real PHI anywhere (code, fixtures, tests, logs).
-- Development bearer tokens; no production identity provider integration yet.
+- The OIDC boundary uses statically configured JWKS (no auto-refresh or
+  discovery yet) and no external identity provider is bundled or contacted.
+- This remains a development system: no production deployment, compliance or
+  clinical claims.
 - The FHIR R4 endpoints are a minimal read-only facade, not a FHIR server.
 - The AI provider is a deterministic offline fake; no external AI calls.
 - No claims of HIPAA/GDPR compliance, clinical validation, or device

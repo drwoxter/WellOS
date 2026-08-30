@@ -4,10 +4,10 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppHeader } from "./chrome";
 import { t } from "@/lib/i18n";
-import { apiFetch, useSession } from "@/lib/session";
+import { useSession } from "@/lib/session";
 
 export default function SignInPage() {
-  const { lang, setToken } = useSession();
+  const { lang, signIn: sessionSignIn } = useSession();
   const [value, setValue] = useState("dev-dr.garcia");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -19,14 +19,33 @@ export default function SignInPage() {
     setError(null);
     const token = value.startsWith("dev-") ? value : `dev-${value}`;
     try {
-      await apiFetch(token, "/api/v1/meta/tenant");
-      setToken(token);
+      await sessionSignIn(token);
       router.push("/worklist");
     } catch (err) {
       setError(err instanceof Error ? err.message : t(lang, "error"));
     } finally {
       setBusy(false);
     }
+  }
+
+  // The token-entry form exists only for explicit local development.
+  // Production deployments sign in through the configured OIDC provider.
+  const devAuth =
+    process.env.NODE_ENV === "development" ||
+    process.env.NEXT_PUBLIC_WELLOS_DEV_AUTH === "true";
+
+  if (!devAuth) {
+    return (
+      <>
+        <AppHeader />
+        <main>
+          <div className="card">
+            <h2>{t(lang, "signIn")}</h2>
+            <p className="muted">{t(lang, "oidcSignInHelp")}</p>
+          </div>
+        </main>
+      </>
+    );
   }
 
   return (

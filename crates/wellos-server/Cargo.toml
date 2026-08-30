@@ -23,10 +23,16 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+jsonwebtoken = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }
 http-body-util = "0.1.5"
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
 chrono = { workspace = true }

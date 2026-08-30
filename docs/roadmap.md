@@ -9,10 +9,19 @@ alerts/follow-up tasks, dMind gateway + AIArtifact lifecycle (A2), consent
 gates, break-glass, minimal FHIR facade, clinician UI (EN/ES, two themes),
 unit + API integration tests, CI.
 
+Identity/authorization hardening (phase 1): OIDC/OAuth 2.1 JWT boundary with
+configured JWKS and local `sub` mapping; environment-gated dev auth with
+fail-closed startup; hashed scoped expiring/revocable service credentials;
+typed purpose-of-use enforcement; least-privilege break-glass (dedicated
+role, emergency purpose, read-only, rate limited, reviewed); anti-probing
+404s for cross-tenant resources; HttpOnly-cookie BFF browser sessions.
+
 ## Next 10 backlog items (priority order)
 
-1. **Production identity**: OIDC/OAuth 2.1 integration replacing dev tokens;
-   session management, MFA, token lifetimes.
+1. **Identity phase 2**: JWKS auto-refresh/discovery, IdP-driven user
+   provisioning (SCIM), MFA enforcement policy, session inactivity
+   timeouts, service-credential admin API (issue/rotate/revoke without
+   SQL), general per-tenant rate limiting.
 2. **PostgreSQL row-level security** as a second tenant-isolation layer, plus
    audit hash-chaining for tamper evidence.
 3. **Outbox dispatcher + NATS JetStream**: publish outbox rows, consumer

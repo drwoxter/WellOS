@@ -1,6 +1,6 @@
 use dmind_gateway::fake::FakeProvider;
 use std::sync::Arc;
-use wellos_server::state::AppState;
+use wellos_server::state::{AppState, AuthConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -14,6 +14,13 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "postgres://wellos:wellos_dev@localhost:5432/wellos".into());
     let bind_addr = std::env::var("WELLOS_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
 
+    // Fail closed before touching the network: dev tokens outside
+    // development, or a missing identity provider, abort startup.
+    let auth = AuthConfig::from_env()?;
+    if auth.dev_auth_enabled {
+        tracing::warn!("development authentication enabled (WELLOS_DEV_AUTH=true); never use outside local development");
+    }
+
     let pool = wellos_server::connect_pool(&database_url).await?;
     wellos_server::run_migrations(&pool).await?;
 
@@ -21,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     // baseline; external providers require explicit configuration, consent,
     // and policy routes (see ADR-0007).
     let gateway = Arc::new(FakeProvider::new());
-    let state = AppState::new(pool, gateway);
+    let state = AppState::with_auth(pool, gateway, auth);
 
     let app = wellos_server::app(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;

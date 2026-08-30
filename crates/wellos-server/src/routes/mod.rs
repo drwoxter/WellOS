@@ -42,6 +42,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/ai-artifacts/:id/review", post(ai::review_artifact))
         .route("/api/v1/consents", post(consent::set_consent))
         .route("/api/v1/audit", get(admin::audit_log))
+        .route("/api/v1/break-glass", get(admin::break_glass_events))
+        .route(
+            "/api/v1/break-glass/:id/review",
+            post(admin::review_break_glass),
+        )
         .route(
             "/api/v1/jobs/escalate-overdue",
             post(admin::escalate_overdue),
@@ -139,7 +144,14 @@ pub async fn guard(
     resource_type: &str,
     resource: Option<ResourceCtx>,
 ) -> Result<Allowed, ApiError> {
-    let decision: Decision = policy::authorize(&state.pool, ctx, action, resource.as_ref()).await?;
+    let decision: Decision = policy::authorize_with_limit(
+        &state.pool,
+        ctx,
+        action,
+        resource.as_ref(),
+        state.auth.break_glass_hourly_limit,
+    )
+    .await?;
     let resource_id = resource
         .as_ref()
         .and_then(|r| r.patient_id.map(|p| p.to_string()));
@@ -154,6 +166,12 @@ pub async fn guard(
         )
         .await
         .map_err(ApiError::internal)?;
+        // Cross-tenant probes get the same shape as nonexistent resources so
+        // resource IDs in other tenants are not discoverable; the denial is
+        // still fully audited above.
+        if decision.reason == "cross_tenant_access" {
+            return Err(ApiError::not_found());
+        }
         return Err(ApiError::forbidden(format!("action '{action}' denied")));
     }
     Ok(Allowed {

@@ -5,7 +5,8 @@ import { t } from "@/lib/i18n";
 import { useSession } from "@/lib/session";
 
 export function AppHeader({ subtitle }: { subtitle?: string }) {
-  const { lang, setLang, theme, setTheme, token, setToken } = useSession();
+  const { lang, setLang, theme, setTheme, authenticated, signOut } =
+    useSession();
   const router = useRouter();
   return (
     <header className="app">
@@ -34,12 +35,11 @@ export function AppHeader({ subtitle }: { subtitle?: string }) {
           <option value="south">Sur</option>
         </select>
       </label>
-      {token ? (
+      {authenticated ? (
         <button
           className="primary"
           onClick={() => {
-            setToken(null);
-            router.push("/");
+            void signOut().then(() => router.push("/"));
           }}
         >
           {t(lang, "signOut")}

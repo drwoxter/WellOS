@@ -52,7 +52,7 @@ type Detail = {
 };
 
 export default function RequestDetailPage() {
-  const { token, lang } = useSession();
+  const { authenticated, lang } = useSession();
   const params = useParams<{ id: string }>();
   const [data, setData] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,20 +60,20 @@ export default function RequestDetailPage() {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
-    if (!token) return;
-    apiFetch<Detail>(token, `/api/v1/service-requests/${params.id}`)
+    if (!authenticated) return;
+    apiFetch<Detail>(`/api/v1/service-requests/${params.id}`)
       .then(setData)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [token, params.id]);
+  }, [authenticated, params.id]);
 
   useEffect(load, [load]);
 
   async function transition(kind: "review" | "notify" | "close") {
-    if (!token || !data) return;
+    if (!authenticated || !data) return;
     setBusy(true);
     setError(null);
     try {
-      await apiFetch(token, `/api/v1/service-requests/${params.id}/${kind}`, {
+      await apiFetch(`/api/v1/service-requests/${params.id}/${kind}`, {
         method: "POST",
         body: JSON.stringify({
           version: data.service_request.version,

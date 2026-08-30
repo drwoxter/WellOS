@@ -45,6 +45,7 @@ pub const EVENT_TYPES: &[&str] = &[
     "consent.changed",
     "policy.access_denied",
     "break_glass.activated",
+    "break_glass.reviewed",
     "ai.artifact.requested",
     "ai.artifact.generated",
     "ai.artifact.reviewed",

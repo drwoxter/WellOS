@@ -5,6 +5,8 @@ const dict = {
     appName: "WellOS",
     signIn: "Sign in",
     signInHelp: "Development sign-in. Use a seeded synthetic user token.",
+    oidcSignInHelp:
+      "Sign in is handled by your organization's identity provider. Contact your administrator if you cannot access WellOS.",
     tokenLabel: "Development token",
     language: "Language",
     theme: "Theme",
@@ -52,6 +54,8 @@ const dict = {
     appName: "WellOS",
     signIn: "Iniciar sesión",
     signInHelp: "Acceso de desarrollo. Use un token de usuario sintético.",
+    oidcSignInHelp:
+      "El inicio de sesión se gestiona mediante el proveedor de identidad de su organización. Contacte a su administrador si no puede acceder a WellOS.",
     tokenLabel: "Token de desarrollo",
     language: "Idioma",
     theme: "Tema",
