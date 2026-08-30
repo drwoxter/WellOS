@@ -822,6 +822,20 @@ async fn service_credential_admin_lifecycle() {
         "humans are not machine principals"
     );
 
+    // Scopes beyond the principal's current roles are rejected: the
+    // lab-adapter role permits result.ingest but not patient.search.
+    let (status, body) = call(
+        &state,
+        "POST",
+        "/api/v1/admin/service-credentials",
+        "dev-privacy.wolf",
+        Some(json!({ "service_username": "svc.lab-adapter", "name": "x", "scopes": ["patient.search"] })),
+        OPS,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "scope_exceeds_role", "{body}");
+
     // Every operation was audited.
     let (_, audit) = call(
         &state,

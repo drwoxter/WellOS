@@ -8,7 +8,7 @@
 use crate::audit;
 use crate::auth::{generate_secret, hash_service_secret, AuthContext};
 use crate::error::ApiError;
-use crate::policy::{actions, ResourceCtx};
+use crate::policy::{actions, role_allows, ResourceCtx};
 use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -24,6 +24,32 @@ fn tenant_resource(ctx: &AuthContext) -> Option<ResourceCtx> {
         tenant_id: ctx.tenant_id,
         patient_id: None,
     })
+}
+
+/// Scopes may never exceed what the service principal's current roles
+/// allow, so a credential cannot hold latent permissions that a later role
+/// grant would silently activate.
+async fn require_scopes_within_roles(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    service_user_id: Uuid,
+    scopes: &[String],
+) -> Result<(), ApiError> {
+    let roles: Vec<(String,)> =
+        sqlx::query_as("SELECT role FROM role_assignments WHERE user_id = $1 AND tenant_id = $2")
+            .bind(service_user_id)
+            .bind(tenant_id)
+            .fetch_all(pool)
+            .await?;
+    for scope in scopes {
+        if !roles.iter().any(|(role,)| role_allows(role, scope)) {
+            return Err(ApiError::bad_request(
+                "scope_exceeds_role",
+                format!("scope '{scope}' is not permitted by the service principal's roles"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -86,6 +112,7 @@ pub async fn issue(
     .fetch_optional(&state.pool)
     .await?;
     let (service_user_id,) = user.ok_or_else(ApiError::not_found)?;
+    require_scopes_within_roles(&state.pool, ctx.tenant_id, service_user_id, &body.scopes).await?;
     let secret = generate_secret("wsk_");
     let cred_id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
@@ -196,6 +223,13 @@ pub async fn rotate(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(ApiError::not_found)?;
+    require_scopes_within_roles(
+        &state.pool,
+        ctx.tenant_id,
+        row.get::<Uuid, _>("user_id"),
+        &row.get::<Vec<String>, _>("scopes"),
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO service_credentials (id, tenant_id, user_id, name, token_hash, scopes, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)",

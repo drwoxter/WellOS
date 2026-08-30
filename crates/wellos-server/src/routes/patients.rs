@@ -214,7 +214,12 @@ pub async fn chart(
     ).await?;
 
     let observations = sqlx::query(
-        "SELECT id, code_loinc, value_num::text AS value_num, unit, status, effective_at
+        // Observation rows are append-only: supersession is derived from
+        // the amendment relationship rather than a mutated status.
+        "SELECT id, code_loinc, value_num::text AS value_num, unit, status, effective_at,
+                EXISTS(SELECT 1 FROM observations o2
+                       WHERE o2.tenant_id = observations.tenant_id AND o2.amends = observations.id)
+                    AS superseded
          FROM observations WHERE tenant_id=$1 AND patient_id=$2
          ORDER BY effective_at DESC LIMIT 50",
     )
@@ -229,7 +234,11 @@ pub async fn chart(
             "code_loinc": r.get::<String,_>("code_loinc"),
             "value": r.get::<String,_>("value_num"),
             "unit": r.get::<String,_>("unit"),
-            "status": r.get::<String,_>("status"),
+            "status": if r.get::<bool,_>("superseded") {
+                "amended-superseded".to_string()
+            } else {
+                r.get::<String,_>("status")
+            },
             "effective_at": r.get::<chrono::DateTime<chrono::Utc>,_>("effective_at"),
         })
     })

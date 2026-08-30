@@ -955,6 +955,25 @@ async fn amendment_keeps_observation_rows_append_only() {
         .find(|o| o["amends"] == json!(lp.observation_id))
         .unwrap();
     assert_eq!(new_obs["status"], "corrected", "{detail}");
+
+    // The patient chart also derives supersession from the amends link.
+    let patient_id = detail["service_request"]["patient"]["id"].as_str().unwrap();
+    let (st, chart) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{patient_id}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{chart}");
+    let chart_obs = chart["observations"].as_array().unwrap();
+    let old = chart_obs
+        .iter()
+        .find(|o| o["id"] == json!(lp.observation_id))
+        .unwrap();
+    assert_eq!(old["status"], "amended-superseded", "{chart}");
 }
 
 #[tokio::test]
