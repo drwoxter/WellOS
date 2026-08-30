@@ -641,3 +641,270 @@ async fn stale_version_is_rejected() {
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn mismatched_result_code_is_rejected() {
+    let (state, _) = test_state().await;
+    let sr_id = create_order(&state).await;
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        "dev-lab.chen",
+        Some(json!({
+            "service_request_id": sr_id,
+            "code_loinc": "2345-7",
+            "value": 100,
+            "unit": "mg/dL",
+            "source_system": "fake-lab",
+            "idempotency_key": uniq("mismatch-key"),
+            "effective_at": chrono::Utc::now(),
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "code_mismatch");
+
+    let (_, detail) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/service-requests/{sr_id}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(detail["service_request"]["loop_state"], "ordered");
+    assert!(detail["observations"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn notify_and_close_require_documentation_note() {
+    let (state, _) = test_state().await;
+    let lp = run_to_received(&state, 5.0).await;
+
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/service-requests/{}/review", lp.service_request_id),
+        "dev-dr.garcia",
+        Some(json!({ "version": lp.version })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (st, body) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/service-requests/{}/notify", lp.service_request_id),
+        "dev-dr.garcia",
+        Some(json!({ "version": lp.version + 1 })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "documentation_required");
+
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/service-requests/{}/notify", lp.service_request_id),
+        "dev-dr.garcia",
+        Some(json!({ "version": lp.version + 1, "note": "patient called with results" })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (st, body) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/service-requests/{}/close", lp.service_request_id),
+        "dev-dr.garcia",
+        Some(json!({ "version": lp.version + 2 })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "documentation_required");
+
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/service-requests/{}/close", lp.service_request_id),
+        "dev-dr.garcia",
+        Some(json!({ "version": lp.version + 2, "note": "no further follow-up needed" })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (_, detail) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/service-requests/{}", lp.service_request_id),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    let notes = detail["notes"].as_array().unwrap();
+    assert!(notes
+        .iter()
+        .any(|n| n["kind"] == "notification" && n["note"] == "patient called with results"));
+    assert!(notes
+        .iter()
+        .any(|n| n["kind"] == "closure" && n["note"] == "no further follow-up needed"));
+}
+
+#[tokio::test]
+async fn consent_changes_preserve_immutable_history() {
+    let (state, _) = test_state().await;
+    let (_, meta) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    let facility = meta["facilities"][0]["id"].as_str().unwrap().to_string();
+    let (st, patient) = call(
+        &state,
+        "POST",
+        "/api/v1/patients",
+        "dev-reg.rivera",
+        Some(json!({
+            "facility_id": facility,
+            "family_name": "Consent",
+            "given_name": "History",
+            "birth_date": "1980-01-01",
+            "sex": "female",
+            "identifier": uniq("MRN-CH"),
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let patient_id = patient["id"].as_str().unwrap().to_string();
+
+    for status in ["active", "revoked"] {
+        let (st, _) = call(
+            &state,
+            "POST",
+            "/api/v1/consents",
+            "dev-privacy.wolf",
+            Some(json!({
+                "patient_id": patient_id,
+                "purpose": "ai_external_processing",
+                "status": status,
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    let rows: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT status, version FROM consents
+         WHERE patient_id = $1::uuid AND purpose = 'ai_external_processing'
+         ORDER BY version",
+    )
+    .bind(uuid::Uuid::parse_str(&patient_id).unwrap())
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0], ("active".to_string(), 1));
+    assert_eq!(rows[1], ("revoked".to_string(), 2));
+
+    let (_, chart) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{patient_id}"),
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    let consents = chart["consents"].as_array().unwrap();
+    let current = consents
+        .iter()
+        .find(|c| c["purpose"] == "ai_external_processing")
+        .unwrap();
+    assert_eq!(current["status"], "revoked");
+}
+
+#[tokio::test]
+async fn amendment_supersedes_unreviewed_ai_artifacts() {
+    let (state, _) = test_state().await;
+    let lp = run_to_received(&state, 7.1).await;
+
+    let (st, _) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        "dev-lab.chen",
+        Some(json!({
+            "service_request_id": lp.service_request_id,
+            "code_loinc": "2823-3",
+            "value": 5.0,
+            "unit": "mmol/L",
+            "source_system": "fake-lab",
+            "idempotency_key": uniq("supersede-key"),
+            "effective_at": chrono::Utc::now(),
+            "amends_observation_id": lp.observation_id,
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (_, detail) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/service-requests/{}", lp.service_request_id),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    let artifacts = detail["ai_artifacts"].as_array().unwrap();
+    let stale = artifacts
+        .iter()
+        .find(|a| a["observation_id"] == Value::String(lp.observation_id.clone()))
+        .unwrap();
+    assert_eq!(stale["status"], "superseded");
+
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!(
+            "/api/v1/ai-artifacts/{}/review",
+            stale["id"].as_str().unwrap()
+        ),
+        "dev-dr.garcia",
+        Some(json!({ "decision": "approved" })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn service_principals_cannot_use_dev_tokens() {
+    let (state, _) = test_state().await;
+    let (st, _) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist",
+        "dev-svc.lab-adapter",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}

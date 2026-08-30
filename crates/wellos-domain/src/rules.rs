@@ -62,7 +62,7 @@ impl CriticalRule {
             }
         };
         if let Some(low) = self.critical_low {
-            if normalized.value < low {
+            if normalized.value <= low {
                 return RuleOutcome::Critical {
                     normalized,
                     breached: Breach::CriticalLow,
@@ -70,7 +70,7 @@ impl CriticalRule {
             }
         }
         if let Some(high) = self.critical_high {
-            if normalized.value > high {
+            if normalized.value >= high {
                 return RuleOutcome::Critical {
                     normalized,
                     breached: Breach::CriticalHigh,
@@ -143,6 +143,30 @@ mod tests {
             out,
             RuleOutcome::Critical {
                 breached: Breach::CriticalLow,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exact_low_threshold_is_critical() {
+        let out = potassium_rule().evaluate("2823-3", &q("2.5", "mmol/L"));
+        assert!(matches!(
+            out,
+            RuleOutcome::Critical {
+                breached: Breach::CriticalLow,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exact_high_threshold_is_critical() {
+        let out = potassium_rule().evaluate("2823-3", &q("6.5", "mmol/L"));
+        assert!(matches!(
+            out,
+            RuleOutcome::Critical {
+                breached: Breach::CriticalHigh,
                 ..
             }
         ));

@@ -33,7 +33,7 @@ pub async fn register(
             "family_name and identifier are required",
         ));
     }
-    guard(
+    let allowed = guard(
         &state,
         &ctx,
         actions::PATIENT_REGISTER,
@@ -47,6 +47,7 @@ pub async fn register(
 
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
     sqlx::query(
         "INSERT INTO patients (id, tenant_id, facility_id, family_name, given_name, birth_date, sex, identifier)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
@@ -102,6 +103,8 @@ pub async fn search(
             patient_id: None,
         }),
     )
+    .await?
+    .record_on_pool(&state, &ctx)
     .await?;
     let like = format!("%{}%", params.query);
     let rows = sqlx::query(
@@ -156,6 +159,8 @@ pub async fn chart(
             patient_id: Some(id),
         }),
     )
+    .await?
+    .record_on_pool(&state, &ctx)
     .await?;
 
     let allergies = fetch_list(
@@ -239,9 +244,13 @@ pub async fn chart(
 
     let consents = fetch_list(
         &state,
-        "SELECT purpose AS a, status AS b FROM consents WHERE tenant_id=$1 AND patient_id=$2 ORDER BY purpose",
-        ctx.tenant_id, id, |r| json!({"purpose": r.get::<String,_>("a"), "status": r.get::<String,_>("b")}),
-    ).await?;
+        "SELECT DISTINCT ON (purpose) purpose AS a, status AS b FROM consents
+         WHERE tenant_id=$1 AND patient_id=$2 ORDER BY purpose, version DESC, recorded_at DESC",
+        ctx.tenant_id,
+        id,
+        |r| json!({"purpose": r.get::<String,_>("a"), "status": r.get::<String,_>("b")}),
+    )
+    .await?;
 
     Ok(Json(json!({
         "patient": {

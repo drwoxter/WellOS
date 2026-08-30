@@ -45,7 +45,7 @@ pub async fn set_consent(
         .ok_or_else(ApiError::not_found)?;
     let tenant_id: Uuid = patient.get("tenant_id");
 
-    guard(
+    let allowed = guard(
         &state,
         &ctx,
         actions::CONSENT_WRITE,
@@ -58,11 +58,14 @@ pub async fn set_consent(
     .await?;
 
     let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    // Consent decisions are append-only: each change is a new immutable
+    // version; readers select the highest version per purpose.
     sqlx::query(
-        "INSERT INTO consents (id, tenant_id, patient_id, purpose, status)
-         VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (tenant_id, patient_id, purpose)
-         DO UPDATE SET status = EXCLUDED.status, version = consents.version + 1, recorded_at = now()",
+        "INSERT INTO consents (id, tenant_id, patient_id, purpose, status, version)
+         VALUES ($1,$2,$3,$4,$5,
+                 COALESCE((SELECT MAX(version) FROM consents
+                           WHERE tenant_id=$2 AND patient_id=$3 AND purpose=$4), 0) + 1)",
     )
     .bind(Uuid::now_v7())
     .bind(tenant_id)

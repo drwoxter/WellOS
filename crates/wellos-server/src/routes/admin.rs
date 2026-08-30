@@ -68,6 +68,8 @@ pub async fn audit_log(
             patient_id: None,
         }),
     )
+    .await?
+    .record_on_pool(&state, &ctx)
     .await?;
     let rows = sqlx::query(
         "SELECT actor, action, resource_type, resource_id, decision, reason,
@@ -102,7 +104,7 @@ pub async fn escalate_overdue(
     State(state): State<AppState>,
     ctx: AuthContext,
 ) -> Result<Json<Value>, ApiError> {
-    guard(
+    let allowed = guard(
         &state,
         &ctx,
         actions::JOBS_RUN,
@@ -114,6 +116,7 @@ pub async fn escalate_overdue(
     )
     .await?;
     let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
     let rows = sqlx::query(
         "UPDATE follow_up_tasks SET status = 'overdue', priority = 'urgent'
          WHERE tenant_id = $1 AND status = 'open' AND due_at < now()

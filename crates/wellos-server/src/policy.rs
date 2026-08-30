@@ -40,6 +40,7 @@ pub mod roles {
     pub const RESEARCH: &str = "research_user";
     pub const PATIENT_REP: &str = "patient_representative";
     pub const DMIND_SERVICE: &str = "dmind_service_agent";
+    pub const LAB_INTERFACE: &str = "lab_interface_agent";
     pub const ALL: &[&str] = &[
         REGISTRATION,
         PHYSICIAN,
@@ -52,6 +53,7 @@ pub mod roles {
         RESEARCH,
         PATIENT_REP,
         DMIND_SERVICE,
+        LAB_INTERFACE,
     ];
 }
 
@@ -82,7 +84,9 @@ pub fn role_allows(role: &str, action: &str) -> bool {
         // Research users have no direct-care access by design.
         RESEARCH => &[],
         PATIENT_REP => &[],
-        DMIND_SERVICE => &[RESULT_INGEST],
+        // dMind generates suggestions only; it never writes clinical results.
+        DMIND_SERVICE => &[],
+        LAB_INTERFACE => &[RESULT_INGEST],
         _ => &[],
     };
     allowed.contains(&action)
@@ -213,6 +217,12 @@ mod tests {
     fn nurse_cannot_close_loop() {
         assert!(!role_allows(roles::NURSE, actions::LOOP_CLOSE));
         assert!(role_allows(roles::NURSE, actions::PATIENT_NOTIFY));
+    }
+
+    #[test]
+    fn dmind_agent_cannot_ingest_results() {
+        assert!(!role_allows(roles::DMIND_SERVICE, actions::RESULT_INGEST));
+        assert!(role_allows(roles::LAB_INTERFACE, actions::RESULT_INGEST));
     }
 
     #[test]

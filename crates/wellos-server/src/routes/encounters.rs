@@ -29,7 +29,7 @@ pub async fn start(
     let tenant_id: Uuid = patient.get("tenant_id");
     let facility_id: Uuid = patient.get("facility_id");
 
-    guard(
+    let allowed = guard(
         &state,
         &ctx,
         actions::ENCOUNTER_START,
@@ -43,6 +43,7 @@ pub async fn start(
 
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
     sqlx::query(
         "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id)
          VALUES ($1,$2,$3,$4,$5)",
@@ -94,7 +95,7 @@ pub async fn create_service_request(
     let tenant_id: Uuid = enc.get("tenant_id");
     let patient_id: Uuid = enc.get("patient_id");
 
-    guard(
+    let allowed = guard(
         &state,
         &ctx,
         actions::SERVICE_REQUEST_CREATE,
@@ -108,6 +109,7 @@ pub async fn create_service_request(
 
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
     sqlx::query(
         "INSERT INTO service_requests (id, tenant_id, encounter_id, patient_id, requester_id, code_loinc, display)
          VALUES ($1,$2,$3,$4,$5,$6,$7)",

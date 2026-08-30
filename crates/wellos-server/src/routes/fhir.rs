@@ -38,6 +38,8 @@ pub async fn patient(
             patient_id: Some(id),
         }),
     )
+    .await?
+    .record_on_pool(&state, &ctx)
     .await?;
     Ok(Json(json!({
         "resourceType": "Patient",
@@ -74,6 +76,8 @@ pub async fn observation(
             patient_id: Some(patient_id),
         }),
     )
+    .await?
+    .record_on_pool(&state, &ctx)
     .await?;
     let status: String = row.get("status");
     Ok(Json(json!({
@@ -116,6 +120,8 @@ pub async fn service_request(
             patient_id: Some(patient_id),
         }),
     )
+    .await?
+    .record_on_pool(&state, &ctx)
     .await?;
     let loop_state: String = row.get("loop_state");
     Ok(Json(json!({

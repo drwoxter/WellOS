@@ -12,6 +12,8 @@ use crate::auth::AuthContext;
 use crate::error::ApiError;
 use crate::policy::{self, Decision, ResourceCtx};
 use crate::state::AppState;
+use axum::http::header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use axum::http::Method;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
@@ -47,19 +49,97 @@ pub fn router(state: AppState) -> Router {
         .route("/fhir/r4/Patient/:id", get(fhir::patient))
         .route("/fhir/r4/Observation/:id", get(fhir::observation))
         .route("/fhir/r4/ServiceRequest/:id", get(fhir::service_request))
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer())
         .with_state(state)
 }
 
-/// Authorize an action, audit the decision, and reject on denial.
+/// Restrict browser callers to an explicit origin allowlist
+/// (`WELLOS_ALLOWED_ORIGINS`, comma-separated). The bundled web app talks to
+/// the API through a same-origin rewrite, so only the dev UI origin is needed
+/// by default.
+fn cors_layer() -> CorsLayer {
+    let origins: Vec<HeaderValue> = std::env::var("WELLOS_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string())
+        .split(',')
+        .filter_map(|o| o.trim().parse().ok())
+        .collect();
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-purpose-of-use"),
+            HeaderName::from_static("x-break-glass-reason"),
+        ])
+}
+
+/// An authorization decision that allowed the action. The allow audit row is
+/// written by [`Allowed::record`], which state-changing routes call inside the
+/// same transaction as the mutation so a rolled-back action is never audited
+/// as successful. Denials are audited immediately, outside any transaction.
+pub struct Allowed {
+    action: String,
+    resource_type: String,
+    resource_id: Option<String>,
+    reason: String,
+    pub used_break_glass: bool,
+}
+
+impl Allowed {
+    pub async fn record(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        ctx: &AuthContext,
+        cell: &str,
+    ) -> Result<(), ApiError> {
+        audit::record(
+            &mut *conn,
+            ctx,
+            &self.action,
+            Some(&self.resource_type),
+            self.resource_id.clone(),
+            "allow",
+            Some(&self.reason),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        if self.used_break_glass {
+            audit::emit(
+                &mut *conn,
+                ctx,
+                "break_glass.activated",
+                cell,
+                serde_json::json!({ "action": self.action }),
+                None,
+            )
+            .await
+            .map_err(ApiError::internal)?;
+        }
+        Ok(())
+    }
+
+    /// Record the allow audit row on the pool, for read-only routes that have
+    /// no surrounding transaction.
+    pub async fn record_on_pool(
+        &self,
+        state: &AppState,
+        ctx: &AuthContext,
+    ) -> Result<(), ApiError> {
+        let mut conn = state.pool.acquire().await?;
+        self.record(&mut conn, ctx, &state.cell).await
+    }
+}
+
+/// Authorize an action and reject (with a denial audit record) when denied.
 pub async fn guard(
     state: &AppState,
     ctx: &AuthContext,
     action: &str,
     resource_type: &str,
     resource: Option<ResourceCtx>,
-) -> Result<Decision, ApiError> {
-    let decision = policy::authorize(&state.pool, ctx, action, resource.as_ref()).await?;
+) -> Result<Allowed, ApiError> {
+    let decision: Decision = policy::authorize(&state.pool, ctx, action, resource.as_ref()).await?;
     let resource_id = resource
         .as_ref()
         .and_then(|r| r.patient_id.map(|p| p.to_string()));
@@ -76,28 +156,11 @@ pub async fn guard(
         .map_err(ApiError::internal)?;
         return Err(ApiError::forbidden(format!("action '{action}' denied")));
     }
-    audit::record(
-        &state.pool,
-        ctx,
-        action,
-        Some(resource_type),
+    Ok(Allowed {
+        action: action.to_string(),
+        resource_type: resource_type.to_string(),
         resource_id,
-        "allow",
-        Some(&decision.reason),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    if decision.used_break_glass {
-        audit::emit(
-            &state.pool,
-            ctx,
-            "break_glass.activated",
-            &state.cell,
-            serde_json::json!({ "action": action }),
-            None,
-        )
-        .await
-        .map_err(ApiError::internal)?;
-    }
-    Ok(decision)
+        reason: decision.reason,
+        used_break_glass: decision.used_break_glass,
+    })
 }

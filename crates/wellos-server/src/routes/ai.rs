@@ -45,7 +45,13 @@ pub async fn review_artifact(
     let status = ArtifactStatus::parse(row.get::<String, _>("status").as_str())
         .ok_or_else(|| ApiError::internal("invalid artifact status"))?;
 
-    guard(
+    if body.note.as_deref().is_some_and(|n| n.len() > 4000) {
+        return Err(ApiError::bad_request(
+            "validation_failed",
+            "note exceeds 4000 characters",
+        ));
+    }
+    let allowed = guard(
         &state,
         &ctx,
         actions::AI_REVIEW,
@@ -62,18 +68,28 @@ pub async fn review_artifact(
         .map_err(|e| ApiError::conflict("invalid_artifact_state", e.to_string()))?;
 
     let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
     // Approval is a new provenance event; the AI origin remains recorded.
-    sqlx::query(
+    // The status predicate makes the review an atomic conditional transition:
+    // a concurrent review or supersession loses instead of being overwritten.
+    let updated = sqlx::query(
         "UPDATE ai_artifacts SET status=$1, reviewer_id=$2, review_decision=$3,
-         review_note=$4, reviewed_at=now() WHERE id=$5",
+         review_note=$4, reviewed_at=now() WHERE id=$5 AND status=$6",
     )
     .bind(next.as_str())
     .bind(ctx.user_id)
     .bind(&body.decision)
     .bind(&body.note)
     .bind(id)
+    .bind(status.as_str())
     .execute(&mut *tx)
     .await?;
+    if updated.rows_affected() == 0 {
+        return Err(ApiError::conflict(
+            "review_conflict",
+            "artifact was reviewed or superseded concurrently",
+        ));
+    }
     audit::emit(
         &mut *tx,
         &ctx,

@@ -42,6 +42,7 @@ async fn load_sr(state: &AppState, id: Uuid) -> Result<SrCtx, ApiError> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn transition(
     state: &AppState,
     ctx: &AuthContext,
@@ -50,9 +51,11 @@ async fn transition(
     action: &'static str,
     t: LoopTransition,
     event: &'static str,
+    kind: &'static str,
+    note_required: bool,
 ) -> Result<Json<Value>, ApiError> {
     let sr = load_sr(state, id).await?;
-    guard(
+    let allowed = guard(
         state,
         ctx,
         action,
@@ -63,12 +66,30 @@ async fn transition(
         }),
     )
     .await?;
+    let note = body
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    if note_required && note.is_none() {
+        return Err(ApiError::bad_request(
+            "documentation_required",
+            format!("a {kind} note documenting this step is required"),
+        ));
+    }
+    if note.is_some_and(|n| n.len() > 4000) {
+        return Err(ApiError::bad_request(
+            "validation_failed",
+            "note exceeds 4000 characters",
+        ));
+    }
     let next = sr
         .state
         .apply(t)
         .map_err(|e| ApiError::conflict("invalid_loop_transition", e.to_string()))?;
 
     let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, ctx, &state.cell).await?;
     let updated = sqlx::query(
         "UPDATE service_requests SET loop_state = $1, version = version + 1
          WHERE id = $2 AND version = $3",
@@ -105,12 +126,28 @@ async fn transition(
         .execute(&mut *tx)
         .await?;
     }
+    if let Some(note) = note {
+        // Clinical documentation for the step is part of the same transaction
+        // as the state change.
+        sqlx::query(
+            "INSERT INTO loop_notes (id, tenant_id, service_request_id, kind, note, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(sr.tenant_id)
+        .bind(id)
+        .bind(kind)
+        .bind(note)
+        .bind(ctx.user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     audit::emit(
         &mut *tx,
         ctx,
         event,
         &state.cell,
-        json!({ "service_request_id": id, "note_present": body.note.is_some() }),
+        json!({ "service_request_id": id, "note_present": note.is_some() }),
         None,
     )
     .await
@@ -137,6 +174,8 @@ pub async fn review(
         actions::RESULT_REVIEW,
         LoopTransition::ResultReviewed,
         "result.reviewed",
+        "review",
+        false,
     )
     .await
 }
@@ -155,6 +194,8 @@ pub async fn notify(
         actions::PATIENT_NOTIFY,
         LoopTransition::PatientNotified,
         "patient.notified",
+        "notification",
+        true,
     )
     .await
 }
@@ -173,6 +214,8 @@ pub async fn close(
         actions::LOOP_CLOSE,
         LoopTransition::LoopClosed,
         "result_loop.closed",
+        "closure",
+        true,
     )
     .await
 }
@@ -191,6 +234,8 @@ pub async fn worklist(
             patient_id: None,
         }),
     )
+    .await?
+    .record_on_pool(&state, &ctx)
     .await?;
     let rows = sqlx::query(
         "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
@@ -242,6 +287,8 @@ pub async fn detail(
             patient_id: Some(sr.patient_id),
         }),
     )
+    .await?
+    .record_on_pool(&state, &ctx)
     .await?;
 
     let head = sqlx::query(
@@ -300,7 +347,7 @@ pub async fn detail(
     .collect::<Vec<_>>();
 
     let artifacts = sqlx::query(
-        "SELECT id, artifact_type, autonomy_level, status, model, model_version, route,
+        "SELECT id, observation_id, artifact_type, autonomy_level, status, model, model_version, route,
                 template, input_hash, output, citations, limitations, review_decision,
                 review_note, reviewed_at, generated_at
          FROM ai_artifacts WHERE tenant_id=$1 AND service_request_id=$2 ORDER BY created_at",
@@ -313,6 +360,7 @@ pub async fn detail(
     .map(|r| {
         json!({
             "id": r.get::<Uuid,_>("id"),
+            "observation_id": r.get::<Option<Uuid>,_>("observation_id"),
             "artifact_type": r.get::<String,_>("artifact_type"),
             "autonomy_level": r.get::<String,_>("autonomy_level"),
             "status": r.get::<String,_>("status"),
@@ -391,6 +439,26 @@ pub async fn detail(
     })
     .collect::<Vec<_>>();
 
+    let notes = sqlx::query(
+        "SELECT n.kind, n.note, n.created_at, u.display_name AS author
+         FROM loop_notes n JOIN users u ON u.id = n.created_by
+         WHERE n.tenant_id=$1 AND n.service_request_id=$2 ORDER BY n.created_at",
+    )
+    .bind(sr.tenant_id)
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?
+    .iter()
+    .map(|r| {
+        json!({
+            "kind": r.get::<String,_>("kind"),
+            "note": r.get::<String,_>("note"),
+            "author": r.get::<String,_>("author"),
+            "created_at": r.get::<chrono::DateTime<chrono::Utc>,_>("created_at"),
+        })
+    })
+    .collect::<Vec<_>>();
+
     Ok(Json(json!({
         "service_request": {
             "id": head.get::<Uuid,_>("id"),
@@ -412,5 +480,6 @@ pub async fn detail(
         "follow_up_tasks": tasks,
         "alerts": alerts,
         "data_quality_issues": dq,
+        "notes": notes,
     })))
 }

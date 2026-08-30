@@ -128,7 +128,7 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
         (
             "svc.lab-adapter",
             "Synthetic Lab Adapter",
-            "dmind_service_agent",
+            "lab_interface_agent",
             true,
         ),
     ];

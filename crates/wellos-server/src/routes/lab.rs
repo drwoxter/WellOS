@@ -50,8 +50,26 @@ pub async fn ingest_result(
             "idempotency_key is required",
         ));
     }
+    for (field, value, max) in [
+        ("code_loinc", body.code_loinc.as_str(), 32),
+        ("unit", body.unit.as_str(), 64),
+        ("source_system", body.source_system.as_str(), 128),
+        ("idempotency_key", body.idempotency_key.as_str(), 128),
+        (
+            "reference_range",
+            body.reference_range.as_deref().unwrap_or(""),
+            128,
+        ),
+    ] {
+        if value.len() > max {
+            return Err(ApiError::bad_request(
+                "validation_failed",
+                format!("{field} exceeds {max} characters"),
+            ));
+        }
+    }
     let sr = sqlx::query(
-        "SELECT tenant_id, patient_id, loop_state, version FROM service_requests WHERE id = $1",
+        "SELECT tenant_id, patient_id, code_loinc, loop_state, version FROM service_requests WHERE id = $1",
     )
     .bind(body.service_request_id)
     .fetch_optional(&state.pool)
@@ -59,10 +77,17 @@ pub async fn ingest_result(
     .ok_or_else(ApiError::not_found)?;
     let tenant_id: Uuid = sr.get("tenant_id");
     let patient_id: Uuid = sr.get("patient_id");
+    let ordered_code: String = sr.get("code_loinc");
+    if body.code_loinc != ordered_code {
+        return Err(ApiError::bad_request(
+            "code_mismatch",
+            "result code_loinc does not match the ordered test",
+        ));
+    }
     let loop_state = LoopState::parse(sr.get::<String, _>("loop_state").as_str())
         .ok_or_else(|| ApiError::internal("invalid loop state in database"))?;
 
-    guard(
+    let allowed = guard(
         &state,
         &ctx,
         actions::RESULT_INGEST,
@@ -100,6 +125,7 @@ pub async fn ingest_result(
 
     let obs_id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
 
     if let Some(amended_id) = body.amends_observation_id {
         // Preserve the previous version; never overwrite clinical history.
@@ -118,9 +144,20 @@ pub async fn ingest_result(
                 "amends_observation_id does not match an observation of this request",
             ));
         }
+        // Summaries of the superseded result must not remain reviewable;
+        // already reviewed artifacts stay as historical provenance.
+        sqlx::query(
+            "UPDATE ai_artifacts SET status='superseded'
+             WHERE tenant_id=$1 AND observation_id=$2
+               AND status IN ('draft','awaiting_review','unavailable')",
+        )
+        .bind(tenant_id)
+        .bind(amended_id)
+        .execute(&mut *tx)
+        .await?;
     }
 
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO observations
          (id, tenant_id, service_request_id, patient_id, code_loinc, value_num, unit,
           reference_range, status, amends, source_system, idempotency_key, effective_at)
@@ -140,7 +177,26 @@ pub async fn ingest_result(
     .bind(&body.idempotency_key)
     .bind(body.effective_at)
     .execute(&mut *tx)
-    .await?;
+    .await;
+    if let Err(e) = inserted {
+        // A concurrent delivery with the same idempotency key won the race:
+        // discard this attempt and return the winner's observation.
+        if matches!(&e, sqlx::Error::Database(db) if db.is_unique_violation()) {
+            tx.rollback().await?;
+            let (winner,): (Uuid,) = sqlx::query_as(
+                "SELECT id FROM observations WHERE tenant_id = $1 AND idempotency_key = $2",
+            )
+            .bind(tenant_id)
+            .bind(&body.idempotency_key)
+            .fetch_one(&state.pool)
+            .await?;
+            return Ok(Json(json!({
+                "observation_id": winner,
+                "duplicate": true
+            })));
+        }
+        return Err(e.into());
+    }
 
     // Loop transition with optimistic concurrency on the service request.
     let version: i64 = sr.get("version");
@@ -342,7 +398,8 @@ async fn generate_summary(
     // additionally require active consent and deployment permission.
     let external_consent: Option<(String,)> = sqlx::query_as(
         "SELECT status FROM consents
-         WHERE tenant_id = $1 AND patient_id = $2 AND purpose = 'ai_external_processing'",
+         WHERE tenant_id = $1 AND patient_id = $2 AND purpose = 'ai_external_processing'
+         ORDER BY version DESC, recorded_at DESC LIMIT 1",
     )
     .bind(tenant_id)
     .bind(patient_id)

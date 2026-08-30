@@ -56,6 +56,11 @@ pub async fn load_auth(
     .await?;
     let (user_id, tenant_id, username, display_name, is_service) =
         row.ok_or_else(ApiError::unauthorized)?;
+    // Interactive dev tokens never authenticate service principals; machine
+    // identities require their own credential mechanism (see ADR-0006).
+    if is_service {
+        return Err(ApiError::unauthorized());
+    }
     let roles: Vec<(String,)> =
         sqlx::query_as("SELECT role FROM role_assignments WHERE user_id = $1")
             .bind(user_id)
