@@ -133,7 +133,8 @@ pub async fn search(
     .record_on_pool(&state, &ctx)
     .await?;
     let query = params.query.trim();
-    if query.len() < 2 || query.len() > 64 {
+    let query_len = query.chars().count();
+    if !(2..=64).contains(&query_len) {
         return Err(ApiError::bad_request(
             "validation_failed",
             "query must be between 2 and 64 characters",

@@ -13,7 +13,7 @@ use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, DurationRound, Utc};
 use dmind_gateway::{GatewayError, SummaryRequest};
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -64,9 +64,7 @@ async fn find_duplicate(
         && r.get::<String, _>("unit") == body.unit
         && r.get::<Option<String>, _>("reference_range") == body.reference_range
         && r.get::<String, _>("source_system") == body.source_system
-        // Postgres stores microsecond precision; compare within that grain.
-        && (r.get::<DateTime<Utc>, _>("effective_at") - body.effective_at).abs()
-            <= chrono::Duration::microseconds(1)
+        && r.get::<DateTime<Utc>, _>("effective_at") == body.effective_at
         && r.get::<Option<Uuid>, _>("amends") == body.amends_observation_id;
     if !same_delivery {
         return Err(ApiError::conflict(
@@ -83,8 +81,14 @@ async fn find_duplicate(
 pub async fn ingest_result(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Json(body): Json<InboundResult>,
+    Json(mut body): Json<InboundResult>,
 ) -> Result<Json<Value>, ApiError> {
+    // Normalize to Postgres timestamp precision so stored and delivered
+    // effective times compare exactly.
+    body.effective_at = body
+        .effective_at
+        .duration_round(chrono::Duration::microseconds(1))
+        .map_err(|_| ApiError::bad_request("validation_failed", "effective_at out of range"))?;
     if body.idempotency_key.trim().is_empty() {
         return Err(ApiError::bad_request(
             "validation_failed",
@@ -399,6 +403,16 @@ pub async fn ingest_result(
     .await
     {
         tracing::warn!(%artifact_id, error = ?e, "post-commit ai summary generation failed");
+        // Terminal-failure path: a draft must not remain pending forever.
+        if let Err(mark) = sqlx::query(
+            "UPDATE ai_artifacts SET status='unavailable' WHERE id=$1 AND status='draft'",
+        )
+        .bind(artifact_id)
+        .execute(&state.pool)
+        .await
+        {
+            tracing::warn!(%artifact_id, error = ?mark, "failed to mark draft artifact unavailable");
+        }
     }
 
     Ok(Json(json!({
