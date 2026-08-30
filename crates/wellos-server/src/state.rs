@@ -47,9 +47,7 @@ impl OidcConfig {
     pub fn from_env(is_development: bool) -> anyhow::Result<Option<Self>> {
         let issuer = std::env::var("WELLOS_OIDC_ISSUER").ok();
         let audience = std::env::var("WELLOS_OIDC_AUDIENCE").ok();
-        let discovery = std::env::var("WELLOS_OIDC_DISCOVERY")
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        let discovery = parse_bool("WELLOS_OIDC_DISCOVERY")?.unwrap_or(false);
         let jwks_json = std::env::var("WELLOS_OIDC_JWKS_JSON").ok();
         let jwks_path = std::env::var("WELLOS_OIDC_JWKS_PATH").ok();
         if issuer.is_none()
@@ -84,18 +82,19 @@ impl OidcConfig {
             let jwks: JwkSet = serde_json::from_str(&raw)?;
             JwksKeys::Static(jwks)
         };
-        let leeway_secs = std::env::var("WELLOS_OIDC_LEEWAY_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(60);
-        let require_mfa = std::env::var("WELLOS_OIDC_REQUIRE_MFA")
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        let leeway_secs = parse_secs("WELLOS_OIDC_LEEWAY_SECS", 60)?;
+        let require_mfa = parse_bool("WELLOS_OIDC_REQUIRE_MFA")?.unwrap_or(false);
         let accepted_amr = parse_list("WELLOS_OIDC_ACCEPTED_AMR", &["mfa", "otp", "hwk"]);
         let accepted_acr = parse_list(
             "WELLOS_OIDC_ACCEPTED_ACR",
             &["urn:mace:incommon:iap:silver", "phrh", "phr"],
         );
+        if require_mfa && accepted_amr.is_empty() && accepted_acr.is_empty() {
+            anyhow::bail!(
+                "WELLOS_OIDC_REQUIRE_MFA=true requires at least one accepted \
+                 amr or acr value"
+            );
+        }
         Ok(Some(Self {
             issuer,
             audience,
@@ -105,6 +104,20 @@ impl OidcConfig {
             accepted_amr,
             accepted_acr,
         }))
+    }
+}
+
+/// Parse a security-sensitive boolean flag: only the literal strings `true`
+/// and `false` are accepted. A present-but-malformed value aborts startup
+/// instead of silently weakening the configuration.
+fn parse_bool(var: &str) -> anyhow::Result<Option<bool>> {
+    match std::env::var(var) {
+        Ok(raw) => match raw.as_str() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            _ => anyhow::bail!("{var} must be exactly 'true' or 'false'"),
+        },
+        Err(_) => Ok(None),
     }
 }
 
@@ -160,9 +173,7 @@ impl AuthConfig {
     /// - with dev auth disabled, a configured OIDC provider is mandatory.
     pub fn from_env() -> anyhow::Result<Self> {
         let env = std::env::var("WELLOS_ENV").unwrap_or_else(|_| "development".to_string());
-        let dev_flag = std::env::var("WELLOS_DEV_AUTH")
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        let dev_flag = parse_bool("WELLOS_DEV_AUTH")?.unwrap_or(false);
         if dev_flag && env != "development" {
             anyhow::bail!(
                 "WELLOS_DEV_AUTH=true is only permitted with WELLOS_ENV=development \

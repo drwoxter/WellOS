@@ -223,6 +223,57 @@ fn auth_config_fails_closed_from_env() {
     let cfg = AuthConfig::from_env().unwrap();
     assert!(cfg.dev_auth_enabled);
 
+    // Malformed security-sensitive values abort startup instead of
+    // silently falling back to a weaker default.
+    std::env::set_var("WELLOS_DEV_AUTH", "yes");
+    assert!(
+        AuthConfig::from_env().is_err(),
+        "malformed WELLOS_DEV_AUTH must fail"
+    );
+    std::env::set_var("WELLOS_DEV_AUTH", "true");
+
+    std::env::set_var("WELLOS_OIDC_DISCOVERY", "enabled");
+    assert!(
+        AuthConfig::from_env().is_err(),
+        "malformed WELLOS_OIDC_DISCOVERY must fail"
+    );
+    std::env::remove_var("WELLOS_OIDC_DISCOVERY");
+
+    std::env::set_var("WELLOS_OIDC_ISSUER", "https://idp.example.test");
+    std::env::set_var("WELLOS_OIDC_AUDIENCE", "wellos");
+    std::env::set_var("WELLOS_OIDC_JWKS_JSON", r#"{"keys":[]}"#);
+
+    std::env::set_var("WELLOS_OIDC_REQUIRE_MFA", "1");
+    assert!(
+        AuthConfig::from_env().is_err(),
+        "malformed WELLOS_OIDC_REQUIRE_MFA must fail"
+    );
+    std::env::set_var("WELLOS_OIDC_REQUIRE_MFA", "true");
+
+    std::env::set_var("WELLOS_OIDC_LEEWAY_SECS", "sixty");
+    assert!(
+        AuthConfig::from_env().is_err(),
+        "malformed WELLOS_OIDC_LEEWAY_SECS must fail"
+    );
+    std::env::remove_var("WELLOS_OIDC_LEEWAY_SECS");
+
+    std::env::set_var("WELLOS_OIDC_ACCEPTED_AMR", " , ");
+    std::env::set_var("WELLOS_OIDC_ACCEPTED_ACR", " , ");
+    assert!(
+        AuthConfig::from_env().is_err(),
+        "MFA required with no accepted amr/acr values must fail"
+    );
+
+    for k in [
+        "WELLOS_OIDC_ISSUER",
+        "WELLOS_OIDC_AUDIENCE",
+        "WELLOS_OIDC_JWKS_JSON",
+        "WELLOS_OIDC_REQUIRE_MFA",
+        "WELLOS_OIDC_ACCEPTED_AMR",
+        "WELLOS_OIDC_ACCEPTED_ACR",
+    ] {
+        std::env::remove_var(k);
+    }
     for (k, _) in lock {
         std::env::remove_var(k);
     }

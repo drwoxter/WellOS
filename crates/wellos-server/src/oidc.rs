@@ -181,13 +181,54 @@ impl RemoteJwks {
     }
 }
 
-/// HTTPS is mandatory for identity endpoints outside local development.
+/// HTTPS is mandatory for identity endpoints. Development may use plain
+/// HTTP, but only toward loopback hosts: identity metadata and signing keys
+/// are never fetched over cleartext networks.
 fn require_safe_url(url: &str, allow_http: bool, what: &str) -> anyhow::Result<()> {
     if url.starts_with("https://") {
         return Ok(());
     }
-    if allow_http && url.starts_with("http://") {
+    if allow_http && url.starts_with("http://") && is_loopback_host(url) {
         return Ok(());
     }
-    anyhow::bail!("{what} must be an https:// URL");
+    anyhow::bail!("{what} must be an https:// URL (http:// is allowed only toward loopback hosts in development)");
+}
+
+fn is_loopback_host(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_safe_url;
+
+    #[test]
+    fn https_is_always_accepted() {
+        assert!(require_safe_url("https://idp.example.test", false, "issuer").is_ok());
+        assert!(require_safe_url("https://idp.example.test", true, "issuer").is_ok());
+    }
+
+    #[test]
+    fn http_is_rejected_outside_development() {
+        assert!(require_safe_url("http://localhost:9999", false, "issuer").is_err());
+        assert!(require_safe_url("http://127.0.0.1:9999", false, "issuer").is_err());
+    }
+
+    #[test]
+    fn development_http_is_limited_to_loopback() {
+        assert!(require_safe_url("http://localhost:9999/x", true, "issuer").is_ok());
+        assert!(require_safe_url("http://127.0.0.1:9999", true, "issuer").is_ok());
+        assert!(require_safe_url("http://[::1]:9999", true, "issuer").is_ok());
+        assert!(require_safe_url("http://idp.example.test", true, "issuer").is_err());
+        assert!(require_safe_url("http://10.0.0.5", true, "issuer").is_err());
+        assert!(require_safe_url("http://192.168.1.1:8080", true, "issuer").is_err());
+    }
 }

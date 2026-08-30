@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 async fn insert_session(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     state: &AppState,
     ctx: &AuthContext,
 ) -> Result<(Uuid, String, String, chrono::DateTime<chrono::Utc>), ApiError> {
@@ -35,7 +36,7 @@ async fn insert_session(
     .bind(hash_service_secret(&token))
     .bind(hash_service_secret(&csrf))
     .bind(expires_at)
-    .execute(&state.pool)
+    .execute(&mut **tx)
     .await?;
     Ok((session_id, token, csrf, expires_at))
 }
@@ -52,9 +53,10 @@ pub async fn create(
             "browser sessions are issued to human credentials only".to_string(),
         ));
     }
-    let (session_id, token, csrf, expires_at) = insert_session(&state, &ctx).await?;
+    let mut tx = state.pool.begin().await?;
+    let (session_id, token, csrf, expires_at) = insert_session(&mut tx, &state, &ctx).await?;
     audit::record(
-        &state.pool,
+        &mut *tx,
         &ctx,
         "session.create",
         Some("web_session"),
@@ -64,6 +66,7 @@ pub async fn create(
     )
     .await
     .map_err(ApiError::internal)?;
+    tx.commit().await?;
     Ok(Json(json!({
         "session_token": token,
         "csrf_token": csrf,
@@ -91,8 +94,8 @@ pub async fn get(State(state): State<AppState>, ctx: AuthContext) -> Result<Json
 }
 
 /// Rotate the session identifier and CSRF secret (fixation protection):
-/// revoke the current session and issue a fresh one atomically enough that
-/// the old identifier can never outlive the response.
+/// the old session is revoked, the replacement issued, and the rotation
+/// audited in one transaction, so a failure leaves the caller signed in.
 pub async fn rotate(
     State(state): State<AppState>,
     ctx: AuthContext,
@@ -100,13 +103,14 @@ pub async fn rotate(
     let Some(session_id) = ctx.web_session_id else {
         return Err(ApiError::unauthorized());
     };
+    let mut tx = state.pool.begin().await?;
     sqlx::query("UPDATE web_sessions SET revoked_at = now() WHERE id = $1")
         .bind(session_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
-    let (new_id, token, csrf, expires_at) = insert_session(&state, &ctx).await?;
+    let (new_id, token, csrf, expires_at) = insert_session(&mut tx, &state, &ctx).await?;
     audit::record(
-        &state.pool,
+        &mut *tx,
         &ctx,
         "session.rotate",
         Some("web_session"),
@@ -116,6 +120,7 @@ pub async fn rotate(
     )
     .await
     .map_err(ApiError::internal)?;
+    tx.commit().await?;
     Ok(Json(json!({
         "session_token": token,
         "csrf_token": csrf,
@@ -131,12 +136,13 @@ pub async fn delete(
     let Some(session_id) = ctx.web_session_id else {
         return Err(ApiError::unauthorized());
     };
+    let mut tx = state.pool.begin().await?;
     sqlx::query("UPDATE web_sessions SET revoked_at = now() WHERE id = $1")
         .bind(session_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     audit::record(
-        &state.pool,
+        &mut *tx,
         &ctx,
         "session.revoke",
         Some("web_session"),
@@ -146,5 +152,6 @@ pub async fn delete(
     )
     .await
     .map_err(ApiError::internal)?;
+    tx.commit().await?;
     Ok(Json(json!({ "authenticated": false })))
 }

@@ -462,6 +462,52 @@ async fn open_session(state: &AppState, token: &str) -> (String, String) {
 }
 
 #[tokio::test]
+async fn session_rotation_failure_rolls_back_and_keeps_old_session() {
+    let state = dev_state().await;
+    let (session, _csrf) = open_session(&state, "dev-dr.garcia").await;
+
+    let (session_id, tenant_id): (uuid::Uuid, uuid::Uuid) =
+        sqlx::query_as("SELECT id, tenant_id FROM web_sessions WHERE token_hash = $1")
+            .bind(wellos_server::auth::hash_service_secret(&session))
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+
+    // A context whose user no longer exists makes the replacement insert
+    // fail; the whole rotation must roll back, leaving the old session live.
+    let broken_ctx = wellos_server::auth::AuthContext {
+        user_id: uuid::Uuid::now_v7(),
+        tenant_id,
+        username: "ghost".to_string(),
+        display_name: "Ghost".to_string(),
+        is_service: false,
+        roles: vec![],
+        scopes: vec![],
+        purpose_of_use: wellos_server::policy::Purpose::Treatment,
+        break_glass_reason: None,
+        web_session_id: Some(session_id),
+        correlation_id: uuid::Uuid::now_v7(),
+    };
+    let result =
+        wellos_server::routes::session::rotate(axum::extract::State(state.clone()), broken_ctx)
+            .await;
+    assert!(result.is_err(), "rotation with a broken insert must fail");
+
+    let (revoked_at,): (Option<chrono::DateTime<chrono::Utc>>,) =
+        sqlx::query_as("SELECT revoked_at FROM web_sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert!(
+        revoked_at.is_none(),
+        "failed rotation must not revoke the existing session"
+    );
+    let (status, _) = call(&state, "GET", "/api/v1/auth/session", &session, None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "old session must remain usable");
+}
+
+#[tokio::test]
 async fn session_lifecycle_validate_rotate_logout() {
     let state = dev_state().await;
     let (session, csrf) = open_session(&state, "dev-dr.garcia").await;

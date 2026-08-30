@@ -17,7 +17,8 @@ receive an acknowledgement within 5 business days.
   (`WELLOS_OIDC_DISCOVERY=true`): the issuer's
   `/.well-known/openid-configuration` is fetched at startup, the metadata
   `issuer` must match the configured issuer exactly (issuer pinning), and
-  the advertised `jwks_uri` must be HTTPS outside development. The JWKS is
+  the advertised `jwks_uri` must be HTTPS (development may use plain HTTP
+  toward loopback hosts only). The JWKS is
   cached (refresh interval `WELLOS_OIDC_JWKS_REFRESH_SECS`, default 1h) and
   refreshed automatically when an unknown `kid` appears, bounded by
   `WELLOS_OIDC_JWKS_MIN_REFRESH_SECS` (default 30s) so unknown-kid probing

@@ -28,8 +28,9 @@ export async function GET(req: NextRequest) {
 /**
  * Sign in: exchange the submitted credential for a fresh opaque server-side
  * session. Only the random session identifier and the CSRF token are stored
- * as cookies; the credential itself is never persisted. Any prior session is
- * revoked first (fixation protection).
+ * as cookies; the credential itself is never persisted. A prior session is
+ * revoked only after the new credential exchanges successfully (fixation
+ * protection without logging out on a failed attempt).
  */
 export async function POST(req: NextRequest) {
   let token: unknown;
@@ -47,10 +48,6 @@ export async function POST(req: NextRequest) {
       { error: { code: "validation_failed", message: "token is required" } },
       { status: 400 },
     );
-  }
-  const previous = req.cookies.get(SESSION_COOKIE)?.value;
-  if (previous) {
-    await revokeSession(previous, req.cookies.get(CSRF_COOKIE)?.value);
   }
   const res = await fetch(`${API_URL}/api/v1/auth/session`, {
     method: "POST",
@@ -71,6 +68,10 @@ export async function POST(req: NextRequest) {
     session_token: string;
     csrf_token: string;
   };
+  const previous = req.cookies.get(SESSION_COOKIE)?.value;
+  if (previous) {
+    await revokeSession(previous, req.cookies.get(CSRF_COOKIE)?.value);
+  }
   const response = NextResponse.json({ authenticated: true });
   response.cookies.set(
     SESSION_COOKIE,

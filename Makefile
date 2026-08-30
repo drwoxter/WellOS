@@ -15,8 +15,8 @@ migrate: ## run migrations from empty database (idempotent)
 seed: ## seed synthetic (non-PHI) demo data
 	cargo run -p wellos-server --bin seed
 
-server: ## run the API server
-	cargo run -p wellos-server
+server: ## run the API server (loads .env)
+	set -a; . ./.env; set +a; cargo run -p wellos-server
 
 web: ## run the web UI (dev)
 	cd apps/web && npm run dev
