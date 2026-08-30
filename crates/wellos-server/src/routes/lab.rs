@@ -403,15 +403,12 @@ pub async fn ingest_result(
     .await
     {
         tracing::warn!(%artifact_id, error = ?e, "post-commit ai summary generation failed");
-        // Terminal-failure path: a draft must not remain pending forever.
-        if let Err(mark) = sqlx::query(
-            "UPDATE ai_artifacts SET status='unavailable' WHERE id=$1 AND status='draft'",
-        )
-        .bind(artifact_id)
-        .execute(&state.pool)
-        .await
+        // Internal failure, not a provider outage: invalidate with its audit
+        // record atomically. If persistence itself is unavailable, the draft
+        // stays recoverable and only the operational failure is logged.
+        if let Err(mark) = mark_generation_failed(&state, &ctx, artifact_id, "internal_error").await
         {
-            tracing::warn!(%artifact_id, error = ?mark, "failed to mark draft artifact unavailable");
+            tracing::warn!(%artifact_id, error = ?mark, "failed to invalidate draft artifact");
         }
     }
 
@@ -560,14 +557,41 @@ async fn generate_summary(
             tx.commit().await?;
         }
         Err(other) => {
-            sqlx::query("UPDATE ai_artifacts SET status=$1 WHERE id=$2 AND status=$3")
-                .bind(ArtifactStatus::Invalidated.as_str())
-                .bind(artifact_id)
-                .bind(ArtifactStatus::Draft.as_str())
-                .execute(&state.pool)
-                .await?;
             tracing::warn!(error = %other, "ai artifact generation failed");
+            mark_generation_failed(state, ctx, artifact_id, "provider_error").await?;
         }
     }
+    Ok(())
+}
+
+/// Terminal path for generation failures that are not a provider outage:
+/// the draft becomes `invalidated`, with the lifecycle audit record written
+/// in the same transaction.
+async fn mark_generation_failed(
+    state: &AppState,
+    ctx: &AuthContext,
+    artifact_id: Uuid,
+    reason: &str,
+) -> Result<(), ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let updated = sqlx::query("UPDATE ai_artifacts SET status=$1 WHERE id=$2 AND status=$3")
+        .bind(ArtifactStatus::Invalidated.as_str())
+        .bind(artifact_id)
+        .bind(ArtifactStatus::Draft.as_str())
+        .execute(&mut *tx)
+        .await?;
+    if updated.rows_affected() > 0 {
+        audit::emit(
+            &mut *tx,
+            ctx,
+            "ai.generation.failed",
+            &state.cell,
+            json!({ "artifact_id": artifact_id, "reason": reason }),
+            None,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    }
+    tx.commit().await?;
     Ok(())
 }
