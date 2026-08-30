@@ -418,15 +418,22 @@ pub async fn authorize_with_limit(
     // Contextual check: clinical chart access requires a care relationship
     // (an encounter between practitioner and patient) unless the caller's
     // role is non-clinical-contextual or break-glass is invoked.
-    let needs_relationship = matches!(
-        action,
-        actions::PATIENT_READ
-            | actions::RESULT_REVIEW
-            | actions::PATIENT_NOTIFY
-            | actions::LOOP_CLOSE
-            | actions::AI_REVIEW
-    ) && ctx.has_role(roles::PHYSICIAN)
-        && !ctx.has_role(roles::CLINICAL_ADMIN);
+    let needs_relationship = match action {
+        // Consequential clinical transitions always require an established
+        // care relationship, regardless of the caller's role: facility
+        // assignment alone never authorizes acting on a patient's results.
+        actions::RESULT_REVIEW
+        | actions::PATIENT_NOTIFY
+        | actions::LOOP_CLOSE
+        | actions::AI_REVIEW => true,
+        // Chart reads require a relationship for physicians; other clinical
+        // roles read within their facility scope (enforced above), and
+        // tenant-wide administrative reads remain explicit and audited.
+        actions::PATIENT_READ => {
+            ctx.has_role(roles::PHYSICIAN) && !ctx.has_role(roles::CLINICAL_ADMIN)
+        }
+        _ => false,
+    };
 
     if needs_relationship {
         if let Some(ResourceCtx {

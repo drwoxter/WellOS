@@ -1206,6 +1206,34 @@ async fn mismatched_result_code_is_rejected() {
 }
 
 #[tokio::test]
+async fn nurse_without_care_relationship_cannot_notify() {
+    let (state, _) = test_state().await;
+    let lp = run_to_received(&state, 5.0).await;
+
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/service-requests/{}/review", lp.service_request_id),
+        "dev-dr.garcia",
+        Some(json!({ "version": lp.version })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (st, body) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/service-requests/{}/notify", lp.service_request_id),
+        "dev-nurse.kim",
+        Some(json!({ "version": lp.version + 1, "note": "call attempted" })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+}
+
+#[tokio::test]
 async fn notify_and_close_require_documentation_note() {
     let (state, _) = test_state().await;
     let lp = run_to_received(&state, 5.0).await;
