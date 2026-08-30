@@ -955,6 +955,64 @@ async fn emergency_purpose_requires_break_glass_role_for_search_and_read() {
 }
 
 #[tokio::test]
+async fn cross_tenant_role_assignments_grant_nothing() {
+    let state = dev_state().await;
+    let (home_tenant, other_tenant): (uuid::Uuid, uuid::Uuid) = {
+        let home: (uuid::Uuid,) =
+            sqlx::query_as("SELECT tenant_id FROM users WHERE username = 'dr.garcia'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        let other: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM tenants WHERE id <> $1 LIMIT 1")
+            .bind(home.0)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        (home.0, other.0)
+    };
+
+    // A user in the home tenant whose only role is assigned under another
+    // tenant must have no privileges in the home tenant.
+    let username = format!("crosstenant.{}", uuid::Uuid::now_v7().simple());
+    let uid = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, username, display_name) VALUES ($1,$2,$3,'Cross Tenant Role')",
+    )
+    .bind(uid)
+    .bind(home_tenant)
+    .bind(&username)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id)
+         SELECT $1, $2, $3, 'physician', f.id FROM facilities f WHERE f.tenant_id = $2 LIMIT 1",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(other_tenant)
+    .bind(uid)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let token = format!("dev-{username}");
+    let (status, _) = call(
+        &state,
+        "GET",
+        "/api/v1/patients?query=pat",
+        &token,
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a role assigned under another tenant must grant nothing"
+    );
+}
+
+#[tokio::test]
 async fn responses_carry_security_headers() {
     let state = dev_state().await;
     let req = Request::builder()

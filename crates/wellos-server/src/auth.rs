@@ -396,9 +396,12 @@ pub async fn load_auth(
     } else {
         return Err(ApiError::unauthorized());
     };
+    // Roles are tenant-scoped: an assignment recorded under another tenant
+    // never grants privileges inside the principal's tenant.
     let roles: Vec<(String,)> =
-        sqlx::query_as("SELECT role FROM role_assignments WHERE user_id = $1")
+        sqlx::query_as("SELECT role FROM role_assignments WHERE user_id = $1 AND tenant_id = $2")
             .bind(principal.user_id)
+            .bind(principal.tenant_id)
             .fetch_all(&state.pool)
             .await?;
     Ok(AuthContext {
