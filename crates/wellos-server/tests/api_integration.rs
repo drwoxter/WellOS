@@ -900,6 +900,64 @@ async fn amendment_retires_stale_critical_alerts_and_tasks() {
 }
 
 #[tokio::test]
+async fn amendment_keeps_observation_rows_append_only() {
+    let (state, _) = test_state().await;
+    let lp = run_to_received(&state, 7.1).await;
+
+    let (st, corrected) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        "dev-lab.chen",
+        Some(json!({
+            "service_request_id": lp.service_request_id,
+            "code_loinc": "2823-3",
+            "value": 4.1,
+            "unit": "mmol/L",
+            "source_system": "fake-lab",
+            "idempotency_key": uniq("append-only"),
+            "effective_at": chrono::Utc::now(),
+            "amends_observation_id": lp.observation_id,
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{corrected}");
+
+    // The historical row is never mutated: original status and value remain.
+    let (status, value): (String, String) =
+        sqlx::query_as("SELECT status, value_num::text FROM observations WHERE id = $1::uuid")
+            .bind(&lp.observation_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "final");
+    assert_eq!(value, "7.1");
+
+    // Supersession is derived from the amends relationship in presentation.
+    let (_, detail) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/service-requests/{}", lp.service_request_id),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    let obs = detail["observations"].as_array().unwrap();
+    let old = obs
+        .iter()
+        .find(|o| o["id"] == json!(lp.observation_id))
+        .unwrap();
+    assert_eq!(old["status"], "amended-superseded", "{detail}");
+    let new_obs = obs
+        .iter()
+        .find(|o| o["amends"] == json!(lp.observation_id))
+        .unwrap();
+    assert_eq!(new_obs["status"], "corrected", "{detail}");
+}
+
+#[tokio::test]
 async fn research_user_has_no_clinical_access() {
     let (state, _) = test_state().await;
     let (st, _) = call(

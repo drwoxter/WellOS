@@ -313,7 +313,7 @@ pub async fn detail(
     .fetch_one(&state.pool)
     .await?;
 
-    let observations = sqlx::query(
+    let observation_rows = sqlx::query(
         "SELECT id, code_loinc, value_num::text AS value_num, unit, reference_range, status,
                 amends, source_system, effective_at, received_at
          FROM observations WHERE tenant_id=$1 AND service_request_id=$2 ORDER BY received_at",
@@ -321,23 +321,36 @@ pub async fn detail(
     .bind(sr.tenant_id)
     .bind(id)
     .fetch_all(&state.pool)
-    .await?
-    .iter()
-    .map(|r| {
-        json!({
-            "id": r.get::<Uuid,_>("id"),
-            "code_loinc": r.get::<String,_>("code_loinc"),
-            "value": r.get::<String,_>("value_num"),
-            "unit": r.get::<String,_>("unit"),
-            "reference_range": r.get::<Option<String>,_>("reference_range"),
-            "status": r.get::<String,_>("status"),
-            "amends": r.get::<Option<Uuid>,_>("amends"),
-            "source_system": r.get::<String,_>("source_system"),
-            "effective_at": r.get::<chrono::DateTime<chrono::Utc>,_>("effective_at"),
-            "received_at": r.get::<chrono::DateTime<chrono::Utc>,_>("received_at"),
+    .await?;
+    // Observation rows are append-only: supersession is derived from the
+    // amendment relationship instead of mutating historical rows.
+    let amended_ids: std::collections::HashSet<Uuid> = observation_rows
+        .iter()
+        .filter_map(|r| r.get::<Option<Uuid>, _>("amends"))
+        .collect();
+    let observations = observation_rows
+        .iter()
+        .map(|r| {
+            let obs_id = r.get::<Uuid, _>("id");
+            let status = if amended_ids.contains(&obs_id) {
+                "amended-superseded".to_string()
+            } else {
+                r.get::<String, _>("status")
+            };
+            json!({
+                "id": obs_id,
+                "code_loinc": r.get::<String,_>("code_loinc"),
+                "value": r.get::<String,_>("value_num"),
+                "unit": r.get::<String,_>("unit"),
+                "reference_range": r.get::<Option<String>,_>("reference_range"),
+                "status": status,
+                "amends": r.get::<Option<Uuid>,_>("amends"),
+                "source_system": r.get::<String,_>("source_system"),
+                "effective_at": r.get::<chrono::DateTime<chrono::Utc>,_>("effective_at"),
+                "received_at": r.get::<chrono::DateTime<chrono::Utc>,_>("received_at"),
+            })
         })
-    })
-    .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
 
     let rule_evaluations = sqlx::query(
         "SELECT re.rule_id, re.rule_version, re.outcome, re.evaluated_at

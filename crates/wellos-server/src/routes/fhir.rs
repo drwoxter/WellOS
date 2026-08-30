@@ -58,7 +58,10 @@ pub async fn observation(
 ) -> Result<Json<Value>, ApiError> {
     let row = sqlx::query(
         "SELECT id, tenant_id, patient_id, code_loinc, value_num::text AS value_num, unit,
-                reference_range, status, effective_at
+                reference_range, status, effective_at,
+                EXISTS(SELECT 1 FROM observations o2
+                       WHERE o2.tenant_id = observations.tenant_id AND o2.amends = observations.id)
+                    AS superseded
          FROM observations WHERE id = $1",
     )
     .bind(id)
@@ -80,10 +83,13 @@ pub async fn observation(
     .record_on_pool(&state, &ctx)
     .await?;
     let status: String = row.get("status");
+    // Observation rows are append-only: supersession is derived from the
+    // amendment relationship, never from mutating the historical row.
+    let superseded: bool = row.get("superseded");
     Ok(Json(json!({
         "resourceType": "Observation",
         "id": id,
-        "status": if status == "corrected" { "corrected" } else if status == "amended-superseded" { "amended" } else { "final" },
+        "status": if superseded { "amended" } else if status == "corrected" { "corrected" } else { "final" },
         "code": { "coding": [{ "system": "http://loinc.org", "code": row.get::<String,_>("code_loinc") }] },
         "subject": { "reference": format!("Patient/{patient_id}") },
         "effectiveDateTime": row.get::<chrono::DateTime<chrono::Utc>,_>("effective_at").to_rfc3339(),

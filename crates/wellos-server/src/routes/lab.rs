@@ -164,17 +164,19 @@ pub async fn ingest_result(
     allowed.record(&mut tx, &ctx, &state.cell).await?;
 
     if let Some(amended_id) = body.amends_observation_id {
-        // Preserve the previous version; never overwrite clinical history.
-        let updated = sqlx::query(
-            "UPDATE observations SET status = 'amended-superseded'
+        // Observation rows are append-only: the correction is recorded as a
+        // new observation linked through `amends`, and supersession is
+        // derived from that relationship rather than mutating the prior row.
+        let amended: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM observations
              WHERE id = $1 AND tenant_id = $2 AND service_request_id = $3",
         )
         .bind(amended_id)
         .bind(tenant_id)
         .bind(body.service_request_id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        if updated.rows_affected() == 0 {
+        if amended.is_none() {
             return Err(ApiError::bad_request(
                 "unknown_amended_observation",
                 "amends_observation_id does not match an observation of this request",
