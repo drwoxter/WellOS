@@ -30,7 +30,7 @@ fn tenant_resource(ctx: &AuthContext) -> Option<ResourceCtx> {
 /// allow, so a credential cannot hold latent permissions that a later role
 /// grant would silently activate.
 async fn require_scopes_within_roles(
-    pool: &sqlx::PgPool,
+    executor: impl sqlx::PgExecutor<'_>,
     tenant_id: Uuid,
     service_user_id: Uuid,
     scopes: &[String],
@@ -39,7 +39,7 @@ async fn require_scopes_within_roles(
         sqlx::query_as("SELECT role FROM role_assignments WHERE user_id = $1 AND tenant_id = $2")
             .bind(service_user_id)
             .bind(tenant_id)
-            .fetch_all(pool)
+            .fetch_all(executor)
             .await?;
     for scope in scopes {
         if !roles.iter().any(|(role,)| role_allows(role, scope)) {
@@ -224,7 +224,7 @@ pub async fn rotate(
     .await?
     .ok_or_else(ApiError::not_found)?;
     require_scopes_within_roles(
-        &state.pool,
+        &mut *tx,
         ctx.tenant_id,
         row.get::<Uuid, _>("user_id"),
         &row.get::<Vec<String>, _>("scopes"),
