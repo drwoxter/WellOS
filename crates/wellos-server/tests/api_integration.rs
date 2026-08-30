@@ -532,18 +532,29 @@ async fn break_glass_same_tenant_requires_reason_and_is_audited() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    let events = audit["events"].as_array().unwrap();
-    assert!(events.iter().any(|e| {
-        e["actor"] == Value::String(format!("user:{emergency}"))
-            && e["break_glass"] == true
-            && e["resource_id"] == Value::String(patient_id.clone())
-    }));
+    assert!(!audit["events"].as_array().unwrap().is_empty());
+    // Query the audit table directly: concurrent tests can push these events
+    // past the endpoint's fixed page size.
+    let (allowed,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM audit_events
+         WHERE actor = $1 AND break_glass AND resource_id = $2",
+    )
+    .bind(format!("user:{emergency}"))
+    .bind(&patient_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(allowed > 0);
     // Denied attempts are audited too.
-    assert!(events.iter().any(|e| {
-        e["actor"] == "user:dr.lopez"
-            && e["decision"] == "deny"
-            && e["reason"] == "break_glass_not_authorized"
-    }));
+    let (denied,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM audit_events
+         WHERE actor = 'user:dr.lopez' AND decision = 'deny'
+           AND reason = 'break_glass_not_authorized'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(denied > 0);
 }
 
 #[tokio::test]
