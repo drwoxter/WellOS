@@ -346,6 +346,30 @@ fn mfa_satisfied(cfg: &OidcConfig, claims: &OidcClaims) -> bool {
     }
 }
 
+/// A JWK may only verify tokens whose header algorithm matches the key's
+/// declared algorithm (when present), and only keys published for signature
+/// verification are accepted.
+fn jwk_matches_algorithm(jwk: &jsonwebtoken::jwk::Jwk, alg: Algorithm) -> bool {
+    if let Some(u) = &jwk.common.public_key_use {
+        if *u != jsonwebtoken::jwk::PublicKeyUse::Signature {
+            return false;
+        }
+    }
+    if let Some(jwk_alg) = jwk.common.key_algorithm {
+        use jsonwebtoken::jwk::KeyAlgorithm as K;
+        return matches!(
+            (jwk_alg, alg),
+            (K::RS256, Algorithm::RS256)
+                | (K::RS384, Algorithm::RS384)
+                | (K::RS512, Algorithm::RS512)
+                | (K::ES256, Algorithm::ES256)
+                | (K::ES384, Algorithm::ES384)
+                | (K::EdDSA, Algorithm::EdDSA)
+        );
+    }
+    true
+}
+
 async fn validate_oidc_token(cfg: &OidcConfig, token: &str) -> Result<OidcClaims, ApiError> {
     let header = decode_header(token).map_err(|_| ApiError::unauthorized())?;
     if !OIDC_ALGORITHMS.contains(&header.alg) {
@@ -356,6 +380,9 @@ async fn validate_oidc_token(cfg: &OidcConfig, token: &str) -> Result<OidcClaims
         .find_key(header.kid.as_deref())
         .await
         .ok_or_else(ApiError::unauthorized)?;
+    if !jwk_matches_algorithm(&jwk, header.alg) {
+        return Err(ApiError::unauthorized());
+    }
     let key = DecodingKey::from_jwk(&jwk).map_err(|_| ApiError::unauthorized())?;
     let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[&cfg.issuer]);

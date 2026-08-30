@@ -798,6 +798,108 @@ async fn amended_result_preserves_history_and_reopens_review() {
 }
 
 #[tokio::test]
+async fn amendment_retires_stale_critical_alerts_and_tasks() {
+    let (state, _) = test_state().await;
+    let lp = run_to_received(&state, 7.1).await;
+
+    let detail = |state: &AppState| {
+        let state = state.clone();
+        let sr = lp.service_request_id.clone();
+        async move {
+            let (_, d) = call(
+                &state,
+                "GET",
+                &format!("/api/v1/service-requests/{sr}"),
+                "dev-dr.garcia",
+                None,
+                &[],
+            )
+            .await;
+            d
+        }
+    };
+    let open_alerts = |d: &Value| {
+        d["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["status"] == "open")
+            .count()
+    };
+    let open_tasks = |d: &Value| {
+        d["follow_up_tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["status"] == "open" || t["status"] == "overdue")
+            .count()
+    };
+
+    let d = detail(&state).await;
+    assert_eq!(open_alerts(&d), 1, "critical result raises an alert: {d}");
+    assert_eq!(open_tasks(&d), 1, "critical result raises a task: {d}");
+
+    // Critical-to-normal correction: stale alert/task retired, none created.
+    let (st, corrected) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        "dev-lab.chen",
+        Some(json!({
+            "service_request_id": lp.service_request_id,
+            "code_loinc": "2823-3",
+            "value": 4.1,
+            "unit": "mmol/L",
+            "source_system": "fake-lab",
+            "idempotency_key": uniq("amend-normal"),
+            "effective_at": chrono::Utc::now(),
+            "amends_observation_id": lp.observation_id,
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{corrected}");
+    assert_eq!(corrected["critical"], false);
+    let d = detail(&state).await;
+    assert_eq!(open_alerts(&d), 0, "normal correction retires alerts: {d}");
+    assert_eq!(open_tasks(&d), 0, "normal correction retires tasks: {d}");
+
+    // Critical-to-critical correction: fresh alert/task replace the stale ones.
+    let normal_obs_id = corrected["observation_id"].as_str().unwrap().to_string();
+    let (st, recrit) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        "dev-lab.chen",
+        Some(json!({
+            "service_request_id": lp.service_request_id,
+            "code_loinc": "2823-3",
+            "value": 7.9,
+            "unit": "mmol/L",
+            "source_system": "fake-lab",
+            "idempotency_key": uniq("amend-critical"),
+            "effective_at": chrono::Utc::now(),
+            "amends_observation_id": normal_obs_id,
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{recrit}");
+    assert_eq!(recrit["critical"], true);
+    let d = detail(&state).await;
+    assert_eq!(
+        open_alerts(&d),
+        1,
+        "critical correction raises one alert: {d}"
+    );
+    assert_eq!(
+        open_tasks(&d),
+        1,
+        "critical correction raises one task: {d}"
+    );
+}
+
+#[tokio::test]
 async fn research_user_has_no_clinical_access() {
     let (state, _) = test_state().await;
     let (st, _) = call(

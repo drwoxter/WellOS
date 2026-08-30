@@ -24,18 +24,43 @@ const FORWARDED_HEADERS = [
   "x-csrf-token",
 ];
 
-export function sessionCookieOptions() {
+/** Fallback cookie lifetime when the API's expiry is unavailable. */
+const DEFAULT_SESSION_SECS = 60 * 60 * 8;
+
+/**
+ * Cookie lifetime derived from the server-side session's absolute expiry,
+ * so the browser cookie and the API session expire together regardless of
+ * the configured `WELLOS_SESSION_ABSOLUTE_SECS`.
+ */
+function cookieMaxAge(expiresAt?: string): number {
+  if (!expiresAt) return DEFAULT_SESSION_SECS;
+  const secs = Math.floor((Date.parse(expiresAt) - Date.now()) / 1000);
+  return Number.isFinite(secs) && secs > 0 ? secs : DEFAULT_SESSION_SECS;
+}
+
+/**
+ * Secure follows the deployment environment (`WELLOS_ENV`), not the Next.js
+ * build mode: only explicit local development may send cookies over plain
+ * HTTP. When `WELLOS_ENV` is unset, fall back to the build mode.
+ */
+function secureCookies(): boolean {
+  const env = process.env.WELLOS_ENV;
+  if (env) return env !== "development";
+  return process.env.NODE_ENV === "production";
+}
+
+export function sessionCookieOptions(expiresAt?: string) {
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: secureCookies(),
     sameSite: "strict" as const,
     path: "/",
-    maxAge: 60 * 60 * 8,
+    maxAge: cookieMaxAge(expiresAt),
   };
 }
 
-export function csrfCookieOptions() {
-  return { ...sessionCookieOptions(), httpOnly: false };
+export function csrfCookieOptions(expiresAt?: string) {
+  return { ...sessionCookieOptions(expiresAt), httpOnly: false };
 }
 
 /**

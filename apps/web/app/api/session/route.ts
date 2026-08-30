@@ -67,6 +67,7 @@ export async function POST(req: NextRequest) {
   const session = (await res.json()) as {
     session_token: string;
     csrf_token: string;
+    expires_at?: string;
   };
   const previous = req.cookies.get(SESSION_COOKIE)?.value;
   if (previous) {
@@ -76,9 +77,13 @@ export async function POST(req: NextRequest) {
   response.cookies.set(
     SESSION_COOKIE,
     session.session_token,
-    sessionCookieOptions(),
+    sessionCookieOptions(session.expires_at),
   );
-  response.cookies.set(CSRF_COOKIE, session.csrf_token, csrfCookieOptions());
+  response.cookies.set(
+    CSRF_COOKIE,
+    session.csrf_token,
+    csrfCookieOptions(session.expires_at),
+  );
   return response;
 }
 

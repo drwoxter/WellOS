@@ -191,6 +191,26 @@ pub async fn ingest_result(
         .bind(amended_id)
         .execute(&mut *tx)
         .await?;
+        // Workflow items raised for the superseded result no longer describe
+        // the current clinical picture: retire open alerts on that
+        // observation and open follow-up tasks on the request. If the
+        // corrected result is still critical, fresh ones are created below.
+        sqlx::query(
+            "UPDATE alerts SET status='superseded'
+             WHERE tenant_id=$1 AND observation_id=$2 AND status='open'",
+        )
+        .bind(tenant_id)
+        .bind(amended_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE follow_up_tasks SET status='superseded'
+             WHERE tenant_id=$1 AND service_request_id=$2 AND status IN ('open','overdue')",
+        )
+        .bind(tenant_id)
+        .bind(body.service_request_id)
+        .execute(&mut *tx)
+        .await?;
     }
 
     let inserted = sqlx::query(

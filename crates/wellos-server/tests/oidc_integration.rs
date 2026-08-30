@@ -122,6 +122,29 @@ async fn valid_oidc_token_maps_subject_to_local_identity() {
 }
 
 #[tokio::test]
+async fn oidc_rejects_key_with_mismatched_alg_or_non_signature_use() {
+    let idp = test_idp(7, "test-key");
+    let token = encode(
+        &idp.header,
+        &claims("synthetic|dr.garcia", ISSUER, AUDIENCE, 600),
+        &idp.encoding_key,
+    )
+    .unwrap();
+
+    // The published key declares a different algorithm than the token header.
+    let mut jwks: serde_json::Value = serde_json::from_str(&idp.jwks_json).unwrap();
+    jwks["keys"][0]["alg"] = json!("RS256");
+    let state = state_with(false, Some(&jwks.to_string())).await;
+    assert_eq!(get_worklist(&state, &token).await, StatusCode::UNAUTHORIZED);
+
+    // The published key is intended for encryption, not signing.
+    let mut jwks: serde_json::Value = serde_json::from_str(&idp.jwks_json).unwrap();
+    jwks["keys"][0]["use"] = json!("enc");
+    let state = state_with(false, Some(&jwks.to_string())).await;
+    assert_eq!(get_worklist(&state, &token).await, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn oidc_rejects_bad_issuer_audience_expiry_subject_and_signature() {
     let idp = test_idp(7, "test-key");
     let state = state_with(false, Some(&idp.jwks_json)).await;
