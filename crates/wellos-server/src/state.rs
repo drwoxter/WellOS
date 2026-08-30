@@ -101,10 +101,20 @@ impl AuthConfig {
                  development only, WELLOS_ENV=development with WELLOS_DEV_AUTH=true)"
             );
         }
-        let break_glass_hourly_limit = std::env::var("WELLOS_BREAK_GLASS_HOURLY_LIMIT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(5);
+        // Malformed or non-positive limits abort startup: emergency access
+        // must never be silently disabled by a configuration typo.
+        let break_glass_hourly_limit = match std::env::var("WELLOS_BREAK_GLASS_HOURLY_LIMIT") {
+            Ok(raw) => {
+                let parsed: i64 = raw.parse().map_err(|_| {
+                    anyhow::anyhow!("WELLOS_BREAK_GLASS_HOURLY_LIMIT must be a positive integer")
+                })?;
+                if parsed < 1 {
+                    anyhow::bail!("WELLOS_BREAK_GLASS_HOURLY_LIMIT must be at least 1");
+                }
+                parsed
+            }
+            Err(_) => 5,
+        };
         Ok(Self {
             dev_auth_enabled,
             oidc,

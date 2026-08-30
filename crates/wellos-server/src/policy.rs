@@ -303,12 +303,20 @@ pub async fn authorize_with_limit(
                         used_break_glass: false,
                     });
                 }
+                // Count and insert under a per-user transaction-scoped
+                // advisory lock so concurrent requests cannot all pass the
+                // limit check before any activation is recorded.
+                let mut tx = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+                    .bind(ctx.user_id)
+                    .execute(&mut *tx)
+                    .await?;
                 let (recent,): (i64,) = sqlx::query_as(
                     "SELECT COUNT(*) FROM break_glass_events
                      WHERE user_id = $1 AND created_at > now() - interval '1 hour'",
                 )
                 .bind(ctx.user_id)
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
                 if recent >= break_glass_hourly_limit {
                     return Ok(Decision {
@@ -330,8 +338,9 @@ pub async fn authorize_with_limit(
                 .bind(reason)
                 .bind(ctx.correlation_id)
                 .bind(ctx.purpose_of_use.as_str())
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
+                tx.commit().await?;
                 return Ok(Decision {
                     allowed: true,
                     reason: "break_glass".into(),

@@ -25,20 +25,23 @@ struct SrCtx {
     tenant_id: Uuid,
     patient_id: Uuid,
     state: LoopState,
+    version: i64,
 }
 
 async fn load_sr(state: &AppState, id: Uuid) -> Result<SrCtx, ApiError> {
-    let sr =
-        sqlx::query("SELECT tenant_id, patient_id, loop_state FROM service_requests WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
+    let sr = sqlx::query(
+        "SELECT tenant_id, patient_id, loop_state, version FROM service_requests WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
     Ok(SrCtx {
         tenant_id: sr.get("tenant_id"),
         patient_id: sr.get("patient_id"),
         state: LoopState::parse(sr.get::<String, _>("loop_state").as_str())
             .ok_or_else(|| ApiError::internal("invalid loop state"))?,
+        version: sr.get("version"),
     })
 }
 
@@ -83,6 +86,15 @@ async fn transition(
             "note exceeds 4000 characters",
         ));
     }
+    // The expected version must match the same snapshot the state was read
+    // from, so a concurrently committed transition cannot be replayed by
+    // guessing the next version number.
+    if body.version != sr.version {
+        return Err(ApiError::conflict(
+            "version_conflict",
+            "service request was modified concurrently",
+        ));
+    }
     let next = sr
         .state
         .apply(t)
@@ -92,11 +104,12 @@ async fn transition(
     allowed.record(&mut tx, ctx, &state.cell).await?;
     let updated = sqlx::query(
         "UPDATE service_requests SET loop_state = $1, version = version + 1
-         WHERE id = $2 AND version = $3",
+         WHERE id = $2 AND version = $3 AND loop_state = $4",
     )
     .bind(next.as_str())
     .bind(id)
-    .bind(body.version)
+    .bind(sr.version)
+    .bind(sr.state.as_str())
     .execute(&mut *tx)
     .await?;
     if updated.rows_affected() == 0 {
