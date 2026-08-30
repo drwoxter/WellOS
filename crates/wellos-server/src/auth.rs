@@ -402,6 +402,17 @@ pub(crate) async fn validate_oidc_token(
     cfg: &OidcConfig,
     token: &str,
 ) -> Result<OidcClaims, ApiError> {
+    validate_oidc_token_for_audience(cfg, token, &cfg.audience).await
+}
+
+/// Validate a token with an explicit expected audience. Bearer API tokens
+/// use the configured API audience; ID tokens from the browser
+/// authorization-code flow are targeted at the browser client ID.
+pub(crate) async fn validate_oidc_token_for_audience(
+    cfg: &OidcConfig,
+    token: &str,
+    audience: &str,
+) -> Result<OidcClaims, ApiError> {
     let header = decode_header(token).map_err(|_| ApiError::unauthorized())?;
     if !OIDC_ALGORITHMS.contains(&header.alg) {
         return Err(ApiError::unauthorized());
@@ -417,7 +428,7 @@ pub(crate) async fn validate_oidc_token(
     let key = DecodingKey::from_jwk(&jwk).map_err(|_| ApiError::unauthorized())?;
     let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[&cfg.issuer]);
-    validation.set_audience(&[&cfg.audience]);
+    validation.set_audience(&[audience]);
     validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
     validation.validate_nbf = true;
     validation.leeway = cfg.leeway_secs;

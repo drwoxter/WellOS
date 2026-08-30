@@ -233,7 +233,7 @@ impl AuthConfig {
                 search_per_min: 10_000,
                 cred_admin_per_min: 10_000,
                 api_per_min: 100_000,
-                trusted_proxy: false,
+                trusted_proxies: Vec::new(),
             },
         }
     }
@@ -282,7 +282,7 @@ impl AuthConfig {
             search_per_min: parse_positive_i64("WELLOS_RATE_SEARCH_PER_MIN", 30)?,
             cred_admin_per_min: parse_positive_i64("WELLOS_RATE_CRED_ADMIN_PER_MIN", 30)?,
             api_per_min: parse_positive_i64("WELLOS_RATE_API_PER_MIN", 600)?,
-            trusted_proxy: parse_bool("WELLOS_TRUSTED_PROXY")?.unwrap_or(false),
+            trusted_proxies: parse_trusted_proxies("WELLOS_TRUSTED_PROXIES")?,
         };
         Ok(Self {
             dev_auth_enabled,
@@ -306,6 +306,24 @@ impl AuthConfig {
             remote.initialize().await?;
         }
         Ok(())
+    }
+}
+
+/// Parse the comma-separated list of proxy/BFF peer IP addresses trusted to
+/// assert the end-client address. Malformed entries abort startup rather
+/// than silently trusting nothing (or everything).
+fn parse_trusted_proxies(var: &str) -> anyhow::Result<Vec<std::net::IpAddr>> {
+    match std::env::var(var) {
+        Ok(raw) => raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.parse()
+                    .map_err(|_| anyhow::anyhow!("{var} must be comma-separated IP addresses"))
+            })
+            .collect(),
+        Err(_) => Ok(Vec::new()),
     }
 }
 

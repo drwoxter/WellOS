@@ -15,6 +15,13 @@ export const SESSION_COOKIE = "wellos_session";
  */
 export const CSRF_COOKIE = "wellos_csrf";
 
+/**
+ * Name of the short-lived HttpOnly cookie binding an in-flight OIDC login
+ * to the browser that initiated it. SameSite=Lax so it survives the
+ * top-level redirect back from the identity provider; cleared at callback.
+ */
+export const LOGIN_BINDING_COOKIE = "wellos_login";
+
 export const API_URL = process.env.WELLOS_API_URL ?? "http://localhost:8080";
 
 /** Headers the browser may set that are forwarded to the API. */
@@ -61,6 +68,34 @@ export function sessionCookieOptions(expiresAt?: string) {
 
 export function csrfCookieOptions(expiresAt?: string) {
   return { ...sessionCookieOptions(expiresAt), httpOnly: false };
+}
+
+export function loginBindingCookieOptions(maxAgeSecs: number) {
+  return {
+    httpOnly: true,
+    secure: secureCookies(),
+    sameSite: "lax" as const,
+    path: "/api/auth/oidc",
+    maxAge: maxAgeSecs > 0 ? maxAgeSecs : 600,
+  };
+}
+
+/**
+ * Assert the end-client address to the API for anonymous login rate
+ * limiting, so each browser gets its own bucket instead of all sharing the
+ * BFF's peer address. The address is derived from trusted platform request
+ * metadata only: `WELLOS_WEB_BEHIND_TRUSTED_PROXY=true` declares that a
+ * trusted platform proxy fronts this app, in which case the rightmost
+ * `x-forwarded-for` entry (the one that proxy appended) identifies the
+ * client. A browser-controlled header is never relayed as-is. The API in
+ * turn honors the assertion only when this BFF's own peer address is listed
+ * in `WELLOS_TRUSTED_PROXIES`.
+ */
+export function clientAddressHeaders(req: NextRequest): Record<string, string> {
+  if (process.env.WELLOS_WEB_BEHIND_TRUSTED_PROXY !== "true") return {};
+  const chain = req.headers.get("x-forwarded-for");
+  const address = chain?.split(",").pop()?.trim();
+  return address ? { "x-wellos-client-address": address } : {};
 }
 
 /** Bounded 503 returned when the backend API cannot be reached. */

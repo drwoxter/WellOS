@@ -108,7 +108,13 @@ receive an acknowledgement within 5 business days.
 - **Rate limiting** is shared and PostgreSQL-backed (atomic fixed windows in
   `rate_limit_windows`, safe across replicas and concurrent requests).
   Anonymous OIDC login/callback traffic is limited per hashed client
-  address (`x-forwarded-for` is honored only with `WELLOS_TRUSTED_PROXY`);
+  address. An asserted client address (`x-wellos-client-address`, or the
+  rightmost `x-forwarded-for` entry) is honored only when the immediate
+  peer is listed in `WELLOS_TRUSTED_PROXIES`; otherwise the socket peer
+  address keys the bucket, so direct callers cannot rotate buckets with
+  forged headers. The bundled BFF asserts the end-client address only when
+  `WELLOS_WEB_BEHIND_TRUSTED_PROXY=true` declares a trusted platform proxy
+  in front of it, and never relays a browser-controlled chain as-is;
   authenticated traffic is limited per tenant+principal per endpoint family
   (patient search, credential administration, general API). Exhaustion
   returns a bounded JSON `429` with `Retry-After`; denials are audited
@@ -137,16 +143,23 @@ receive an acknowledgement within 5 business days.
 - **Browser OIDC login (Authorization Code + PKCE, S256):** the BFF
   initiates login server-side (`/api/auth/oidc/login`): the API generates a
   cryptographically random state, nonce, and code verifier, stores the
-  single-use login transaction server-side (hashes of state/nonce; ≤ 10
-  minutes), and returns the provider authorization URL built from
+  single-use login transaction server-side (hashes of
+  state/nonce/binding; ≤ 10 minutes), and returns the provider authorization URL built from
   discovery-validated, issuer-pinned endpoints. The provider redirects to
   the exact configured redirect URI; the BFF callback posts `code`/`state`
-  to the API, which atomically consumes the transaction (replays, expired
-  transactions, state/nonce mismatches, provider errors, and exchange
-  failures are rejected), exchanges the code server-side with PKCE, and
-  validates the ID token through the same JWKS/issuer/audience/MFA boundary
-  as bearer tokens. Only the local `(issuer, subject)` mapping identifies
-  the user — email/role/tenant claims are never trusted — and only opaque
+  to the API together with a one-time browser-binding secret the BFF held
+  in a short-lived HttpOnly cookie since initiation (only its hash is
+  stored server-side), so a completed callback URL planted into another
+  browser cannot claim the transaction (login CSRF / session swapping).
+  The API atomically consumes the transaction (replays, expired
+  transactions, state/nonce/binding mismatches, provider errors, and
+  exchange failures are rejected), exchanges the code server-side with
+  PKCE, and validates the ID token through the same JWKS/issuer/MFA
+  boundary as bearer tokens — with the audience checked against the
+  browser client ID (`WELLOS_OIDC_CLIENT_ID`), while direct API bearer
+  tokens keep the API audience (`WELLOS_OIDC_AUDIENCE`). Only the local
+  `(issuer, subject)` mapping identifies the user — email/role/tenant
+  claims are never trusted — and only opaque
   `wss_`/`wsc_` values are issued to the browser. Provider tokens never
   reach browser JavaScript, cookies, URLs, logs, or audit payloads. Logout
   revokes the local session first; a discovery-validated

@@ -46,8 +46,10 @@ unavailable store (denied with Retry-After / fail-closed).
 
 Fixed windows allow a boundary burst of up to twice the per-minute limit.
 Anonymous denials are logged (no principal exists to audit); the anonymous
-key hashes the socket peer address, or `x-forwarded-for` only when
-`WELLOS_TRUSTED_PROXY` is explicitly enabled. The PKCE code verifier is
+key hashes the socket peer address; an asserted client address
+(`x-wellos-client-address` or the rightmost `x-forwarded-for` entry) is
+honored only when the immediate peer is listed in
+`WELLOS_TRUSTED_PROXIES`. The PKCE code verifier is
 stored plaintext in the short-lived single-use `login_transactions` row;
 encryption at rest is delegated to the database deployment.
 

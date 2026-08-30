@@ -70,8 +70,11 @@ plaintext (only a SHA-256 hash is stored) and expires after 90 days.
   The per-user activation limit is `WELLOS_BREAK_GLASS_HOURLY_LIMIT`.
 - **Rate limits**: shared fixed-window counters in `rate_limit_windows`
   (per-minute, atomic across replicas): `WELLOS_RATE_LOGIN_PER_MIN`
-  (default 10, per hashed client address; set `WELLOS_TRUSTED_PROXY=true`
-  only behind a proxy that sets `x-forwarded-for`),
+  (default 10, per hashed client address; list the BFF/reverse-proxy peer
+  IPs in `WELLOS_TRUSTED_PROXIES` so their asserted client address —
+  `x-wellos-client-address` or the rightmost `x-forwarded-for` entry — is
+  honored; set `WELLOS_WEB_BEHIND_TRUSTED_PROXY=true` on the web app only
+  when a trusted platform proxy fronts it),
   `WELLOS_RATE_SEARCH_PER_MIN` (30), `WELLOS_RATE_CRED_ADMIN_PER_MIN` (30),
   `WELLOS_RATE_API_PER_MIN` (600, per tenant+principal). Exhaustion returns
   429 with `Retry-After`; if PostgreSQL is unreachable the limiter fails

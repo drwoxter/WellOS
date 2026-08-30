@@ -15,6 +15,7 @@ use crate::state::AppState;
 use axum::http::HeaderMap;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::net::IpAddr;
 
 /// Endpoint families with independent limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,9 +48,10 @@ pub struct RateConfig {
     pub search_per_min: i64,
     pub cred_admin_per_min: i64,
     pub api_per_min: i64,
-    /// Whether `x-forwarded-for` may be trusted for the client-address key
-    /// (set only when a trusted reverse proxy sets it).
-    pub trusted_proxy: bool,
+    /// Peers allowed to assert the end-client address for the anonymous
+    /// login key (the BFF and/or reverse proxies). Empty means no peer is
+    /// trusted and only the socket peer address is used.
+    pub trusted_proxies: Vec<IpAddr>,
 }
 
 impl RateConfig {
@@ -118,25 +120,48 @@ pub async fn enforce_for_principal(
     }
 }
 
+/// Header through which a trusted BFF/proxy peer asserts the end-client
+/// address for the anonymous login key.
+pub const CLIENT_ADDRESS_HEADER: &str = "x-wellos-client-address";
+
+/// The client address used for the anonymous login key: an asserted address
+/// is honored only when the immediate peer is a configured trusted proxy
+/// (`WELLOS_TRUSTED_PROXIES`), so a client reaching the API directly cannot
+/// rotate buckets with forged headers. Of `x-forwarded-for` only the
+/// rightmost entry counts — the one the trusted proxy appended; earlier
+/// entries are client-controlled. Asserted values must parse as IP
+/// addresses. Raw addresses are never stored or logged.
+fn client_address(cfg: &RateConfig, headers: &HeaderMap, peer: Option<IpAddr>) -> Option<IpAddr> {
+    let peer_trusted = peer.is_some_and(|ip| cfg.trusted_proxies.contains(&ip));
+    if peer_trusted {
+        let asserted = headers
+            .get(CLIENT_ADDRESS_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .or_else(|| {
+                headers
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.split(',').next_back())
+                    .map(str::trim)
+            })
+            .and_then(|v| v.parse::<IpAddr>().ok());
+        if asserted.is_some() {
+            return asserted;
+        }
+    }
+    peer
+}
+
 /// Enforce the anonymous login/callback limit keyed by a one-way hash of the
-/// trusted client address. `x-forwarded-for` is honored only when an explicit
-/// trusted-proxy deployment is configured; otherwise the socket peer address
-/// is used. Raw addresses are never stored or logged.
+/// trusted client address (see [`client_address`]).
 pub async fn enforce_for_client(
     state: &AppState,
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<(), ApiError> {
-    let address = if state.auth.rate.trusted_proxy {
-        headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(|s| s.trim().to_string())
-            .or_else(|| peer.map(|p| p.ip().to_string()))
-    } else {
-        peer.map(|p| p.ip().to_string())
-    };
+    let address =
+        client_address(&state.auth.rate, headers, peer.map(|p| p.ip())).map(|ip| ip.to_string());
     // Without any client address (e.g. in-process testing), fall back to one
     // shared bucket: anonymous endpoints stay rate-limited rather than open.
     let address = address.unwrap_or_else(|| "unknown".to_string());

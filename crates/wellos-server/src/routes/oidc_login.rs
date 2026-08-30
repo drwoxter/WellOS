@@ -12,7 +12,9 @@
 //! URLs, cookies, logs, audit payloads, or responses. Both endpoints are
 //! anonymous and rate-limited by a hashed client-address key.
 
-use crate::auth::{generate_secret, hash_service_secret, resolve_oidc_user, validate_oidc_token};
+use crate::auth::{
+    generate_secret, hash_service_secret, resolve_oidc_user, validate_oidc_token_for_audience,
+};
 use crate::error::ApiError;
 use crate::oidc::{JwksKeys, OidcEndpoints};
 use crate::ratelimit;
@@ -86,14 +88,20 @@ pub async fn start(
     let oauth_state = generate_secret("wst_");
     let nonce = generate_secret("wsn_");
     let verifier = generate_secret("");
+    // One-time browser binding: the BFF holds this in an HttpOnly cookie and
+    // must present it at the callback, so a completed callback URL planted
+    // into another browser cannot claim the transaction (login CSRF).
+    let binding = generate_secret("wsl_");
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(login.login_txn_secs);
     sqlx::query(
-        "INSERT INTO login_transactions (id, state_hash, nonce_hash, code_verifier, expires_at)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO login_transactions
+         (id, state_hash, nonce_hash, binding_hash, code_verifier, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(Uuid::now_v7())
     .bind(hash_service_secret(&oauth_state))
     .bind(hash_service_secret(&nonce))
+    .bind(hash_service_secret(&binding))
     .bind(&verifier)
     .bind(expires_at)
     .execute(&state.pool)
@@ -111,15 +119,22 @@ pub async fn start(
         .append_pair("nonce", &nonce)
         .append_pair("code_challenge", &code_challenge_s256(&verifier))
         .append_pair("code_challenge_method", "S256");
-    // Only the provider authorization URL is returned; the state round-trips
-    // through the provider and is verified against the stored hash.
-    Ok(Json(json!({ "authorize_url": authorize_url.to_string() })))
+    // The state round-trips through the provider and is verified against the
+    // stored hash; the binding secret goes only into the BFF's HttpOnly
+    // cookie, never to the provider.
+    Ok(Json(json!({
+        "authorize_url": authorize_url.to_string(),
+        "binding_token": binding,
+        "binding_max_age_secs": login.login_txn_secs,
+    })))
 }
 
 #[derive(Deserialize)]
 pub struct CallbackBody {
     pub code: Option<String>,
     pub state: Option<String>,
+    /// One-time browser binding secret from the BFF's HttpOnly cookie.
+    pub binding: Option<String>,
     /// Provider error code, when the provider redirected back with an error.
     pub error: Option<String>,
 }
@@ -143,24 +158,28 @@ pub async fn callback(
     let (cfg, login) = login_config(&state)?;
     let endpoints = discovered_endpoints(cfg).await?;
 
-    let (Some(code), Some(oauth_state)) = (&body.code, &body.state) else {
+    let (Some(code), Some(oauth_state), Some(binding)) = (&body.code, &body.state, &body.binding)
+    else {
         // Provider error responses and malformed callbacks fail identically;
         // the provider error code is not clinical data but is still not echoed.
         let _ = &body.error;
         return Err(login_failed());
     };
-    if code.is_empty() || code.len() > 4096 || oauth_state.len() > 256 {
+    if code.is_empty() || code.len() > 4096 || oauth_state.len() > 256 || binding.len() > 256 {
         return Err(login_failed());
     }
 
-    // Atomic single-use claim: replayed, expired, or unknown states all fail
-    // the same way, and concurrent replays cannot both claim the row.
+    // Atomic single-use claim: replayed, expired, unknown, or wrong-browser
+    // (binding mismatch) callbacks all fail the same way, and concurrent
+    // replays cannot both claim the row.
     let txn: Option<(String, String)> = sqlx::query_as(
         "UPDATE login_transactions SET used_at = now()
-         WHERE state_hash = $1 AND used_at IS NULL AND expires_at > now()
+         WHERE state_hash = $1 AND binding_hash = $2
+           AND used_at IS NULL AND expires_at > now()
          RETURNING nonce_hash, code_verifier",
     )
     .bind(hash_service_secret(oauth_state))
+    .bind(hash_service_secret(binding))
     .fetch_optional(&state.pool)
     .await?;
     let (nonce_hash, code_verifier) = txn.ok_or_else(login_failed)?;
@@ -193,9 +212,11 @@ pub async fn callback(
     let tokens: TokenResponse = response.json().await.map_err(|_| login_failed())?;
     let id_token = tokens.id_token.ok_or_else(login_failed)?;
 
-    // Full existing validation boundary: signature/issuer/audience/expiry/
-    // MFA policy — then the nonce binding against the stored hash.
-    let claims = validate_oidc_token(cfg, &id_token).await?;
+    // Full existing validation boundary: signature/issuer/expiry/MFA policy
+    // — with the ID token's audience checked against the browser client ID
+    // (providers target ID tokens at the requesting client, not the API
+    // audience) — then the nonce binding against the stored hash.
+    let claims = validate_oidc_token_for_audience(cfg, &id_token, &login.client_id).await?;
     let nonce_ok = claims
         .nonce
         .as_deref()

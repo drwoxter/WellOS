@@ -20,6 +20,9 @@ use wellos_server::oidc::{JwksKeys, RemoteJwks};
 use wellos_server::state::{AppState, AuthConfig, OidcConfig, OidcLoginConfig};
 
 const AUDIENCE: &str = "wellos-api";
+/// The browser client ID, deliberately different from the API bearer
+/// audience: providers target ID tokens at the requesting client.
+const CLIENT_ID: &str = "wellos-web";
 
 fn database_url() -> String {
     std::env::var("DATABASE_URL")
@@ -76,12 +79,19 @@ async fn call_full(
     for (k, v) in extra_headers {
         builder = builder.header(*k, *v);
     }
-    let req = builder
+    let mut req = builder
         .body(match body {
             Some(v) => Body::from(v.to_string()),
             None => Body::empty(),
         })
         .unwrap();
+    // In-process requests carry a loopback peer address, mirroring the
+    // ConnectInfo the production listener attaches to every connection.
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40000,
+        ))));
     let res = wellos_server::app(state.clone())
         .oneshot(req)
         .await
@@ -684,7 +694,7 @@ async fn login_state(provider: &FakeProvider) -> AppState {
             accepted_amr: vec!["mfa".into()],
             accepted_acr: vec![],
             login: Some(OidcLoginConfig {
-                client_id: "wellos-web".to_string(),
+                client_id: CLIENT_ID.to_string(),
                 client_secret: None,
                 redirect_uri: "http://localhost:3000/api/auth/oidc/callback".to_string(),
                 login_txn_secs: 300,
@@ -698,7 +708,7 @@ async fn login_state(provider: &FakeProvider) -> AppState {
 /// Begin a login and return the state/nonce/code_challenge the provider
 /// would see (parsed from the authorization URL, as the browser round-trip
 /// does).
-async fn begin_login(state: &AppState) -> (String, String, String) {
+async fn begin_login(state: &AppState) -> (String, String, String, String) {
     let (status, _, body) =
         call_full(state, "POST", "/api/v1/auth/oidc/login", None, None, &[]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -711,7 +721,8 @@ async fn begin_login(state: &AppState) -> (String, String, String) {
     };
     assert_eq!(get("response_type"), "code");
     assert_eq!(get("code_challenge_method"), "S256");
-    (get("state"), get("nonce"), get("code_challenge"))
+    let binding = body["binding_token"].as_str().unwrap().to_string();
+    (get("state"), get("nonce"), get("code_challenge"), binding)
 }
 
 fn id_token(idp: &TestIdp, issuer: &str, aud: &str, nonce: &str, exp_offset: i64) -> String {
@@ -751,8 +762,8 @@ async fn oidc_login_success_issues_opaque_session_only() {
     let provider = start_fake_provider(&idp.jwks_json).await;
     let state = login_state(&provider).await;
 
-    let (oauth_state, nonce, challenge) = begin_login(&state).await;
-    let token = id_token(&idp, &provider.issuer, AUDIENCE, &nonce, 600);
+    let (oauth_state, nonce, challenge, binding) = begin_login(&state).await;
+    let token = id_token(&idp, &provider.issuer, CLIENT_ID, &nonce, 600);
     *provider.token_response.lock().unwrap() = (
         StatusCode::OK,
         json!({ "id_token": token, "access_token": "synthetic-access", "token_type": "Bearer" })
@@ -761,7 +772,7 @@ async fn oidc_login_success_issues_opaque_session_only() {
 
     let (status, body) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": oauth_state }),
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -812,25 +823,25 @@ async fn oidc_callback_rejects_state_mismatch_and_replay() {
     // Unknown state.
     let (status, _) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": "wst_forged" }),
+        json!({ "code": "synthetic-code", "state": "wst_forged", "binding": "wsl_forged" }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Successful login, then replay of the same state.
-    let (oauth_state, nonce, _) = begin_login(&state).await;
-    let token = id_token(&idp, &provider.issuer, AUDIENCE, &nonce, 600);
+    let (oauth_state, nonce, _, binding) = begin_login(&state).await;
+    let token = id_token(&idp, &provider.issuer, CLIENT_ID, &nonce, 600);
     *provider.token_response.lock().unwrap() =
         (StatusCode::OK, json!({ "id_token": token }).to_string());
     let (status, _) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": oauth_state }),
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": oauth_state }),
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "replay must fail");
@@ -842,14 +853,14 @@ async fn oidc_callback_rejects_nonce_mismatch() {
     let provider = start_fake_provider(&idp.jwks_json).await;
     let state = login_state(&provider).await;
 
-    let (oauth_state, _nonce, _) = begin_login(&state).await;
+    let (oauth_state, _nonce, _, binding) = begin_login(&state).await;
     // The provider returns a token bound to a different nonce.
-    let token = id_token(&idp, &provider.issuer, AUDIENCE, "wsn_other", 600);
+    let token = id_token(&idp, &provider.issuer, CLIENT_ID, "wsn_other", 600);
     *provider.token_response.lock().unwrap() =
         (StatusCode::OK, json!({ "id_token": token }).to_string());
     let (status, _) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": oauth_state }),
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -861,18 +872,18 @@ async fn oidc_callback_rejects_expired_transaction() {
     let provider = start_fake_provider(&idp.jwks_json).await;
     let state = login_state(&provider).await;
 
-    let (oauth_state, nonce, _) = begin_login(&state).await;
+    let (oauth_state, nonce, _, binding) = begin_login(&state).await;
     sqlx::query("UPDATE login_transactions SET expires_at = now() - interval '1 second' WHERE state_hash = $1")
         .bind(wellos_server::auth::hash_service_secret(&oauth_state))
         .execute(&state.pool)
         .await
         .unwrap();
-    let token = id_token(&idp, &provider.issuer, AUDIENCE, &nonce, 600);
+    let token = id_token(&idp, &provider.issuer, CLIENT_ID, &nonce, 600);
     *provider.token_response.lock().unwrap() =
         (StatusCode::OK, json!({ "id_token": token }).to_string());
     let (status, _) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": oauth_state }),
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -885,10 +896,10 @@ async fn oidc_callback_rejects_provider_error_and_exchange_failure() {
     let state = login_state(&provider).await;
 
     // Provider error response (no code).
-    let (oauth_state, _, _) = begin_login(&state).await;
+    let (oauth_state, _, _, binding) = begin_login(&state).await;
     let (status, body) = callback(
         &state,
-        json!({ "error": "access_denied", "state": oauth_state }),
+        json!({ "error": "access_denied", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -898,14 +909,14 @@ async fn oidc_callback_rejects_provider_error_and_exchange_failure() {
     );
 
     // Token exchange failure.
-    let (oauth_state, _, _) = begin_login(&state).await;
+    let (oauth_state, _, _, binding) = begin_login(&state).await;
     *provider.token_response.lock().unwrap() = (
         StatusCode::BAD_REQUEST,
         json!({ "error": "invalid_grant" }).to_string(),
     );
     let (status, _) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": oauth_state }),
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -918,38 +929,39 @@ async fn oidc_callback_rejects_invalid_issuer_audience_and_signature() {
     let state = login_state(&provider).await;
 
     // Wrong issuer.
-    let (oauth_state, nonce, _) = begin_login(&state).await;
-    let token = id_token(&idp, "https://evil.example.test/", AUDIENCE, &nonce, 600);
+    let (oauth_state, nonce, _, binding) = begin_login(&state).await;
+    let token = id_token(&idp, "https://evil.example.test/", CLIENT_ID, &nonce, 600);
     *provider.token_response.lock().unwrap() =
         (StatusCode::OK, json!({ "id_token": token }).to_string());
     let (status, _) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": oauth_state }),
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    // Wrong audience.
-    let (oauth_state, nonce, _) = begin_login(&state).await;
-    let token = id_token(&idp, &provider.issuer, "other-api", &nonce, 600);
+    // Wrong audience: the API bearer audience is not the browser client ID,
+    // so an ID token minted for the API must not complete a browser login.
+    let (oauth_state, nonce, _, binding) = begin_login(&state).await;
+    let token = id_token(&idp, &provider.issuer, AUDIENCE, &nonce, 600);
     *provider.token_response.lock().unwrap() =
         (StatusCode::OK, json!({ "id_token": token }).to_string());
     let (status, _) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": oauth_state }),
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Signed by a rogue key never published in the JWKS.
     let rogue = test_idp(37, "p3-kid");
-    let (oauth_state, nonce, _) = begin_login(&state).await;
-    let token = id_token(&rogue, &provider.issuer, AUDIENCE, &nonce, 600);
+    let (oauth_state, nonce, _, binding) = begin_login(&state).await;
+    let token = id_token(&rogue, &provider.issuer, CLIENT_ID, &nonce, 600);
     *provider.token_response.lock().unwrap() =
         (StatusCode::OK, json!({ "id_token": token }).to_string());
     let (status, _) = callback(
         &state,
-        json!({ "code": "synthetic-code", "state": oauth_state }),
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -966,8 +978,13 @@ async fn oidc_login_start_never_returns_raw_verifier_or_nonce_hash() {
     assert_eq!(status, StatusCode::OK, "{body}");
     // The JSON response carries only the provider authorization URL.
     let obj = body.as_object().unwrap();
-    assert_eq!(obj.len(), 1, "{body}");
+    assert_eq!(obj.len(), 3, "{body}");
     assert!(obj.contains_key("authorize_url"));
+    // The browser-binding secret is returned for the BFF's HttpOnly cookie
+    // only; it is never sent to the provider.
+    let binding = body["binding_token"].as_str().unwrap();
+    assert!(binding.starts_with("wsl_"));
+    assert!(!body["authorize_url"].as_str().unwrap().contains(binding));
 
     // The stored verifier stays server-side and does not round-trip in the
     // URL (only its S256 challenge does).
@@ -979,4 +996,129 @@ async fn oidc_login_start_never_returns_raw_verifier_or_nonce_hash() {
     .await
     .unwrap();
     assert!(!url.contains(&verifier), "raw verifier must not leak");
+}
+
+#[tokio::test]
+async fn oidc_callback_requires_the_initiating_browser_binding() {
+    let idp = test_idp(39, "p3-kid");
+    let provider = start_fake_provider(&idp.jwks_json).await;
+    let state = login_state(&provider).await;
+
+    // An attacker-completed callback URL replayed in a victim's browser
+    // carries no (or another) binding cookie and must not create a session.
+    let (oauth_state, nonce, _, binding) = begin_login(&state).await;
+    let token = id_token(&idp, &provider.issuer, CLIENT_ID, &nonce, 600);
+    *provider.token_response.lock().unwrap() =
+        (StatusCode::OK, json!({ "id_token": token }).to_string());
+
+    let (status, _) = callback(
+        &state,
+        json!({ "code": "synthetic-code", "state": oauth_state }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "missing binding");
+
+    let (status, _) = callback(
+        &state,
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": "wsl_other" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "wrong binding");
+
+    // The transaction is still claimable by the browser that started it.
+    let (status, body) = callback(
+        &state,
+        json!({ "code": "synthetic-code", "state": oauth_state, "binding": binding }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn anonymous_rate_limit_honors_asserted_address_only_from_trusted_peer() {
+    let idp = test_idp(40, "p3-kid");
+    let provider = start_fake_provider(&idp.jwks_json).await;
+
+    // Trusted BFF/proxy peer: the asserted end-client address keys the
+    // bucket, forged `x-forwarded-for` prefixes cannot rotate it, and
+    // distinct clients get independent buckets.
+    let mut state = login_state(&provider).await;
+    {
+        let auth = Arc::get_mut(&mut state.auth).expect("exclusive auth config");
+        auth.rate.trusted_proxies = vec![std::net::IpAddr::from([127, 0, 0, 1])];
+        auth.rate.login_per_min = 2;
+    }
+    let unique = uuid::Uuid::now_v7().as_u128();
+    let client_a = std::net::Ipv6Addr::from(unique).to_string();
+    let client_b = std::net::Ipv6Addr::from(unique ^ 1).to_string();
+
+    for forged in ["203.0.113.1", "203.0.113.2"] {
+        let (status, _, body) = call_full(
+            &state,
+            "POST",
+            "/api/v1/auth/oidc/login",
+            None,
+            None,
+            &[("x-forwarded-for", &format!("{forged}, {client_a}"))],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, headers, _) = call_full(
+        &state,
+        "POST",
+        "/api/v1/auth/oidc/login",
+        None,
+        None,
+        &[("x-forwarded-for", &format!("203.0.113.3, {client_a}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "same client bucket");
+    assert!(headers.contains_key("retry-after"));
+
+    // The BFF's dedicated assertion header for a different client is an
+    // independent bucket, both at initiation and at the callback.
+    for path in ["/api/v1/auth/oidc/login", "/api/v1/auth/oidc/callback"] {
+        let body = (path.ends_with("callback")).then(|| json!({}));
+        let (status, _, body_out) = call_full(
+            &state,
+            "POST",
+            path,
+            None,
+            body,
+            &[("x-wellos-client-address", client_b.as_str())],
+        )
+        .await;
+        assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "{body_out}");
+    }
+
+    // Untrusted peer: asserted addresses are ignored, so a direct caller
+    // cannot rotate spoofed headers into fresh buckets.
+    let mut direct = login_state(&provider).await;
+    {
+        let auth = Arc::get_mut(&mut direct.auth).expect("exclusive auth config");
+        auth.rate.login_per_min = 2;
+    }
+    let mut last = StatusCode::OK;
+    for forged in 0..4u16 {
+        let spoofed = std::net::Ipv6Addr::from(unique ^ (0x1_0000 + u128::from(forged)));
+        let (status, _, _) = call_full(
+            &direct,
+            "POST",
+            "/api/v1/auth/oidc/login",
+            None,
+            None,
+            &[
+                ("x-wellos-client-address", &spoofed.to_string()),
+                ("x-forwarded-for", &spoofed.to_string()),
+            ],
+        )
+        .await;
+        last = status;
+    }
+    assert_eq!(
+        last,
+        StatusCode::TOO_MANY_REQUESTS,
+        "spoofed headers ignored"
+    );
 }
