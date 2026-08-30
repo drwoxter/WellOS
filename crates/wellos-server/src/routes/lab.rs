@@ -114,7 +114,10 @@ pub async fn ingest_result(
         }
     }
     let sr = sqlx::query(
-        "SELECT tenant_id, patient_id, code_loinc, loop_state, version FROM service_requests WHERE id = $1",
+        "SELECT sr.tenant_id, sr.patient_id, sr.code_loinc, sr.loop_state, sr.version,
+                p.facility_id
+         FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
+         WHERE sr.id = $1",
     )
     .bind(body.service_request_id)
     .fetch_optional(&state.pool)
@@ -122,6 +125,7 @@ pub async fn ingest_result(
     .ok_or_else(ApiError::not_found)?;
     let tenant_id: Uuid = sr.get("tenant_id");
     let patient_id: Uuid = sr.get("patient_id");
+    let facility_id: Uuid = sr.get("facility_id");
     let ordered_code: String = sr.get("code_loinc");
     if body.code_loinc != ordered_code {
         return Err(ApiError::bad_request(
@@ -140,6 +144,7 @@ pub async fn ingest_result(
         Some(ResourceCtx {
             tenant_id,
             patient_id: Some(patient_id),
+            facility_id: Some(facility_id),
         }),
     )
     .await?;

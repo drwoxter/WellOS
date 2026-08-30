@@ -1,7 +1,8 @@
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
-use crate::policy::{actions, ResourceCtx};
+use crate::policy::{actions, facility_scope, ResourceCtx};
+use crate::ratelimit;
 use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -67,6 +68,9 @@ pub async fn register(
         Some(ResourceCtx {
             tenant_id: ctx.tenant_id,
             patient_id: None,
+            // Registration targets the requested facility; the central
+            // policy verifies the caller's assignments cover it.
+            facility_id: Some(body.facility_id),
         }),
     )
     .await?;
@@ -119,6 +123,8 @@ pub async fn search(
     ctx: AuthContext,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Value>, ApiError> {
+    // Patient search is stricter-rate-limited than ordinary reads.
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::PatientSearch).await?;
     guard(
         &state,
         &ctx,
@@ -127,6 +133,7 @@ pub async fn search(
         Some(ResourceCtx {
             tenant_id: ctx.tenant_id,
             patient_id: None,
+            facility_id: None,
         }),
     )
     .await?
@@ -141,17 +148,40 @@ pub async fn search(
         ));
     }
     let like = format!("%{query}%");
-    let rows = sqlx::query(
-        "SELECT id, family_name, given_name, birth_date, sex, identifier
-         FROM patients
-         WHERE tenant_id = $1
-           AND (family_name ILIKE $2 OR given_name ILIKE $2 OR identifier ILIKE $2)
-         ORDER BY family_name, given_name LIMIT 50",
-    )
-    .bind(ctx.tenant_id)
-    .bind(&like)
-    .fetch_all(&state.pool)
-    .await?;
+    // Results are limited to the caller's facility scope, resolved from
+    // trusted role assignments (never from client input). Tenant-wide
+    // scope (allowlisted admin/emergency roles) searches all facilities.
+    let scope = facility_scope(&ctx, actions::PATIENT_SEARCH);
+    let rows = match &scope {
+        None => {
+            sqlx::query(
+                "SELECT id, family_name, given_name, birth_date, sex, identifier
+                 FROM patients
+                 WHERE tenant_id = $1
+                   AND (family_name ILIKE $2 OR given_name ILIKE $2 OR identifier ILIKE $2)
+                 ORDER BY family_name, given_name LIMIT 50",
+            )
+            .bind(ctx.tenant_id)
+            .bind(&like)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        Some(ids) if ids.is_empty() => Vec::new(),
+        Some(ids) => {
+            sqlx::query(
+                "SELECT id, family_name, given_name, birth_date, sex, identifier
+                 FROM patients
+                 WHERE tenant_id = $1 AND facility_id = ANY($3)
+                   AND (family_name ILIKE $2 OR given_name ILIKE $2 OR identifier ILIKE $2)
+                 ORDER BY family_name, given_name LIMIT 50",
+            )
+            .bind(ctx.tenant_id)
+            .bind(&like)
+            .bind(ids)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
     let patients: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -182,6 +212,7 @@ pub async fn chart(
     .await?
     .ok_or_else(ApiError::not_found)?;
     let patient_tenant: Uuid = patient.get("tenant_id");
+    let patient_facility: Uuid = patient.get("facility_id");
 
     guard(
         &state,
@@ -191,6 +222,7 @@ pub async fn chart(
         Some(ResourceCtx {
             tenant_id: patient_tenant,
             patient_id: Some(id),
+            facility_id: Some(patient_facility),
         }),
     )
     .await?

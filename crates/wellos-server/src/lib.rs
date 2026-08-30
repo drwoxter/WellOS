@@ -3,6 +3,7 @@ pub mod auth;
 pub mod error;
 pub mod oidc;
 pub mod policy;
+pub mod ratelimit;
 pub mod routes;
 pub mod seeddata;
 pub mod state;

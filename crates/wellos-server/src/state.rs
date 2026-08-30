@@ -1,5 +1,6 @@
 use crate::error::ApiError;
 use crate::oidc::{JwksKeys, RemoteJwks};
+use crate::ratelimit::RateConfig;
 use dmind_gateway::ModelGateway;
 use jsonwebtoken::jwk::JwkSet;
 use sqlx::PgPool;
@@ -23,6 +24,22 @@ pub struct OidcConfig {
     pub accepted_amr: Vec<String>,
     /// `acr` values accepted as MFA proof.
     pub accepted_acr: Vec<String>,
+    /// Browser Authorization Code + PKCE login configuration. Requires
+    /// discovery (the authorization and token endpoints come from validated
+    /// issuer metadata).
+    pub login: Option<OidcLoginConfig>,
+}
+
+/// Relying-party configuration for the browser login flow. The client secret
+/// is optional (PKCE is always required); the redirect URI is exact — no
+/// wildcard or client-supplied redirect targets.
+#[derive(Clone)]
+pub struct OidcLoginConfig {
+    pub client_id: String,
+    pub client_secret: Option<String>,
+    pub redirect_uri: String,
+    /// Lifetime of a server-side login transaction in seconds (max 600).
+    pub login_txn_secs: i64,
 }
 
 impl OidcConfig {
@@ -82,6 +99,48 @@ impl OidcConfig {
             let jwks: JwkSet = serde_json::from_str(&raw)?;
             JwksKeys::Static(jwks)
         };
+        let client_id = std::env::var("WELLOS_OIDC_CLIENT_ID").ok();
+        let redirect_uri = std::env::var("WELLOS_OIDC_REDIRECT_URI").ok();
+        let client_secret = std::env::var("WELLOS_OIDC_CLIENT_SECRET").ok();
+        let login = match (client_id, redirect_uri) {
+            (None, None) => {
+                if client_secret.is_some() {
+                    anyhow::bail!(
+                        "WELLOS_OIDC_CLIENT_SECRET requires WELLOS_OIDC_CLIENT_ID and \
+                         WELLOS_OIDC_REDIRECT_URI"
+                    );
+                }
+                None
+            }
+            (Some(client_id), Some(redirect_uri)) => {
+                if !discovery {
+                    anyhow::bail!(
+                        "browser OIDC login requires WELLOS_OIDC_DISCOVERY=true \
+                         (endpoints come from validated issuer metadata)"
+                    );
+                }
+                if !(redirect_uri.starts_with("https://")
+                    || (is_development && redirect_uri.starts_with("http://")))
+                {
+                    anyhow::bail!(
+                        "WELLOS_OIDC_REDIRECT_URI must be an https:// URL outside development"
+                    );
+                }
+                let login_txn_secs = parse_secs("WELLOS_OIDC_LOGIN_TXN_SECS", 600)?;
+                if login_txn_secs == 0 || login_txn_secs > 600 {
+                    anyhow::bail!("WELLOS_OIDC_LOGIN_TXN_SECS must be between 1 and 600");
+                }
+                Some(OidcLoginConfig {
+                    client_id,
+                    client_secret,
+                    redirect_uri,
+                    login_txn_secs: login_txn_secs as i64,
+                })
+            }
+            _ => anyhow::bail!(
+                "WELLOS_OIDC_CLIENT_ID and WELLOS_OIDC_REDIRECT_URI must be set together"
+            ),
+        };
         let leeway_secs = parse_secs("WELLOS_OIDC_LEEWAY_SECS", 60)?;
         let require_mfa = parse_bool("WELLOS_OIDC_REQUIRE_MFA")?.unwrap_or(false);
         let accepted_amr = parse_list("WELLOS_OIDC_ACCEPTED_AMR", &["mfa", "otp", "hwk"]);
@@ -103,6 +162,7 @@ impl OidcConfig {
             require_mfa,
             accepted_amr,
             accepted_acr,
+            login,
         }))
     }
 }
@@ -153,6 +213,8 @@ pub struct AuthConfig {
     pub session_absolute_secs: i64,
     /// Inactivity timeout of a browser session in seconds.
     pub session_idle_secs: i64,
+    /// Shared PostgreSQL-backed rate limits.
+    pub rate: RateConfig,
 }
 
 impl AuthConfig {
@@ -164,6 +226,15 @@ impl AuthConfig {
             break_glass_hourly_limit: 5,
             session_absolute_secs: 8 * 3600,
             session_idle_secs: 30 * 60,
+            // Generous development/test defaults; production limits come
+            // from the environment with much tighter values.
+            rate: RateConfig {
+                login_per_min: 1_000,
+                search_per_min: 10_000,
+                cred_admin_per_min: 10_000,
+                api_per_min: 100_000,
+                trusted_proxy: false,
+            },
         }
     }
 
@@ -204,14 +275,22 @@ impl AuthConfig {
             }
             Err(_) => 5,
         };
-        let session_absolute_secs = parse_positive_secs("WELLOS_SESSION_ABSOLUTE_SECS", 8 * 3600)?;
-        let session_idle_secs = parse_positive_secs("WELLOS_SESSION_IDLE_SECS", 30 * 60)?;
+        let session_absolute_secs = parse_positive_i64("WELLOS_SESSION_ABSOLUTE_SECS", 8 * 3600)?;
+        let session_idle_secs = parse_positive_i64("WELLOS_SESSION_IDLE_SECS", 30 * 60)?;
+        let rate = RateConfig {
+            login_per_min: parse_positive_i64("WELLOS_RATE_LOGIN_PER_MIN", 10)?,
+            search_per_min: parse_positive_i64("WELLOS_RATE_SEARCH_PER_MIN", 30)?,
+            cred_admin_per_min: parse_positive_i64("WELLOS_RATE_CRED_ADMIN_PER_MIN", 30)?,
+            api_per_min: parse_positive_i64("WELLOS_RATE_API_PER_MIN", 600)?,
+            trusted_proxy: parse_bool("WELLOS_TRUSTED_PROXY")?.unwrap_or(false),
+        };
         Ok(Self {
             dev_auth_enabled,
             oidc,
             break_glass_hourly_limit,
             session_absolute_secs,
             session_idle_secs,
+            rate,
         })
     }
 
@@ -230,7 +309,7 @@ impl AuthConfig {
     }
 }
 
-fn parse_positive_secs(var: &str, default: i64) -> anyhow::Result<i64> {
+fn parse_positive_i64(var: &str, default: i64) -> anyhow::Result<i64> {
     match std::env::var(var) {
         Ok(raw) => {
             let parsed: i64 = raw

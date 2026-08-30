@@ -38,12 +38,13 @@ pub async fn set_consent(
             "status must be 'active' or 'revoked'",
         ));
     }
-    let patient = sqlx::query("SELECT tenant_id FROM patients WHERE id = $1")
+    let patient = sqlx::query("SELECT tenant_id, facility_id FROM patients WHERE id = $1")
         .bind(body.patient_id)
         .fetch_optional(&state.pool)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let tenant_id: Uuid = patient.get("tenant_id");
+    let facility_id: Uuid = patient.get("facility_id");
 
     let allowed = guard(
         &state,
@@ -53,6 +54,7 @@ pub async fn set_consent(
         Some(ResourceCtx {
             tenant_id,
             patient_id: Some(body.patient_id),
+            facility_id: Some(facility_id),
         }),
     )
     .await?;

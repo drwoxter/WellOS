@@ -37,6 +37,7 @@ pub async fn start(
         Some(ResourceCtx {
             tenant_id,
             patient_id: None, // starting an encounter establishes the relationship
+            facility_id: Some(facility_id),
         }),
     )
     .await?;
@@ -87,13 +88,17 @@ pub async fn create_service_request(
             "code_loinc is required",
         ));
     }
-    let enc = sqlx::query("SELECT tenant_id, patient_id FROM encounters WHERE id = $1")
-        .bind(body.encounter_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
+    let enc = sqlx::query(
+        "SELECT e.tenant_id, e.patient_id, e.facility_id
+         FROM encounters e WHERE e.id = $1",
+    )
+    .bind(body.encounter_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
     let tenant_id: Uuid = enc.get("tenant_id");
     let patient_id: Uuid = enc.get("patient_id");
+    let facility_id: Uuid = enc.get("facility_id");
 
     let allowed = guard(
         &state,
@@ -103,6 +108,7 @@ pub async fn create_service_request(
         Some(ResourceCtx {
             tenant_id,
             patient_id: Some(patient_id),
+            facility_id: Some(facility_id),
         }),
     )
     .await?;

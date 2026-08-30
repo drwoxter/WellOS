@@ -37,7 +37,20 @@ plaintext (only a SHA-256 hash is stored) and expires after 90 days.
   or (outside development) if `DATABASE_URL` or `WELLOS_ALLOWED_ORIGINS`
   is missing. Provision users by inserting `(issuer, subject)` rows in
   `user_identities` (legacy `users.oidc_subject` still matches and is
-  migrated lazily); roles are assigned in `role_assignments`.
+  migrated lazily); roles are assigned in `role_assignments`. A NULL
+  `facility_id` on an assignment grants tenant-wide access only for
+  allowlisted administrative/oversight/machine roles; ordinary clinical
+  roles need one row per facility.
+- **Browser OIDC login (Authorization Code + PKCE)**: register the exact
+  BFF callback (`<web origin>/api/auth/oidc/callback`) at the IdP and set
+  `WELLOS_OIDC_CLIENT_ID`, `WELLOS_OIDC_REDIRECT_URI`, optionally
+  `WELLOS_OIDC_CLIENT_SECRET`, with `WELLOS_OIDC_DISCOVERY=true` (required;
+  the authorization/token endpoints come from issuer-pinned metadata; HTTPS
+  outside development). Login transactions are single-use rows in
+  `login_transactions` (lifetime `WELLOS_OIDC_LOGIN_TXN_SECS`, max 600s);
+  expired rows are cleaned opportunistically. The development token form
+  appears only with `NEXT_PUBLIC_WELLOS_DEV_AUTH=true` on the web side
+  (`apps/web/.env.development` sets it for `next dev`).
 - **Service credentials** are administered via the audited
   privacy-officer API (`purpose=operations`):
   `POST /api/v1/admin/service-credentials` (issue; plaintext shown once),
@@ -55,6 +68,15 @@ plaintext (only a SHA-256 hash is stored) and expires after 90 days.
   `GET /api/v1/break-glass` and record the mandatory review with
   `POST /api/v1/break-glass/:id/review` (purpose `operations` or `quality`).
   The per-user activation limit is `WELLOS_BREAK_GLASS_HOURLY_LIMIT`.
+- **Rate limits**: shared fixed-window counters in `rate_limit_windows`
+  (per-minute, atomic across replicas): `WELLOS_RATE_LOGIN_PER_MIN`
+  (default 10, per hashed client address; set `WELLOS_TRUSTED_PROXY=true`
+  only behind a proxy that sets `x-forwarded-for`),
+  `WELLOS_RATE_SEARCH_PER_MIN` (30), `WELLOS_RATE_CRED_ADMIN_PER_MIN` (30),
+  `WELLOS_RATE_API_PER_MIN` (600, per tenant+principal). Exhaustion returns
+  429 with `Retry-After`; if PostgreSQL is unreachable the limiter fails
+  closed. Old windows can be pruned with
+  `DELETE FROM rate_limit_windows WHERE window_start < now() - interval '1 hour'`.
 
 Seed is idempotent-ish for demos but intended for empty databases; to reset:
 `docker compose -f infra/docker-compose.yml down -v && make up && make migrate && make seed`.

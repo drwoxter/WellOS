@@ -3,7 +3,7 @@
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
-use crate::policy::{actions, ResourceCtx};
+use crate::policy::{actions, facility_scope, ResourceCtx};
 use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -24,13 +24,18 @@ pub struct TransitionBody {
 struct SrCtx {
     tenant_id: Uuid,
     patient_id: Uuid,
+    facility_id: Uuid,
     state: LoopState,
     version: i64,
 }
 
 async fn load_sr(state: &AppState, id: Uuid) -> Result<SrCtx, ApiError> {
+    // Facility context is derived through the trusted patient relationship,
+    // never from client input.
     let sr = sqlx::query(
-        "SELECT tenant_id, patient_id, loop_state, version FROM service_requests WHERE id = $1",
+        "SELECT sr.tenant_id, sr.patient_id, sr.loop_state, sr.version, p.facility_id
+         FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
+         WHERE sr.id = $1",
     )
     .bind(id)
     .fetch_optional(&state.pool)
@@ -39,6 +44,7 @@ async fn load_sr(state: &AppState, id: Uuid) -> Result<SrCtx, ApiError> {
     Ok(SrCtx {
         tenant_id: sr.get("tenant_id"),
         patient_id: sr.get("patient_id"),
+        facility_id: sr.get("facility_id"),
         state: LoopState::parse(sr.get::<String, _>("loop_state").as_str())
             .ok_or_else(|| ApiError::internal("invalid loop state"))?,
         version: sr.get("version"),
@@ -66,6 +72,7 @@ async fn transition(
         Some(ResourceCtx {
             tenant_id: sr.tenant_id,
             patient_id: Some(sr.patient_id),
+            facility_id: Some(sr.facility_id),
         }),
     )
     .await?;
@@ -245,23 +252,41 @@ pub async fn worklist(
         Some(ResourceCtx {
             tenant_id: ctx.tenant_id,
             patient_id: None,
+            facility_id: None,
         }),
     )
     .await?
     .record_on_pool(&state, &ctx)
     .await?;
-    let rows = sqlx::query(
+    // The worklist is filtered to the caller's facility scope, resolved from
+    // trusted role assignments (tenant-wide only for allowlisted roles).
+    let scope = facility_scope(&ctx, actions::WORKLIST_READ);
+    const WORKLIST_SQL: &str =
         "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
                 p.family_name, p.given_name, p.identifier,
                 EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
                         WHERE o.service_request_id = sr.id AND a.status = 'open') AS has_open_alert
          FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
-         WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'
-         ORDER BY has_open_alert DESC, sr.created_at DESC LIMIT 200",
-    )
-    .bind(ctx.tenant_id)
-    .fetch_all(&state.pool)
-    .await?;
+         WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'";
+    const WORKLIST_ORDER: &str = " ORDER BY has_open_alert DESC, sr.created_at DESC LIMIT 200";
+    let rows = match &scope {
+        None => {
+            sqlx::query(&format!("{WORKLIST_SQL}{WORKLIST_ORDER}"))
+                .bind(ctx.tenant_id)
+                .fetch_all(&state.pool)
+                .await?
+        }
+        Some(ids) if ids.is_empty() => Vec::new(),
+        Some(ids) => {
+            sqlx::query(&format!(
+                "{WORKLIST_SQL} AND p.facility_id = ANY($2){WORKLIST_ORDER}"
+            ))
+            .bind(ctx.tenant_id)
+            .bind(ids)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -298,6 +323,7 @@ pub async fn detail(
         Some(ResourceCtx {
             tenant_id: sr.tenant_id,
             patient_id: Some(sr.patient_id),
+            facility_id: Some(sr.facility_id),
         }),
     )
     .await?

@@ -37,6 +37,16 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// A tenant-scoped role assignment. `facility_id = None` grants tenant-wide
+/// access only for explicitly allowlisted administrative/emergency roles
+/// (see `policy::null_facility_is_tenant_wide`); ordinary clinical roles
+/// require explicit facility assignments.
+#[derive(Debug, Clone)]
+pub struct RoleAssignment {
+    pub role: String,
+    pub facility_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthContext {
     pub user_id: Uuid,
@@ -45,6 +55,8 @@ pub struct AuthContext {
     pub display_name: String,
     pub is_service: bool,
     pub roles: Vec<String>,
+    /// Facility-scoped role assignments (source of the derived `roles`).
+    pub assignments: Vec<RoleAssignment>,
     /// Scopes granted to a service credential (empty for humans).
     pub scopes: Vec<String>,
     /// Purpose of use asserted by the caller (default: treatment).
@@ -96,14 +108,14 @@ pub fn generate_secret(prefix: &str) -> String {
     format!("{prefix}{}", hex::encode(bytes))
 }
 
-struct Principal {
-    user_id: Uuid,
-    tenant_id: Uuid,
-    username: String,
-    display_name: String,
-    is_service: bool,
-    scopes: Vec<String>,
-    web_session_id: Option<Uuid>,
+pub(crate) struct Principal {
+    pub(crate) user_id: Uuid,
+    pub(crate) tenant_id: Uuid,
+    pub(crate) username: String,
+    pub(crate) display_name: String,
+    pub(crate) is_service: bool,
+    pub(crate) scopes: Vec<String>,
+    pub(crate) web_session_id: Option<Uuid>,
 }
 
 /// Development human tokens: local development only, humans only.
@@ -239,11 +251,14 @@ async fn web_session_principal(state: &AppState, token: &str) -> Result<Principa
 }
 
 #[derive(Deserialize)]
-struct OidcClaims {
-    sub: String,
+pub(crate) struct OidcClaims {
+    pub(crate) sub: String,
     iat: Option<u64>,
     amr: Option<serde_json::Value>,
     acr: Option<serde_json::Value>,
+    /// Replay binding for the browser login flow (compared against the
+    /// login transaction's stored nonce hash).
+    pub(crate) nonce: Option<String>,
 }
 
 /// Asymmetric signature algorithms accepted for OIDC tokens. Symmetric and
@@ -266,13 +281,26 @@ async fn oidc_principal(state: &AppState, token: &str) -> Result<Principal, ApiE
         return Err(identity_provider_not_configured());
     };
     let claims = validate_oidc_token(cfg, token).await?;
+    resolve_oidc_user(state, cfg, &claims.sub).await
+}
+
+/// Map a validated `(configured issuer, subject)` pair to the local user.
+/// Tenant, roles, and permissions come only from PostgreSQL; the legacy
+/// single-provider `users.oidc_subject` mapping is honored as a fallback and
+/// migrated into `user_identities` on first use.
+pub(crate) async fn resolve_oidc_user(
+    state: &AppState,
+    cfg: &OidcConfig,
+    sub: &str,
+) -> Result<Principal, ApiError> {
+    let claims_sub = sub;
     let row: Option<(Uuid, Uuid, String, String, bool)> = sqlx::query_as(
         "SELECT u.id, u.tenant_id, u.username, u.display_name, u.is_service
          FROM user_identities ui JOIN users u ON u.id = ui.user_id
          WHERE ui.issuer = $1 AND ui.subject = $2",
     )
     .bind(&cfg.issuer)
-    .bind(&claims.sub)
+    .bind(claims_sub)
     .fetch_optional(&state.pool)
     .await?;
     let row = match row {
@@ -282,7 +310,7 @@ async fn oidc_principal(state: &AppState, token: &str) -> Result<Principal, ApiE
                 "SELECT id, tenant_id, username, display_name, is_service
                  FROM users WHERE oidc_subject = $1",
             )
-            .bind(&claims.sub)
+            .bind(claims_sub)
             .fetch_optional(&state.pool)
             .await?;
             if let Some((user_id, ..)) = &legacy {
@@ -294,7 +322,7 @@ async fn oidc_principal(state: &AppState, token: &str) -> Result<Principal, ApiE
                 .bind(Uuid::now_v7())
                 .bind(user_id)
                 .bind(&cfg.issuer)
-                .bind(&claims.sub)
+                .bind(claims_sub)
                 .execute(&state.pool)
                 .await?;
             }
@@ -370,7 +398,10 @@ fn jwk_matches_algorithm(jwk: &jsonwebtoken::jwk::Jwk, alg: Algorithm) -> bool {
     true
 }
 
-async fn validate_oidc_token(cfg: &OidcConfig, token: &str) -> Result<OidcClaims, ApiError> {
+pub(crate) async fn validate_oidc_token(
+    cfg: &OidcConfig,
+    token: &str,
+) -> Result<OidcClaims, ApiError> {
     let header = decode_header(token).map_err(|_| ApiError::unauthorized())?;
     if !OIDC_ALGORITHMS.contains(&header.alg) {
         return Err(ApiError::unauthorized());
@@ -424,20 +455,30 @@ pub async fn load_auth(
         return Err(ApiError::unauthorized());
     };
     // Roles are tenant-scoped: an assignment recorded under another tenant
-    // never grants privileges inside the principal's tenant.
-    let roles: Vec<(String,)> =
-        sqlx::query_as("SELECT role FROM role_assignments WHERE user_id = $1 AND tenant_id = $2")
-            .bind(principal.user_id)
-            .bind(principal.tenant_id)
-            .fetch_all(&state.pool)
-            .await?;
+    // never grants privileges inside the principal's tenant. Facility scope
+    // is loaded with each assignment and enforced centrally in policy.
+    let assignments: Vec<(String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT role, facility_id FROM role_assignments WHERE user_id = $1 AND tenant_id = $2",
+    )
+    .bind(principal.user_id)
+    .bind(principal.tenant_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let assignments: Vec<RoleAssignment> = assignments
+        .into_iter()
+        .map(|(role, facility_id)| RoleAssignment { role, facility_id })
+        .collect();
+    let mut roles: Vec<String> = assignments.iter().map(|a| a.role.clone()).collect();
+    roles.sort();
+    roles.dedup();
     Ok(AuthContext {
         user_id: principal.user_id,
         tenant_id: principal.tenant_id,
         username: principal.username,
         display_name: principal.display_name,
         is_service: principal.is_service,
-        roles: roles.into_iter().map(|(r,)| r).collect(),
+        roles,
+        assignments,
         scopes: principal.scopes,
         purpose_of_use: validate_purpose(purpose_of_use)?,
         break_glass_reason,

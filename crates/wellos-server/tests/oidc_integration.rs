@@ -68,6 +68,7 @@ async fn state_with(dev_auth: bool, jwks_json: Option<&str>) -> AppState {
         require_mfa: false,
         accepted_amr: vec!["mfa".into(), "otp".into(), "hwk".into()],
         accepted_acr: vec!["phrh".into()],
+        login: None,
     });
     AppState::with_auth(
         pool,

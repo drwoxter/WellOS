@@ -72,8 +72,27 @@ to a local user, optional MFA enforcement reads validated `amr`/`acr`
 claims (`WELLOS_OIDC_REQUIRE_MFA`), and tenant/roles are resolved only from
 the database. Machines authenticate with hashed, scoped, expiring,
 revocable `wsk_` service credentials (seeded for development, printed once
-by `make seed`) administered via `/api/v1/admin/service-credentials`. See
-`SECURITY.md` and `docs/operations/runbook.md`.
+by `make seed`) administered via `/api/v1/admin/service-credentials`.
+
+Browser login in production uses OIDC Authorization Code + PKCE (S256)
+through the BFF: set `WELLOS_OIDC_CLIENT_ID`, the exact
+`WELLOS_OIDC_REDIRECT_URI` (the BFF callback, e.g.
+`https://app.example.org/api/auth/oidc/callback`), optionally
+`WELLOS_OIDC_CLIENT_SECRET`, and `WELLOS_OIDC_DISCOVERY=true` so the
+authorization/token endpoints come from validated, issuer-pinned metadata.
+Login state lives in server-side single-use transactions (≤ 10 minutes);
+the browser only ever receives the opaque session and CSRF cookies. Local
+logout always revokes the WellOS session; provider logout is optional via a
+discovery-validated end-session endpoint.
+
+Authorization is facility-scoped: clinicians act only within their assigned
+facilities (seeded: `dev-dr.garcia` at both tenant-A facilities,
+`dev-dr.annex` at North Annex only), while allowlisted
+administrative/oversight roles may hold tenant-wide (NULL-facility)
+assignments. Shared PostgreSQL-backed rate limits protect login, patient
+search, credential administration and general API traffic
+(`WELLOS_RATE_*_PER_MIN`). See `SECURITY.md` and
+`docs/operations/runbook.md`.
 
 ## Tests
 
@@ -88,8 +107,8 @@ make test-integration   # API integration tests (requires running PostgreSQL)
 - Synthetic data only; no real PHI anywhere (code, fixtures, tests, logs).
 - No external identity provider is bundled; OIDC discovery/JWKS refresh only
   contacts the issuer you explicitly configure.
-- Role assignments are enforced tenant-wide, not facility-scoped (documented
-  in SECURITY.md).
+- User provisioning and role/facility assignment are direct database
+  operations; SCIM/IdP-driven provisioning is future work.
 - This remains a development system: no production deployment, compliance or
   clinical claims.
 - The FHIR R4 endpoints are a minimal read-only facade, not a FHIR server.

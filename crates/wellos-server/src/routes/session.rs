@@ -16,10 +16,11 @@ use axum::Json;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-async fn insert_session(
+pub(crate) async fn insert_session(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     state: &AppState,
-    ctx: &AuthContext,
+    tenant_id: Uuid,
+    user_id: Uuid,
 ) -> Result<(Uuid, String, String, chrono::DateTime<chrono::Utc>), ApiError> {
     let session_id = Uuid::now_v7();
     let token = generate_secret("wss_");
@@ -31,8 +32,8 @@ async fn insert_session(
          VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(session_id)
-    .bind(ctx.tenant_id)
-    .bind(ctx.user_id)
+    .bind(tenant_id)
+    .bind(user_id)
     .bind(hash_service_secret(&token))
     .bind(hash_service_secret(&csrf))
     .bind(expires_at)
@@ -54,7 +55,8 @@ pub async fn create(
         ));
     }
     let mut tx = state.pool.begin().await?;
-    let (session_id, token, csrf, expires_at) = insert_session(&mut tx, &state, &ctx).await?;
+    let (session_id, token, csrf, expires_at) =
+        insert_session(&mut tx, &state, ctx.tenant_id, ctx.user_id).await?;
     audit::record(
         &mut *tx,
         &ctx,
@@ -108,7 +110,8 @@ pub async fn rotate(
         .bind(session_id)
         .execute(&mut *tx)
         .await?;
-    let (new_id, token, csrf, expires_at) = insert_session(&mut tx, &state, &ctx).await?;
+    let (new_id, token, csrf, expires_at) =
+        insert_session(&mut tx, &state, ctx.tenant_id, ctx.user_id).await?;
     audit::record(
         &mut *tx,
         &ctx,
@@ -153,5 +156,18 @@ pub async fn delete(
     .await
     .map_err(ApiError::internal)?;
     tx.commit().await?;
-    Ok(Json(json!({ "authenticated": false })))
+    // Best-effort provider logout: expose the discovery-validated end-session
+    // endpoint when the provider advertises one. Local revocation above never
+    // depends on it.
+    let provider_logout_url = match state.auth.oidc.as_ref().map(|c| &c.keys) {
+        Some(crate::oidc::JwksKeys::Remote(remote)) => remote
+            .endpoints()
+            .await
+            .and_then(|e| e.end_session_endpoint),
+        _ => None,
+    };
+    Ok(Json(json!({
+        "authenticated": false,
+        "provider_logout_url": provider_logout_url,
+    })))
 }

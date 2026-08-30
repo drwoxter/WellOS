@@ -90,11 +90,30 @@ receive an acknowledgement within 5 business days.
 - Tenant isolation is enforced in every query path; cross-tenant probes
   return the same `404` as nonexistent resources so resource IDs cannot be
   enumerated, while the denial is still audited.
-- **Facility scope (documented limitation):** role assignments record a
-  facility, but authorization is currently enforced at tenant scope: a role
-  grants its actions across all facilities of the tenant. This is a
-  deliberate, bounded limitation for the vertical slice; facility-scoped
-  enforcement is on the roadmap.
+- **Facility scope** is enforced centrally in the policy layer. Each
+  clinical resource's facility is derived from trusted database
+  relationships (patient → encounter → service request → results/loops/AI
+  artifacts), never from client input, and must be covered by a granting
+  role assignment. `role_assignments.facility_id IS NULL` grants tenant-wide
+  access only for explicitly allowlisted administrative/oversight/machine
+  roles (`clinical_administrator`, `privacy_officer`, `security_auditor`,
+  `dmind_service_agent`, `lab_interface_agent`, `break_glass_authorized`);
+  ordinary clinical roles require explicit facility assignments. Patient
+  search is restricted to the caller's accessible facilities (a
+  client-supplied facility ID never widens it), registration authorizes the
+  requested facility, and out-of-facility probes return the same
+  non-enumerating `404` as cross-tenant probes. Break-glass bridges a
+  facility gap only when the dedicated break-glass assignment itself covers
+  that facility.
+- **Rate limiting** is shared and PostgreSQL-backed (atomic fixed windows in
+  `rate_limit_windows`, safe across replicas and concurrent requests).
+  Anonymous OIDC login/callback traffic is limited per hashed client
+  address (`x-forwarded-for` is honored only with `WELLOS_TRUSTED_PROXY`);
+  authenticated traffic is limited per tenant+principal per endpoint family
+  (patient search, credential administration, general API). Exhaustion
+  returns a bounded JSON `429` with `Retry-After`; denials are audited
+  without secrets or clinical payloads; if the store is unavailable the
+  request fails closed.
 
 ## Browser sessions
 
@@ -115,7 +134,26 @@ receive an acknowledgement within 5 business days.
 - `GET /api/session` validates the server-side session record (not mere
   cookie presence); logout revokes the server-side session and clears both
   cookies.
-- The token-entry form renders only in explicit local development.
+- **Browser OIDC login (Authorization Code + PKCE, S256):** the BFF
+  initiates login server-side (`/api/auth/oidc/login`): the API generates a
+  cryptographically random state, nonce, and code verifier, stores the
+  single-use login transaction server-side (hashes of state/nonce; ≤ 10
+  minutes), and returns the provider authorization URL built from
+  discovery-validated, issuer-pinned endpoints. The provider redirects to
+  the exact configured redirect URI; the BFF callback posts `code`/`state`
+  to the API, which atomically consumes the transaction (replays, expired
+  transactions, state/nonce mismatches, provider errors, and exchange
+  failures are rejected), exchanges the code server-side with PKCE, and
+  validates the ID token through the same JWKS/issuer/audience/MFA boundary
+  as bearer tokens. Only the local `(issuer, subject)` mapping identifies
+  the user — email/role/tenant claims are never trusted — and only opaque
+  `wss_`/`wsc_` values are issued to the browser. Provider tokens never
+  reach browser JavaScript, cookies, URLs, logs, or audit payloads. Logout
+  revokes the local session first; a discovery-validated
+  `end_session_endpoint` is offered as optional provider logout.
+- The token-entry form renders only in explicit local development
+  (`NEXT_PUBLIC_WELLOS_DEV_AUTH=true`; the backend additionally requires
+  `WELLOS_ENV=development` and `WELLOS_DEV_AUTH=true`).
 - CORS uses an explicit allowlist (`WELLOS_ALLOWED_ORIGINS`); startup fails
   outside development if it is not configured. `DATABASE_URL` is likewise
   required outside development (the localhost fallback is dev-only).
@@ -134,13 +172,17 @@ receive an acknowledgement within 5 business days.
 
 - No row-level security in PostgreSQL yet (application-level isolation only).
 - No tamper-evident hash chain on audit events yet.
-- No general request rate limiting or WAF in the development server (only the
-  per-user break-glass rate limit is enforced).
+- No WAF; rate limiting is fixed-window (a burst at a window boundary can
+  briefly see up to 2x the per-minute limit).
+- Anonymous rate-limit denials are surfaced as structured logs (no
+  tenant/principal exists for an audit row); authenticated denials are
+  audited.
+- The server-side PKCE verifier is stored plaintext in the single-use,
+  short-lived `login_transactions` row (it is never browser-readable or
+  logged); encryption at rest is delegated to the database deployment.
 - No token revocation list for human OIDC access tokens (revocation is
   delegated to the IdP via short token lifetimes); opaque browser sessions
   are revocable server-side.
-- Role assignments are enforced tenant-wide, not facility-scoped (see
-  Authorization above).
-- The BFF sign-in endpoint accepts a pasted credential in development; a
-  full OIDC authorization-code + PKCE browser flow is future work.
+- IdP-driven provisioning (SCIM) is future work: local users and role
+  assignments are administered directly in PostgreSQL.
 - TLS is expected from the deployment environment, not the app process.

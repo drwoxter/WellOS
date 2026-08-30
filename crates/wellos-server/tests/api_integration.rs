@@ -75,7 +75,7 @@ fn uniq(prefix: &str) -> String {
 async fn create_emergency_user(state: &AppState) -> String {
     let username = uniq("dr.em");
     let (tenant_id, facility_id): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
-        "SELECT u.tenant_id, f.id FROM users u\n         JOIN facilities f ON f.tenant_id = u.tenant_id\n         WHERE u.username = 'dr.garcia' LIMIT 1",
+        "SELECT u.tenant_id, f.id FROM users u\n         JOIN facilities f ON f.tenant_id = u.tenant_id\n         WHERE u.username = 'dr.garcia' ORDER BY f.name LIMIT 1",
     )
     .fetch_one(&state.pool)
     .await

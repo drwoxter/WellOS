@@ -29,6 +29,7 @@ jsonwebtoken = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }

@@ -30,9 +30,7 @@ export default function SignInPage() {
 
   // The token-entry form exists only for explicit local development.
   // Production deployments sign in through the configured OIDC provider.
-  const devAuth =
-    process.env.NODE_ENV === "development" ||
-    process.env.NEXT_PUBLIC_WELLOS_DEV_AUTH === "true";
+  const devAuth = process.env.NEXT_PUBLIC_WELLOS_DEV_AUTH === "true";
 
   if (!devAuth) {
     return (
@@ -42,6 +40,11 @@ export default function SignInPage() {
           <div className="card">
             <h2>{t(lang, "signIn")}</h2>
             <p className="muted">{t(lang, "oidcSignInHelp")}</p>
+            <p>
+              <a className="primary" href="/api/auth/oidc/login" role="button">
+                {t(lang, "oidcSignInButton")}
+              </a>
+            </p>
           </div>
         </main>
       </>

@@ -30,7 +30,15 @@
   CSRF cookie whose value must be echoed in `x-csrf-token` on
   state-changing requests. `GET /api/session` validates the server-side
   record; logout revokes it and clears both cookies. The token-entry form
-  is development-only.
+  is development-only. Production browser login uses Authorization Code +
+  PKCE (S256): the BFF asks the API to start a login (server-side
+  single-use transaction with hashed state/nonce and the code verifier,
+  ≤ 10 minutes), redirects the browser to the discovery-validated,
+  issuer-pinned authorization endpoint, and on callback posts `code`/`state`
+  to the API, which atomically consumes the transaction, exchanges the code
+  server-side, validates the ID token through the standard OIDC boundary
+  and issues only the opaque `wss_`/`wsc_` values. Provider tokens never
+  reach the browser, cookies, URLs, logs or audit payloads.
 - **B1 BFF→server**: untrusted input. All payloads validated by typed
   deserialization; errors return structured codes without internals.
 - **B2 Identity**: the client can never assert tenant, roles, permissions,
@@ -53,7 +61,13 @@
   and denials are audited. Break-glass requires the dedicated role, the
   emergency purpose and a bounded reason; it is read-only, rate limited and
   reviewed post hoc; it never crosses tenants. Cross-tenant probes return
-  404, indistinguishable from missing resources.
+  404, indistinguishable from missing resources. Facility scope is part of
+  the same decision: each resource's facility is derived from trusted
+  database relationships (never client input) and must be covered by a
+  granting role assignment; NULL-facility assignments are tenant-wide only
+  for allowlisted administrative/oversight/machine roles. Rate limits
+  (shared, PostgreSQL-backed, fail-closed) protect login/callback, patient
+  search, credential administration and general authenticated traffic.
 - **B4 Database**: single authoritative store. Observations and audit are
   append-only. Outbox rows carry identifiers, not clinical payloads.
 - **B5 AI gateway**: fires only after the clinical transaction commits;

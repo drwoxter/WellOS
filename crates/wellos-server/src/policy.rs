@@ -6,7 +6,7 @@
 //! [`crate::audit`]. This module is deliberately the single place authorization
 //! logic lives so it can later be replaced by a policy engine.
 
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, RoleAssignment};
 use crate::error::ApiError;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -228,9 +228,60 @@ pub fn role_allows(role: &str, action: &str) -> bool {
     allowed.contains(&action)
 }
 
+/// Roles whose `facility_id IS NULL` assignment grants tenant-wide access.
+/// This allowlist is explicit: administrative, oversight, and machine roles
+/// operate tenant-wide; the dedicated break-glass role may be granted
+/// tenant-wide for emergency coverage. Ordinary clinical roles require
+/// explicit facility assignments — a NULL facility grants them nothing
+/// beyond facility-unscoped resources.
+pub fn null_facility_is_tenant_wide(role: &str) -> bool {
+    matches!(
+        role,
+        roles::CLINICAL_ADMIN
+            | roles::PRIVACY_OFFICER
+            | roles::SECURITY_AUDITOR
+            | roles::DMIND_SERVICE
+            | roles::LAB_INTERFACE
+            | roles::BREAK_GLASS_AUTHORIZED
+    )
+}
+
+/// Whether a role assignment covers a specific facility.
+fn assignment_covers_facility(a: &RoleAssignment, facility: Uuid) -> bool {
+    match a.facility_id {
+        Some(f) => f == facility,
+        None => null_facility_is_tenant_wide(&a.role),
+    }
+}
+
+/// The set of facilities in which the caller may perform `action`, used to
+/// scope list/search queries. `None` means tenant-wide (an explicitly
+/// allowlisted tenant-wide assignment grants the action); otherwise the
+/// explicit facility list (possibly empty).
+pub fn facility_scope(ctx: &AuthContext, action: &str) -> Option<Vec<Uuid>> {
+    let mut ids: Vec<Uuid> = Vec::new();
+    for a in ctx.assignments.iter() {
+        if !role_allows(&a.role, action) {
+            continue;
+        }
+        match a.facility_id {
+            None if null_facility_is_tenant_wide(&a.role) => return None,
+            Some(f) => ids.push(f),
+            None => {}
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    Some(ids)
+}
+
 pub struct ResourceCtx {
     pub tenant_id: Uuid,
     pub patient_id: Option<Uuid>,
+    /// Facility derived from trusted database relationships (never from
+    /// client input). `None` for facility-unscoped resources (tenant
+    /// metadata, audit log, worklists filtered separately).
+    pub facility_id: Option<Uuid>,
 }
 
 #[derive(Debug)]
@@ -270,7 +321,12 @@ pub async fn authorize_with_limit(
         }
     }
 
-    if !ctx.roles.iter().any(|role| role_allows(role, action)) {
+    let granting: Vec<&RoleAssignment> = ctx
+        .assignments
+        .iter()
+        .filter(|a| role_allows(&a.role, action))
+        .collect();
+    if granting.is_empty() {
         return Ok(Decision {
             allowed: false,
             reason: format!("role_lacks_permission:{action}"),
@@ -316,6 +372,49 @@ pub async fn authorize_with_limit(
         });
     }
 
+    // Facility scope is enforced centrally: the resource's facility (derived
+    // from trusted database relationships) must be covered by at least one
+    // granting assignment. NULL-facility assignments cover the tenant only
+    // for explicitly allowlisted roles. A gap can be bridged only by the
+    // audited break-glass read path, and only when the dedicated break-glass
+    // assignment itself covers that facility; every other facility-gap denial
+    // uses one non-enumerating reason.
+    let resource_facility = resource.and_then(|r| r.facility_id);
+    if let Some(facility) = resource_facility {
+        if !granting
+            .iter()
+            .any(|a| assignment_covers_facility(a, facility))
+        {
+            let deny = Decision {
+                allowed: false,
+                reason: "facility_scope_denied".into(),
+                used_break_glass: false,
+            };
+            if action != actions::PATIENT_READ || ctx.break_glass_reason.is_none() {
+                return Ok(deny);
+            }
+            let Some(ResourceCtx {
+                patient_id: Some(patient_id),
+                ..
+            }) = resource
+            else {
+                return Ok(deny);
+            };
+            let break_glass_covers = ctx.assignments.iter().any(|a| {
+                a.role == roles::BREAK_GLASS_AUTHORIZED && assignment_covers_facility(a, facility)
+            });
+            if !break_glass_covers {
+                return Ok(deny);
+            }
+            let decision =
+                break_glass_read(pool, ctx, *patient_id, break_glass_hourly_limit).await?;
+            if decision.allowed {
+                return Ok(decision);
+            }
+            return Ok(deny);
+        }
+    }
+
     // Contextual check: clinical chart access requires a care relationship
     // (an encounter between practitioner and patient) unless the caller's
     // role is non-clinical-contextual or break-glass is invoked.
@@ -356,7 +455,7 @@ pub async fn authorize_with_limit(
                         used_break_glass: false,
                     });
                 }
-                let Some(reason) = &ctx.break_glass_reason else {
+                let Some(_) = &ctx.break_glass_reason else {
                     return Ok(Decision {
                         allowed: false,
                         reason: "no_care_relationship".into(),
@@ -374,64 +473,7 @@ pub async fn authorize_with_limit(
                         used_break_glass: false,
                     });
                 }
-                if ctx.purpose_of_use != Purpose::Emergency {
-                    return Ok(Decision {
-                        allowed: false,
-                        reason: "break_glass_requires_emergency_purpose".into(),
-                        used_break_glass: false,
-                    });
-                }
-                let reason = reason.trim();
-                if reason.len() < 8 || reason.len() > 500 {
-                    return Ok(Decision {
-                        allowed: false,
-                        reason: "break_glass_reason_invalid".into(),
-                        used_break_glass: false,
-                    });
-                }
-                // Count and insert under a per-user transaction-scoped
-                // advisory lock so concurrent requests cannot all pass the
-                // limit check before any activation is recorded.
-                let mut tx = pool.begin().await?;
-                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
-                    .bind(ctx.user_id)
-                    .execute(&mut *tx)
-                    .await?;
-                let (recent,): (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM break_glass_events
-                     WHERE user_id = $1 AND created_at > now() - interval '1 hour'",
-                )
-                .bind(ctx.user_id)
-                .fetch_one(&mut *tx)
-                .await?;
-                if recent >= break_glass_hourly_limit {
-                    return Ok(Decision {
-                        allowed: false,
-                        reason: "break_glass_rate_limited".into(),
-                        used_break_glass: false,
-                    });
-                }
-                // Immutable break-glass record, pending mandatory review.
-                sqlx::query(
-                    "INSERT INTO break_glass_events
-                     (id, tenant_id, user_id, patient_id, reason, correlation_id, purpose_of_use)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                )
-                .bind(Uuid::now_v7())
-                .bind(ctx.tenant_id)
-                .bind(ctx.user_id)
-                .bind(patient_id)
-                .bind(reason)
-                .bind(ctx.correlation_id)
-                .bind(ctx.purpose_of_use.as_str())
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                return Ok(Decision {
-                    allowed: true,
-                    reason: "break_glass".into(),
-                    used_break_glass: true,
-                });
+                return break_glass_read(pool, ctx, *patient_id, break_glass_hourly_limit).await;
             }
         }
     }
@@ -440,6 +482,76 @@ pub async fn authorize_with_limit(
         allowed: true,
         reason: "rbac_allow".into(),
         used_break_glass: false,
+    })
+}
+
+/// The audited break-glass read path: emergency purpose, bounded reason,
+/// per-user rate limit under an advisory lock, and an immutable event row
+/// pending mandatory review. Callers verify the dedicated role/assignment
+/// before invoking this.
+async fn break_glass_read(
+    pool: &PgPool,
+    ctx: &AuthContext,
+    patient_id: Uuid,
+    break_glass_hourly_limit: i64,
+) -> Result<Decision, ApiError> {
+    if ctx.purpose_of_use != Purpose::Emergency {
+        return Ok(Decision {
+            allowed: false,
+            reason: "break_glass_requires_emergency_purpose".into(),
+            used_break_glass: false,
+        });
+    }
+    let reason = ctx.break_glass_reason.as_deref().unwrap_or("").trim();
+    if reason.len() < 8 || reason.len() > 500 {
+        return Ok(Decision {
+            allowed: false,
+            reason: "break_glass_reason_invalid".into(),
+            used_break_glass: false,
+        });
+    }
+    // Count and insert under a per-user transaction-scoped advisory lock so
+    // concurrent requests cannot all pass the limit check before any
+    // activation is recorded.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(ctx.user_id)
+        .execute(&mut *tx)
+        .await?;
+    let (recent,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM break_glass_events
+         WHERE user_id = $1 AND created_at > now() - interval '1 hour'",
+    )
+    .bind(ctx.user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if recent >= break_glass_hourly_limit {
+        return Ok(Decision {
+            allowed: false,
+            reason: "break_glass_rate_limited".into(),
+            used_break_glass: false,
+        });
+    }
+    // Immutable break-glass record, pending mandatory review.
+    sqlx::query(
+        "INSERT INTO break_glass_events
+         (id, tenant_id, user_id, patient_id, reason, correlation_id, purpose_of_use)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ctx.tenant_id)
+    .bind(ctx.user_id)
+    .bind(patient_id)
+    .bind(reason)
+    .bind(ctx.correlation_id)
+    .bind(ctx.purpose_of_use.as_str())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Decision {
+        allowed: true,
+        reason: "break_glass".into(),
+        used_break_glass: true,
     })
 }
 

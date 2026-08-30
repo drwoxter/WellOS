@@ -127,6 +127,7 @@ fn oidc_config(issuer: &str, keys: JwksKeys, require_mfa: bool) -> OidcConfig {
         require_mfa,
         accepted_amr: vec!["mfa".into(), "otp".into(), "hwk".into()],
         accepted_acr: vec!["phrh".into()],
+        login: None,
     }
 }
 
@@ -482,6 +483,7 @@ async fn session_rotation_failure_rolls_back_and_keeps_old_session() {
         display_name: "Ghost".to_string(),
         is_service: false,
         roles: vec![],
+        assignments: vec![],
         scopes: vec![],
         purpose_of_use: wellos_server::policy::Purpose::Treatment,
         break_glass_reason: None,

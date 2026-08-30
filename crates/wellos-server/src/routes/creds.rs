@@ -23,6 +23,7 @@ fn tenant_resource(ctx: &AuthContext) -> Option<ResourceCtx> {
     Some(ResourceCtx {
         tenant_id: ctx.tenant_id,
         patient_id: None,
+        facility_id: None,
     })
 }
 
@@ -67,6 +68,12 @@ pub async fn issue(
     ctx: AuthContext,
     Json(body): Json<IssueCredential>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::ratelimit::enforce_for_principal(
+        &state,
+        &ctx,
+        crate::ratelimit::Family::CredentialAdmin,
+    )
+    .await?;
     let allowed = guard(
         &state,
         &ctx,
@@ -156,6 +163,12 @@ pub async fn list(
     State(state): State<AppState>,
     ctx: AuthContext,
 ) -> Result<Json<Value>, ApiError> {
+    crate::ratelimit::enforce_for_principal(
+        &state,
+        &ctx,
+        crate::ratelimit::Family::CredentialAdmin,
+    )
+    .await?;
     guard(
         &state,
         &ctx,
@@ -200,6 +213,12 @@ pub async fn rotate(
     ctx: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::ratelimit::enforce_for_principal(
+        &state,
+        &ctx,
+        crate::ratelimit::Family::CredentialAdmin,
+    )
+    .await?;
     let allowed = guard(
         &state,
         &ctx,
@@ -268,6 +287,12 @@ pub async fn revoke(
     ctx: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::ratelimit::enforce_for_principal(
+        &state,
+        &ctx,
+        crate::ratelimit::Family::CredentialAdmin,
+    )
+    .await?;
     let allowed = guard(
         &state,
         &ctx,

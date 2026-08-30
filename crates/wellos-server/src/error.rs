@@ -10,6 +10,8 @@ pub struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,
     pub message: String,
+    /// Seconds to wait before retrying (sets a `Retry-After` header).
+    pub retry_after: Option<u64>,
 }
 
 impl ApiError {
@@ -18,7 +20,18 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            retry_after: None,
         }
+    }
+
+    pub fn too_many_requests(retry_after: u64) -> Self {
+        let mut err = Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many requests; retry later",
+        );
+        err.retry_after = Some(retry_after);
+        err
     }
 
     pub fn forbidden(message: impl Into<String>) -> Self {
@@ -70,6 +83,12 @@ impl IntoResponse for ApiError {
         let body = Json(json!({
             "error": { "code": self.code, "message": self.message }
         }));
-        (self.status, body).into_response()
+        let mut response = (self.status, body).into_response();
+        if let Some(secs) = self.retry_after {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                response.headers_mut().insert("retry-after", value);
+            }
+        }
+        response
     }
 }

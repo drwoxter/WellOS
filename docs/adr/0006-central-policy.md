@@ -43,10 +43,19 @@ auditable place.
   is restricted to `privacy_officer` (read also `security_auditor`) under
   the `operations` purpose.
 
-- Role assignments carry an optional `facility_id`, but enforcement today is
-  **tenant-wide**: a role grants its actions across the whole tenant.
-  Facility-scoped enforcement is a documented follow-up, not an implemented
-  guarantee.
+- Facility scope is enforced centrally: `ResourceCtx` carries the
+  resource's facility, derived only from trusted database relationships
+  (patient → encounter → service request → downstream resources), and a
+  granting role assignment must cover that facility.
+  `role_assignments.facility_id IS NULL` means tenant-wide access only for
+  an explicit allowlist of administrative/oversight/machine roles
+  (`clinical_administrator`, `privacy_officer`, `security_auditor`,
+  `dmind_service_agent`, `lab_interface_agent`, `break_glass_authorized`);
+  ordinary clinical roles require explicit facility assignments. Patient
+  search filters to the caller's accessible facilities, and
+  out-of-facility resources return the same non-enumerating `404` as
+  cross-tenant resources. Break-glass does not bypass facility scope
+  unless its own assignment covers the facility.
 
 ## Consequences
 

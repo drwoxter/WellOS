@@ -11,7 +11,10 @@ async fn main() -> anyhow::Result<()> {
         println!("database already seeded; skipping");
         return Ok(());
     }
-    let seeded = wellos_server::seeddata::seed(&pool).await?;
+    let Some(seeded) = wellos_server::seeddata::seed(&pool).await? else {
+        println!("database already seeded; skipping");
+        return Ok(());
+    };
     println!("seeded synthetic data:");
     println!("  tenant A (Hospital Demo Norte): {}", seeded.tenant_a);
     println!("  tenant B (Clínica Demo Sur):    {}", seeded.tenant_b);

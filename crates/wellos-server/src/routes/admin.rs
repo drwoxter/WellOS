@@ -35,6 +35,7 @@ pub async fn tenant_meta(
         Some(ResourceCtx {
             tenant_id: ctx.tenant_id,
             patient_id: None,
+            facility_id: None,
         }),
     )
     .await?
@@ -44,13 +45,14 @@ pub async fn tenant_meta(
         .bind(ctx.tenant_id)
         .fetch_one(&state.pool)
         .await?;
-    let facilities = sqlx::query("SELECT id, name FROM facilities WHERE tenant_id = $1")
-        .bind(ctx.tenant_id)
-        .fetch_all(&state.pool)
-        .await?
-        .iter()
-        .map(|r| json!({ "id": r.get::<Uuid,_>("id"), "name": r.get::<String,_>("name") }))
-        .collect::<Vec<_>>();
+    let facilities =
+        sqlx::query("SELECT id, name FROM facilities WHERE tenant_id = $1 ORDER BY name")
+            .bind(ctx.tenant_id)
+            .fetch_all(&state.pool)
+            .await?
+            .iter()
+            .map(|r| json!({ "id": r.get::<Uuid,_>("id"), "name": r.get::<String,_>("name") }))
+            .collect::<Vec<_>>();
     Ok(Json(json!({
         "tenant": {
             "id": ctx.tenant_id,
@@ -79,6 +81,7 @@ pub async fn audit_log(
         Some(ResourceCtx {
             tenant_id: ctx.tenant_id,
             patient_id: None,
+            facility_id: None,
         }),
     )
     .await?
@@ -125,6 +128,7 @@ pub async fn break_glass_events(
         Some(ResourceCtx {
             tenant_id: ctx.tenant_id,
             patient_id: None,
+            facility_id: None,
         }),
     )
     .await?
@@ -191,6 +195,7 @@ pub async fn review_break_glass(
         Some(ResourceCtx {
             tenant_id: ctx.tenant_id,
             patient_id: None,
+            facility_id: None,
         }),
     )
     .await?;
@@ -237,6 +242,7 @@ pub async fn escalate_overdue(
         Some(ResourceCtx {
             tenant_id: ctx.tenant_id,
             patient_id: None,
+            facility_id: None,
         }),
     )
     .await?;

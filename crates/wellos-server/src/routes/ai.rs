@@ -35,13 +35,18 @@ pub async fn review_artifact(
             ))
         }
     };
-    let row = sqlx::query("SELECT tenant_id, patient_id, status FROM ai_artifacts WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
+    let row = sqlx::query(
+        "SELECT a.tenant_id, a.patient_id, a.status, p.facility_id
+         FROM ai_artifacts a JOIN patients p ON p.id = a.patient_id
+         WHERE a.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
     let tenant_id: Uuid = row.get("tenant_id");
     let patient_id: Uuid = row.get("patient_id");
+    let facility_id: Uuid = row.get("facility_id");
     let status = ArtifactStatus::parse(row.get::<String, _>("status").as_str())
         .ok_or_else(|| ApiError::internal("invalid artifact status"))?;
 
@@ -59,6 +64,7 @@ pub async fn review_artifact(
         Some(ResourceCtx {
             tenant_id,
             patient_id: Some(patient_id),
+            facility_id: Some(facility_id),
         }),
     )
     .await?;

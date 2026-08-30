@@ -9,8 +9,12 @@ pub struct Seeded {
     pub tenant_a: Uuid,
     pub tenant_b: Uuid,
     pub facility_a: Uuid,
+    /// Second facility in tenant A, for intra-tenant facility isolation.
+    pub facility_a2: Uuid,
     pub facility_b: Uuid,
     pub patient_a: Uuid,
+    /// Patient in tenant A's second facility.
+    pub patient_a2: Uuid,
     pub patient_b: Uuid,
     /// Development-only lab-adapter service credential (random per seed run;
     /// only its hash is stored). Real deployments issue credentials through
@@ -25,13 +29,29 @@ pub fn generate_service_secret() -> String {
     format!("wsk_{}", hex::encode(bytes))
 }
 
-pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
+/// Seed synthetic development data. Returns `None` when the database is
+/// already seeded (concurrent seeders serialize on an advisory lock).
+pub async fn seed(pool: &PgPool) -> anyhow::Result<Option<Seeded>> {
     let tenant_a = Uuid::now_v7();
     let tenant_b = Uuid::now_v7();
     let facility_a = Uuid::now_v7();
+    let facility_a2 = Uuid::now_v7();
     let facility_b = Uuid::now_v7();
 
     let mut tx = pool.begin().await?;
+
+    // Serialize concurrent seeders (e.g. parallel test binaries) and make
+    // seeding idempotent: whoever wins the lock seeds; everyone else reuses.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('wellos_seed'))")
+        .execute(&mut *tx)
+        .await?;
+    let (existing,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        .fetch_one(&mut *tx)
+        .await?;
+    if existing > 0 {
+        tx.rollback().await?;
+        return Ok(None);
+    }
 
     for (id, name, brand) in [
         (
@@ -64,6 +84,11 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
     }
     sqlx::query("INSERT INTO facilities (id, tenant_id, name) VALUES ($1,$2,'Main Campus')")
         .bind(facility_a)
+        .bind(tenant_a)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO facilities (id, tenant_id, name) VALUES ($1,$2,'North Annex')")
+        .bind(facility_a2)
         .bind(tenant_a)
         .execute(&mut *tx)
         .await?;
@@ -164,6 +189,11 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
         .bind(oidc_subject)
         .execute(&mut *tx)
         .await?;
+        // Administrative, oversight, and machine roles are explicitly
+        // tenant-wide (facility_id IS NULL, allowlisted in policy);
+        // ordinary clinical roles get explicit facility assignments.
+        let assignment_facility =
+            (!crate::policy::null_facility_is_tenant_wide(role)).then_some(facility_a);
         sqlx::query(
             "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id) VALUES ($1,$2,$3,$4,$5)",
         )
@@ -171,10 +201,43 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
         .bind(tenant_a)
         .bind(uid)
         .bind(role)
-        .bind(facility_a)
+        .bind(assignment_facility)
         .execute(&mut *tx)
         .await?;
+        // Dr. García covers both tenant-A facilities (multi-facility clinician).
+        if *username == "dr.garcia" {
+            sqlx::query(
+                "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id) VALUES ($1,$2,$3,$4,$5)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(tenant_a)
+            .bind(uid)
+            .bind(role)
+            .bind(facility_a2)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
+    // A physician assigned only to the second facility, to prove
+    // intra-tenant facility isolation.
+    let dr_annex = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, username, display_name, oidc_subject)
+         VALUES ($1,$2,'dr.annex','Dr. Andrea Anexo (Physician, North Annex)','synthetic|dr.annex')",
+    )
+    .bind(dr_annex)
+    .bind(tenant_a)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id) VALUES ($1,$2,$3,'physician',$4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant_a)
+    .bind(dr_annex)
+    .bind(facility_a2)
+    .execute(&mut *tx)
+    .await?;
     // An emergency clinician explicitly authorized for break-glass access
     // (least privilege: ordinary physicians cannot self-assert emergencies).
     let dr_emergency = Uuid::now_v7();
@@ -243,6 +306,16 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
     .bind(facility_a)
     .execute(&mut *tx)
     .await?;
+    let patient_a2 = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO patients (id, tenant_id, facility_id, family_name, given_name, birth_date, sex, identifier)
+         VALUES ($1,$2,$3,'Demopatient','Anexa','1990-01-15','female','SYN-0002')",
+    )
+    .bind(patient_a2)
+    .bind(tenant_a)
+    .bind(facility_a2)
+    .execute(&mut *tx)
+    .await?;
     let patient_b = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO patients (id, tenant_id, facility_id, family_name, given_name, birth_date, sex, identifier)
@@ -301,13 +374,15 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Seeded> {
     }
 
     tx.commit().await?;
-    Ok(Seeded {
+    Ok(Some(Seeded {
         tenant_a,
         tenant_b,
         facility_a,
+        facility_a2,
         facility_b,
         patient_a,
+        patient_a2,
         patient_b,
         lab_adapter_token,
-    })
+    }))
 }

@@ -45,6 +45,20 @@ fn select_key<'a>(jwks: &'a JwkSet, kid: Option<&str>) -> Option<&'a Jwk> {
 struct DiscoveryDocument {
     issuer: String,
     jwks_uri: String,
+    authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+    end_session_endpoint: Option<String>,
+    response_types_supported: Option<Vec<String>>,
+    code_challenge_methods_supported: Option<Vec<String>>,
+}
+
+/// Endpoints for the browser Authorization Code + PKCE flow, resolved from
+/// the pinned issuer's discovery metadata and validated against it.
+#[derive(Clone, Debug)]
+pub struct OidcEndpoints {
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub end_session_endpoint: Option<String>,
 }
 
 struct CachedJwks {
@@ -54,6 +68,7 @@ struct CachedJwks {
 
 struct RemoteState {
     jwks_uri: Option<String>,
+    endpoints: Option<OidcEndpoints>,
     cache: Option<CachedJwks>,
     last_attempt: Option<Instant>,
 }
@@ -88,6 +103,7 @@ impl RemoteJwks {
             client,
             state: RwLock::new(RemoteState {
                 jwks_uri: None,
+                endpoints: None,
                 cache: None,
                 last_attempt: None,
             }),
@@ -154,6 +170,11 @@ impl RemoteJwks {
             .cloned()
     }
 
+    /// Validated browser-flow endpoints, when the provider advertises them.
+    pub async fn endpoints(&self) -> Option<OidcEndpoints> {
+        self.state.read().await.endpoints.clone()
+    }
+
     async fn initialize_locked(&self, state: &mut RemoteState) -> anyhow::Result<()> {
         let discovery_url = format!(
             "{}/.well-known/openid-configuration",
@@ -172,6 +193,7 @@ impl RemoteJwks {
         }
         require_safe_url(&doc.jwks_uri, self.allow_http, "OIDC jwks_uri")?;
         require_same_host(&self.issuer, &doc.jwks_uri)?;
+        state.endpoints = validate_endpoints(&self.issuer, self.allow_http, &doc)?;
         let jwks = self.fetch_jwks(&doc.jwks_uri).await?;
         state.jwks_uri = Some(doc.jwks_uri);
         state.cache = Some(CachedJwks {
@@ -180,6 +202,48 @@ impl RemoteJwks {
         });
         Ok(())
     }
+}
+
+/// Validate the browser-flow endpoints from discovery metadata. Both the
+/// authorization and token endpoints must be safe URLs on the pinned
+/// issuer's host. When the provider advertises supported response types or
+/// code challenge methods, they must include `code` and `S256`: WellOS only
+/// performs the authorization-code flow with S256 PKCE.
+fn validate_endpoints(
+    issuer: &str,
+    allow_http: bool,
+    doc: &DiscoveryDocument,
+) -> anyhow::Result<Option<OidcEndpoints>> {
+    let (Some(authz), Some(token)) = (&doc.authorization_endpoint, &doc.token_endpoint) else {
+        return Ok(None);
+    };
+    require_safe_url(authz, allow_http, "OIDC authorization_endpoint")?;
+    require_same_host(issuer, authz)?;
+    require_safe_url(token, allow_http, "OIDC token_endpoint")?;
+    require_same_host(issuer, token)?;
+    if let Some(types) = &doc.response_types_supported {
+        if !types.iter().any(|t| t == "code") {
+            anyhow::bail!("OIDC provider does not support the authorization-code flow");
+        }
+    }
+    if let Some(methods) = &doc.code_challenge_methods_supported {
+        if !methods.iter().any(|m| m == "S256") {
+            anyhow::bail!("OIDC provider does not support S256 PKCE");
+        }
+    }
+    let end_session = match &doc.end_session_endpoint {
+        Some(url) => {
+            require_safe_url(url, allow_http, "OIDC end_session_endpoint")?;
+            require_same_host(issuer, url)?;
+            Some(url.clone())
+        }
+        None => None,
+    };
+    Ok(Some(OidcEndpoints {
+        authorization_endpoint: authz.clone(),
+        token_endpoint: token.clone(),
+        end_session_endpoint: end_session,
+    }))
 }
 
 /// HTTPS is mandatory for identity endpoints. Development may use plain

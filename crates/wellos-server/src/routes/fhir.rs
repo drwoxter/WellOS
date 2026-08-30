@@ -21,7 +21,7 @@ pub async fn patient(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let row = sqlx::query(
-        "SELECT id, tenant_id, family_name, given_name, birth_date, sex, identifier
+        "SELECT id, tenant_id, facility_id, family_name, given_name, birth_date, sex, identifier
          FROM patients WHERE id = $1",
     )
     .bind(id)
@@ -36,6 +36,7 @@ pub async fn patient(
         Some(ResourceCtx {
             tenant_id: row.get("tenant_id"),
             patient_id: Some(id),
+            facility_id: Some(row.get("facility_id")),
         }),
     )
     .await?
@@ -57,12 +58,13 @@ pub async fn observation(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let row = sqlx::query(
-        "SELECT id, tenant_id, patient_id, code_loinc, value_num::text AS value_num, unit,
-                reference_range, status, effective_at,
+        "SELECT o.id, o.tenant_id, o.patient_id, o.code_loinc, o.value_num::text AS value_num,
+                o.unit, o.reference_range, o.status, o.effective_at, p.facility_id,
                 EXISTS(SELECT 1 FROM observations o2
-                       WHERE o2.tenant_id = observations.tenant_id AND o2.amends = observations.id)
+                       WHERE o2.tenant_id = o.tenant_id AND o2.amends = o.id)
                     AS superseded
-         FROM observations WHERE id = $1",
+         FROM observations o JOIN patients p ON p.id = o.patient_id
+         WHERE o.id = $1",
     )
     .bind(id)
     .fetch_optional(&state.pool)
@@ -77,6 +79,7 @@ pub async fn observation(
         Some(ResourceCtx {
             tenant_id: row.get("tenant_id"),
             patient_id: Some(patient_id),
+            facility_id: Some(row.get("facility_id")),
         }),
     )
     .await?
@@ -111,8 +114,10 @@ pub async fn service_request(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let row = sqlx::query(
-        "SELECT id, tenant_id, patient_id, encounter_id, code_loinc, display, status, loop_state
-         FROM service_requests WHERE id = $1",
+        "SELECT sr.id, sr.tenant_id, sr.patient_id, sr.encounter_id, sr.code_loinc, sr.display,
+                sr.status, sr.loop_state, p.facility_id
+         FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
+         WHERE sr.id = $1",
     )
     .bind(id)
     .fetch_optional(&state.pool)
@@ -127,6 +132,7 @@ pub async fn service_request(
         Some(ResourceCtx {
             tenant_id: row.get("tenant_id"),
             patient_id: Some(patient_id),
+            facility_id: Some(row.get("facility_id")),
         }),
     )
     .await?

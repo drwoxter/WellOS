@@ -29,11 +29,23 @@ origins outside development) and security response headers; emergency
 purpose gated behind the dedicated break-glass role for patient
 search/read.
 
+Identity/authorization hardening (phase 3A): browser OIDC login via
+Authorization Code + PKCE (S256) with discovery-validated, issuer-pinned
+authorization/token endpoints, server-side single-use login transactions
+(hashed state/nonce, ≤ 10 minutes, atomic consumption), server-side code
+exchange, ID-token validation through the existing OIDC boundary, opaque
+session issuance, and optional provider logout; central facility-scoped
+authorization (trusted-relationship facility derivation, explicit
+NULL-facility allowlist, facility-scoped patient search, break-glass
+facility coverage); shared PostgreSQL-backed rate limiting (anonymous
+login/callback per hashed client address, per-principal patient search /
+credential admin / general API, HTTP 429 + Retry-After, fail-closed store).
+
 ## Next 10 backlog items (priority order)
 
-1. **Identity phase 3**: browser OIDC authorization-code + PKCE flow,
-   IdP-driven user provisioning (SCIM), facility-scoped role enforcement,
-   general per-tenant rate limiting.
+1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
+   rate limiting with tenant-level aggregate caps, encrypted-at-rest login
+   transactions.
 2. **PostgreSQL row-level security** as a second tenant-isolation layer, plus
    audit hash-chaining for tamper evidence.
 3. **Outbox dispatcher + NATS JetStream**: publish outbox rows, consumer

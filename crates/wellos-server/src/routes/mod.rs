@@ -6,6 +6,7 @@ pub mod encounters;
 pub mod fhir;
 pub mod lab;
 pub mod loops;
+pub mod oidc_login;
 pub mod patients;
 pub mod session;
 
@@ -13,6 +14,7 @@ use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
 use crate::policy::{self, Decision, ResourceCtx};
+use crate::ratelimit;
 use crate::state::AppState;
 use axum::http::header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::Method;
@@ -33,6 +35,8 @@ pub fn router(state: AppState) -> Router {
                 .delete(session::delete),
         )
         .route("/api/v1/auth/session/rotate", post(session::rotate))
+        .route("/api/v1/auth/oidc/login", post(oidc_login::start))
+        .route("/api/v1/auth/oidc/callback", post(oidc_login::callback))
         .route(
             "/api/v1/admin/service-credentials",
             post(creds::issue).get(creds::list),
@@ -194,6 +198,8 @@ pub async fn guard(
     resource_type: &str,
     resource: Option<ResourceCtx>,
 ) -> Result<Allowed, ApiError> {
+    // General authenticated-traffic limit, shared across API replicas.
+    ratelimit::enforce_for_principal(state, ctx, ratelimit::Family::Api).await?;
     let decision: Decision = policy::authorize_with_limit(
         &state.pool,
         ctx,
@@ -216,10 +222,10 @@ pub async fn guard(
         )
         .await
         .map_err(ApiError::internal)?;
-        // Cross-tenant probes get the same shape as nonexistent resources so
-        // resource IDs in other tenants are not discoverable; the denial is
-        // still fully audited above.
-        if decision.reason == "cross_tenant_access" {
+        // Cross-tenant and out-of-facility probes get the same shape as
+        // nonexistent resources, so protected resource IDs are not
+        // discoverable; the denials are still fully audited above.
+        if decision.reason == "cross_tenant_access" || decision.reason == "facility_scope_denied" {
             return Err(ApiError::not_found());
         }
         return Err(ApiError::forbidden(format!("action '{action}' denied")));

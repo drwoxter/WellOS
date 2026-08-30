@@ -17,8 +17,8 @@ provenance, credentials/tokens, tenant isolation guarantees.
 | Tampering | Modify clinical history or audit | Append-only observations & audit; amendments linked, never overwrite; parameterized SQL throughout | Audit hash chain; Postgres RLS; WORM storage for audit |
 | Repudiation | Deny having acted | Every access/transition/AI event audited with actor, purpose, correlation id; break-glass requires reason | Time-stamping service |
 | Information disclosure | Cross-tenant reads, resource-ID probing, PHI in logs/events, token theft via XSS | Tenant scoping in all queries; cross-tenant probes return 404 identical to missing resources (denial still audited); outbox/logs carry ids not clinical payloads; no access tokens in cookies — only opaque hashed `wss_` sessions in HttpOnly cookies via the BFF, CSRF double-submit on state-changing requests, security headers (nosniff/no-referrer/frame-deny/CSP/HSTS); external AI off by default + consent gate | Field-level encryption; redaction layer at model gateway |
-| Denial of service | Flooding ingestion or AI calls | Idempotent ingestion; AI async and non-blocking; bounded DB pool; per-user break-glass rate limit | General rate limiting, quotas per tenant |
-| Elevation of privilege | Role abuse, break-glass misuse, purpose-header widening | Central least-privilege policy; typed purpose-of-use matrix (headers can only narrow access); service credentials scope-limited and unable to act as humans; break-glass requires dedicated role + emergency purpose, read-only, same-tenant, bounded reason, per-user hourly limit, immutable event with mandatory privacy/security review | Anomaly detection on break-glass patterns |
+| Denial of service | Flooding ingestion, login endpoints or AI calls | Idempotent ingestion; AI async and non-blocking; bounded DB pool; shared PostgreSQL-backed rate limiting (anonymous login/callback per hashed client address, per-principal patient search / credential admin / general API, 429 + Retry-After, fail-closed store); per-user break-glass rate limit | Token-bucket limits, tenant-level aggregate quotas, WAF |
+| Elevation of privilege | Role abuse, break-glass misuse, purpose-header widening, cross-facility access | Central least-privilege policy; typed purpose-of-use matrix (headers can only narrow access); facility scope enforced centrally with trusted-relationship facility derivation and an explicit NULL-facility allowlist; service credentials scope-limited and unable to act as humans; break-glass requires dedicated role + emergency purpose, read-only, same-tenant, facility-covered, bounded reason, per-user hourly limit, immutable event with mandatory privacy/security review | Anomaly detection on break-glass patterns |
 
 ## Abuse cases exercised by tests
 
@@ -34,7 +34,22 @@ under MFA policy (rejected), expired/idle/revoked/rotated-away sessions
 (rejected), missing/wrong CSRF token on writes (rejected), cross-tenant
 service-credential admin (404), emergency search without the break-glass
 role (denied), dev tokens outside development (rejected), duplicate inbound
-results (no duplicates), stale version writes (409).
+results (no duplicates), stale version writes (409), cross-facility
+reads/search/registration/encounters/orders/worklists (denied or filtered),
+break-glass outside its assigned facility (denied), OIDC login
+state/nonce/PKCE mismatch, replayed or expired login transactions, provider
+and token-exchange errors (all rejected; no provider tokens in responses,
+cookies or URLs), rate-limit exhaustion incl. parallel requests and
+unavailable store (denied with Retry-After / fail-closed).
+
+## Residual risk: rate limiting
+
+Fixed windows allow a boundary burst of up to twice the per-minute limit.
+Anonymous denials are logged (no principal exists to audit); the anonymous
+key hashes the socket peer address, or `x-forwarded-for` only when
+`WELLOS_TRUSTED_PROXY` is explicitly enabled. The PKCE code verifier is
+stored plaintext in the short-lived single-use `login_transactions` row;
+encryption at rest is delegated to the database deployment.
 
 ## Residual risk: break-glass abuse controls
 

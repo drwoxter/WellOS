@@ -49,6 +49,12 @@ async fn main() -> anyhow::Result<()> {
     let app = wellos_server::app(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!(%bind_addr, "wellos-server listening");
-    axum::serve(listener, app).await?;
+    // ConnectInfo carries the socket peer address for the anonymous
+    // login/callback rate limiter.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
