@@ -33,6 +33,32 @@ pub async fn register(
             "family_name and identifier are required",
         ));
     }
+    for (field, value, max) in [
+        ("family_name", body.family_name.as_str(), 128),
+        ("given_name", body.given_name.as_str(), 128),
+        ("sex", body.sex.as_str(), 16),
+        ("identifier", body.identifier.as_str(), 64),
+    ] {
+        if value.len() > max {
+            return Err(ApiError::bad_request(
+                "validation_failed",
+                format!("{field} exceeds {max} characters"),
+            ));
+        }
+    }
+    // The facility must belong to the caller's tenant.
+    let facility: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM facilities WHERE id = $1 AND tenant_id = $2")
+            .bind(body.facility_id)
+            .bind(ctx.tenant_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if facility.is_none() {
+        return Err(ApiError::bad_request(
+            "unknown_facility",
+            "facility_id does not belong to this tenant",
+        ));
+    }
     let allowed = guard(
         &state,
         &ctx,

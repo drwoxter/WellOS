@@ -39,6 +39,20 @@ impl AuthContext {
     }
 }
 
+/// `X-Purpose-Of-Use` is caller-asserted context, so only a closed vocabulary
+/// is accepted; anything else is rejected rather than recorded verbatim.
+fn validate_purpose(purpose: Option<String>) -> Result<String, ApiError> {
+    const ALLOWED: &[&str] = &["treatment", "operations", "emergency", "quality"];
+    let purpose = purpose.unwrap_or_else(|| "treatment".to_string());
+    if !ALLOWED.contains(&purpose.as_str()) {
+        return Err(ApiError::bad_request(
+            "invalid_purpose_of_use",
+            "x-purpose-of-use must be one of: treatment, operations, emergency, quality",
+        ));
+    }
+    Ok(purpose)
+}
+
 pub async fn load_auth(
     pool: &PgPool,
     token: &str,
@@ -73,7 +87,7 @@ pub async fn load_auth(
         display_name,
         is_service,
         roles: roles.into_iter().map(|(r,)| r).collect(),
-        purpose_of_use: purpose_of_use.unwrap_or_else(|| "treatment".to_string()),
+        purpose_of_use: validate_purpose(purpose_of_use)?,
         break_glass_reason,
         correlation_id: Uuid::now_v7(),
     })

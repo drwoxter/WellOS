@@ -39,6 +39,39 @@ pub struct InboundResult {
     pub amends_observation_id: Option<Uuid>,
 }
 
+/// Look up the observation already stored for this tenant + idempotency key.
+/// The key must refer to the same delivery: reuse with a different service
+/// request or payload is a conflict, never a silent no-op.
+async fn find_duplicate(
+    state: &AppState,
+    tenant_id: Uuid,
+    body: &InboundResult,
+) -> Result<Option<Value>, ApiError> {
+    let row = sqlx::query(
+        "SELECT id, service_request_id, code_loinc, value_num, unit FROM observations
+         WHERE tenant_id = $1 AND idempotency_key = $2",
+    )
+    .bind(tenant_id)
+    .bind(&body.idempotency_key)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some(r) = row else { return Ok(None) };
+    let same_delivery = r.get::<Uuid, _>("service_request_id") == body.service_request_id
+        && r.get::<String, _>("code_loinc") == body.code_loinc
+        && r.get::<Decimal, _>("value_num") == body.value
+        && r.get::<String, _>("unit") == body.unit;
+    if !same_delivery {
+        return Err(ApiError::conflict(
+            "idempotency_key_reuse",
+            "idempotency_key was already used for a different delivery",
+        ));
+    }
+    Ok(Some(json!({
+        "observation_id": r.get::<Uuid, _>("id"),
+        "duplicate": true
+    })))
+}
+
 pub async fn ingest_result(
     State(state): State<AppState>,
     ctx: AuthContext,
@@ -100,17 +133,8 @@ pub async fn ingest_result(
     .await?;
 
     // Idempotency: same key -> return the existing observation, create nothing.
-    let existing: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM observations WHERE tenant_id = $1 AND idempotency_key = $2")
-            .bind(tenant_id)
-            .bind(&body.idempotency_key)
-            .fetch_optional(&state.pool)
-            .await?;
-    if let Some((obs_id,)) = existing {
-        return Ok(Json(json!({
-            "observation_id": obs_id,
-            "duplicate": true
-        })));
+    if let Some(dup) = find_duplicate(&state, tenant_id, &body).await? {
+        return Ok(Json(dup));
     }
 
     let is_amendment = body.amends_observation_id.is_some();
@@ -183,17 +207,9 @@ pub async fn ingest_result(
         // discard this attempt and return the winner's observation.
         if matches!(&e, sqlx::Error::Database(db) if db.is_unique_violation()) {
             tx.rollback().await?;
-            let (winner,): (Uuid,) = sqlx::query_as(
-                "SELECT id FROM observations WHERE tenant_id = $1 AND idempotency_key = $2",
-            )
-            .bind(tenant_id)
-            .bind(&body.idempotency_key)
-            .fetch_one(&state.pool)
-            .await?;
-            return Ok(Json(json!({
-                "observation_id": winner,
-                "duplicate": true
-            })));
+            if let Some(dup) = find_duplicate(&state, tenant_id, &body).await? {
+                return Ok(Json(dup));
+            }
         }
         return Err(e.into());
     }
@@ -453,12 +469,16 @@ async fn generate_summary(
         language: "en".into(),
     };
 
+    // Each lifecycle transition and its outbox event commit atomically, and
+    // only apply while the artifact is still a draft (a concurrent amendment
+    // may already have superseded it).
     match state.gateway.summarize_result(&req).await {
         Ok(resp) => {
-            sqlx::query(
+            let mut tx = state.pool.begin().await?;
+            let updated = sqlx::query(
                 "UPDATE ai_artifacts SET status=$1, model=$2, model_version=$3, route=$4,
                  template=$5, input_hash=$6, output=$7, citations=$8, limitations=$9, generated_at=now()
-                 WHERE id=$10",
+                 WHERE id=$10 AND status=$11",
             )
             .bind(ArtifactStatus::AwaitingReview.as_str())
             .bind(&resp.model)
@@ -470,41 +490,52 @@ async fn generate_summary(
             .bind(serde_json::to_value(&resp.output.cited_sources).map_err(ApiError::internal)?)
             .bind(serde_json::to_value(&resp.output.limitations).map_err(ApiError::internal)?)
             .bind(artifact_id)
-            .execute(&state.pool)
+            .bind(ArtifactStatus::Draft.as_str())
+            .execute(&mut *tx)
             .await?;
-            audit::emit(
-                &state.pool,
-                ctx,
-                "ai.artifact.generated",
-                &state.cell,
-                json!({ "artifact_id": artifact_id }),
-                None,
-            )
-            .await
-            .map_err(ApiError::internal)?;
+            if updated.rows_affected() > 0 {
+                audit::emit(
+                    &mut *tx,
+                    ctx,
+                    "ai.artifact.generated",
+                    &state.cell,
+                    json!({ "artifact_id": artifact_id }),
+                    None,
+                )
+                .await
+                .map_err(ApiError::internal)?;
+            }
+            tx.commit().await?;
         }
         Err(GatewayError::Unavailable(reason)) => {
             // Care continues; the artifact visibly reports unavailability.
-            sqlx::query("UPDATE ai_artifacts SET status=$1 WHERE id=$2")
-                .bind(ArtifactStatus::Unavailable.as_str())
-                .bind(artifact_id)
-                .execute(&state.pool)
-                .await?;
-            audit::emit(
-                &state.pool,
-                ctx,
-                "ai.provider.unavailable",
-                &state.cell,
-                json!({ "artifact_id": artifact_id, "reason": reason }),
-                None,
-            )
-            .await
-            .map_err(ApiError::internal)?;
+            let mut tx = state.pool.begin().await?;
+            let updated =
+                sqlx::query("UPDATE ai_artifacts SET status=$1 WHERE id=$2 AND status=$3")
+                    .bind(ArtifactStatus::Unavailable.as_str())
+                    .bind(artifact_id)
+                    .bind(ArtifactStatus::Draft.as_str())
+                    .execute(&mut *tx)
+                    .await?;
+            if updated.rows_affected() > 0 {
+                audit::emit(
+                    &mut *tx,
+                    ctx,
+                    "ai.provider.unavailable",
+                    &state.cell,
+                    json!({ "artifact_id": artifact_id, "reason": reason }),
+                    None,
+                )
+                .await
+                .map_err(ApiError::internal)?;
+            }
+            tx.commit().await?;
         }
         Err(other) => {
-            sqlx::query("UPDATE ai_artifacts SET status=$1 WHERE id=$2")
+            sqlx::query("UPDATE ai_artifacts SET status=$1 WHERE id=$2 AND status=$3")
                 .bind(ArtifactStatus::Invalidated.as_str())
                 .bind(artifact_id)
+                .bind(ArtifactStatus::Draft.as_str())
                 .execute(&state.pool)
                 .await?;
             tracing::warn!(error = %other, "ai artifact generation failed");

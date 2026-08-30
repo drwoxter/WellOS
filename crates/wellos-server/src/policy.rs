@@ -162,6 +162,16 @@ pub async fn authorize(
             .fetch_optional(pool)
             .await?;
             if related.is_none() {
+                // Break-glass grants emergency *read* access only; consequential
+                // transitions (review, notify, close, AI review) still require
+                // an established care relationship.
+                if action != actions::PATIENT_READ {
+                    return Ok(Decision {
+                        allowed: false,
+                        reason: "no_care_relationship".into(),
+                        used_break_glass: false,
+                    });
+                }
                 if let Some(reason) = &ctx.break_glass_reason {
                     // Break-glass: allowed, but recorded for mandatory review.
                     sqlx::query(

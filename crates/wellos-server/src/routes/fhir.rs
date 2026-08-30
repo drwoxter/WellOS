@@ -88,7 +88,10 @@ pub async fn observation(
         "subject": { "reference": format!("Patient/{patient_id}") },
         "effectiveDateTime": row.get::<chrono::DateTime<chrono::Utc>,_>("effective_at").to_rfc3339(),
         "valueQuantity": {
-            "value": row.get::<String,_>("value_num").parse::<f64>().unwrap_or(f64::NAN),
+            // Exact decimal: never round clinical values through f64.
+            "value": row.get::<String,_>("value_num").parse::<serde_json::Number>()
+                .map(Value::Number)
+                .map_err(|_| ApiError::internal("invalid numeric observation value"))?,
             "unit": row.get::<String,_>("unit"),
             "system": "http://unitsofmeasure.org",
             "code": row.get::<String,_>("unit"),

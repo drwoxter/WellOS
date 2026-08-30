@@ -908,3 +908,81 @@ async fn service_principals_cannot_use_dev_tokens() {
     .await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn idempotency_key_reuse_with_different_payload_conflicts() {
+    let (state, _) = test_state().await;
+    let sr_id = create_order(&state).await;
+    let key = uniq("reuse-key");
+    let (st, _) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        "dev-lab.chen",
+        Some(json!({
+            "service_request_id": sr_id,
+            "code_loinc": "2823-3",
+            "value": 4.4,
+            "unit": "mmol/L",
+            "source_system": "fake-lab",
+            "idempotency_key": key,
+            "effective_at": chrono::Utc::now(),
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let other_sr = create_order(&state).await;
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/v1/lab/results",
+        "dev-lab.chen",
+        Some(json!({
+            "service_request_id": other_sr,
+            "code_loinc": "2823-3",
+            "value": 5.5,
+            "unit": "mmol/L",
+            "source_system": "fake-lab",
+            "idempotency_key": key,
+            "effective_at": chrono::Utc::now(),
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "idempotency_key_reuse");
+}
+
+#[tokio::test]
+async fn break_glass_cannot_close_loops_without_relationship() {
+    let (state, _) = test_state().await;
+    let lp = run_to_received(&state, 7.2).await;
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/service-requests/{}/review", lp.service_request_id),
+        "dev-dr.lopez",
+        Some(json!({ "version": lp.version, "note": "attempted via break-glass" })),
+        &[("x-break-glass-reason", "emergency coverage")],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn unknown_purpose_of_use_is_rejected() {
+    let (state, _) = test_state().await;
+    let (st, body) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist",
+        "dev-dr.garcia",
+        None,
+        &[("x-purpose-of-use", "marketing")],
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_purpose_of_use");
+}

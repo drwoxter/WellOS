@@ -60,7 +60,13 @@ pub async fn set_consent(
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     // Consent decisions are append-only: each change is a new immutable
-    // version; readers select the highest version per purpose.
+    // version; readers select the highest version per purpose. Locking the
+    // patient row serializes version allocation per patient, and a unique
+    // (tenant, patient, purpose, version) index backstops it.
+    sqlx::query("SELECT id FROM patients WHERE id = $1 FOR UPDATE")
+        .bind(body.patient_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
         "INSERT INTO consents (id, tenant_id, patient_id, purpose, status, version)
          VALUES ($1,$2,$3,$4,$5,

@@ -243,7 +243,7 @@ pub async fn worklist(
                 EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
                         WHERE o.service_request_id = sr.id AND a.status = 'open') AS has_open_alert
          FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
-         WHERE sr.tenant_id = $1
+         WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'
          ORDER BY has_open_alert DESC, sr.created_at DESC LIMIT 200",
     )
     .bind(ctx.tenant_id)
