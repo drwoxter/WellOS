@@ -584,7 +584,8 @@ mod tests {
     #[test]
     fn nurse_cannot_close_loop() {
         assert!(!role_allows(roles::NURSE, actions::LOOP_CLOSE));
-        assert!(role_allows(roles::NURSE, actions::PATIENT_NOTIFY));
+        assert!(!role_allows(roles::NURSE, actions::PATIENT_NOTIFY));
+        assert!(role_allows(roles::PHYSICIAN, actions::PATIENT_NOTIFY));
     }
 
     #[test]
