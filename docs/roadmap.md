@@ -46,23 +46,27 @@ credential admin / general API, HTTP 429 + Retry-After, fail-closed store).
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
    rate limiting with tenant-level aggregate caps, encrypted-at-rest login
    transactions.
-2. **PostgreSQL row-level security** as a second tenant-isolation layer, plus
+2. **Care-team assignment model**: represent nurses and other staff assigned
+   to a patient's care so consequential actions (e.g. patient notification)
+   can be authorized beyond the single encounter practitioner. Until then,
+   notification is physician-only.
+3. **PostgreSQL row-level security** as a second tenant-isolation layer, plus
    audit hash-chaining for tamper evidence.
-3. **Outbox dispatcher + NATS JetStream**: publish outbox rows, consumer
+4. **Outbox dispatcher + NATS JetStream**: publish outbox rows, consumer
    deduplication, dead-letter handling.
-4. **Escalation delivery**: on-call schedules and notification channels for
+5. **Escalation delivery**: on-call schedules and notification channels for
    overdue critical results (currently a deterministic job + audit only).
-5. **FHIR hardening**: search, Bundles, CapabilityStatement, validator-backed
+6. **FHIR hardening**: search, Bundles, CapabilityStatement, validator-backed
    contract tests in CI.
-6. **Frontend test depth**: component tests, automated accessibility (axe)
+7. **Frontend test depth**: component tests, automated accessibility (axe)
    checks, and browser E2E of the primary and failure scenarios.
-7. **Observability**: OpenTelemetry traces/metrics with PHI-free attribute
+8. **Observability**: OpenTelemetry traces/metrics with PHI-free attribute
    linting, dashboards for loop latency and overdue counts.
-8. **Object storage abstraction** (S3-compatible) for large artifacts, with
+9. **Object storage abstraction** (S3-compatible) for large artifacts, with
    per-tenant encryption context.
-9. **Real model provider adapter** behind the gateway with redaction,
+10. **Real model provider adapter** behind the gateway with redaction,
    evaluation harness, and shadow-mode comparison against the fake provider.
-10. **Backup/restore automation** and load smoke tests in CI against a
+11. **Backup/restore automation** and load smoke tests in CI against a
     disposable environment.
 
 ## Later

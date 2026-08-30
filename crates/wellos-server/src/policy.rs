@@ -181,10 +181,13 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             WORKLIST_READ,
             TENANT_META_READ,
         ],
+        // Nurses have no PATIENT_NOTIFY grant: notification requires an
+        // established care relationship, and encounters name a single
+        // practitioner. A care-team assignment model (roadmap) is required
+        // before nurse-performed notification can be authorized.
         NURSE => &[
             PATIENT_SEARCH,
             PATIENT_READ,
-            PATIENT_NOTIFY,
             WORKLIST_READ,
             TENANT_META_READ,
         ],
