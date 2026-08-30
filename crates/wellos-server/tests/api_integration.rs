@@ -549,7 +549,7 @@ async fn break_glass_same_tenant_requires_reason_and_is_audited() {
     let (denied,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM audit_events
          WHERE actor = 'user:dr.lopez' AND decision = 'deny'
-           AND reason = 'break_glass_not_authorized'",
+           AND reason = 'emergency_requires_break_glass_role'",
     )
     .fetch_one(&state.pool)
     .await
