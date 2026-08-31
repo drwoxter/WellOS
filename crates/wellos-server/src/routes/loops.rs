@@ -262,35 +262,60 @@ pub const WORKLIST_PAGE_SIZE: i64 = 200;
 ///
 /// Priority (an open critical alert) is mutable, so ordering by the live
 /// value would let rows cross the cursor boundary between page fetches and
-/// be skipped or repeated. Instead the first page captures a snapshot
-/// instant that later pages carry in the cursor, and priority is evaluated
-/// *as of that instant* from the alert's immutable `created_at` and
-/// monotonic `closed_at`: critical results sort first, and every row's
-/// position stays fixed for the whole page sequence. A row that turns
-/// critical after the snapshot still appears (in its routine position) and
-/// moves to the top on the next refresh; the live `has_open_alert` value is
-/// returned per row for display.
+/// be skipped or repeated. Instead the first page captures an MVCC snapshot
+/// (`pg_current_snapshot()`) plus its instant, both carried in the cursor,
+/// and priority is evaluated *as of that snapshot*: an alert counts only if
+/// its row version was already committed and visible in the snapshot
+/// (`pg_visible_in_snapshot` on `xmin`) and had not been closed by then
+/// (monotonic `closed_at`). The visibility check is decided by transaction
+/// commit order, so a write transaction straddling the first page cannot
+/// make later pages reconstruct a different priority than any page computed:
+/// the expression yields the same value for a given alert row version on
+/// every page, and no row can be skipped. The one residual reordering is an
+/// alert row *updated* (closed) mid-sequence — its new version is invisible
+/// in the snapshot, so the result demotes to its routine position and, if it
+/// was already emitted in the priority section, can be returned twice; the
+/// client deduplicates by id. A row that turns critical after the snapshot
+/// still appears (in its routine position) and moves to the top on the next
+/// refresh; the live `has_open_alert` value is returned per row for display.
 struct WorklistCursor {
+    snapshot: String,
     snapshot_at: chrono::DateTime<chrono::Utc>,
     priority: bool,
     created_at: chrono::DateTime<chrono::Utc>,
     id: Uuid,
 }
 
-/// Whether the request had an open critical alert as of `$3` (the snapshot
-/// instant): the alert existed then and had not yet been closed.
+/// Whether the request had an open critical alert as of the snapshot: the
+/// alert row version was visible in the MVCC snapshot (`$3`) and had not
+/// been closed at the snapshot instant (`$4`).
 const SNAP_PRIORITY_EXPR: &str = "CASE WHEN EXISTS (
         SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
         WHERE o.service_request_id = sr.id
-          AND a.created_at <= $3
-          AND (a.closed_at IS NULL OR a.closed_at > $3)
+          AND pg_visible_in_snapshot(a.xmin::text::xid8, $3::pg_snapshot)
+          AND (a.closed_at IS NULL OR a.closed_at > $4)
     ) THEN 1 ELSE 0 END";
 
+/// `pg_snapshot` textual form: `xmin:xmax:xip1,...` (digits only).
+fn valid_pg_snapshot(raw: &str) -> bool {
+    let mut parts = raw.split(':');
+    let (Some(xmin), Some(xmax), Some(xip), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    all_digits(xmin) && all_digits(xmax) && (xip.is_empty() || xip.split(',').all(all_digits))
+}
+
 impl WorklistCursor {
-    /// URL-safe encoding: `{snapshot_micros}.{priority}.{epoch_micros}.{uuid}`.
+    /// URL-safe encoding:
+    /// `{pg_snapshot}.{snapshot_micros}.{priority}.{epoch_micros}.{uuid}`
+    /// (the `pg_snapshot` text never contains `.`).
     fn encode(&self) -> String {
         format!(
-            "{}.{}.{}.{}",
+            "{}.{}.{}.{}.{}",
+            self.snapshot,
             self.snapshot_at.timestamp_micros(),
             i32::from(self.priority),
             self.created_at.timestamp_micros(),
@@ -299,7 +324,11 @@ impl WorklistCursor {
     }
 
     fn decode(raw: &str) -> Option<Self> {
-        let mut parts = raw.splitn(4, '.');
+        let mut parts = raw.splitn(5, '.');
+        let snapshot = parts.next()?.to_string();
+        if !valid_pg_snapshot(&snapshot) {
+            return None;
+        }
         let snap_micros: i64 = parts.next()?.parse().ok()?;
         let snapshot_at = chrono::DateTime::from_timestamp_micros(snap_micros)?;
         let priority = match parts.next()? {
@@ -311,6 +340,7 @@ impl WorklistCursor {
         let created_at = chrono::DateTime::from_timestamp_micros(micros)?;
         let id = Uuid::parse_str(parts.next()?).ok()?;
         Some(Self {
+            snapshot,
             snapshot_at,
             priority,
             created_at,
@@ -378,12 +408,21 @@ pub async fn worklist(
                 ApiError::bad_request("invalid_cursor", "malformed worklist cursor")
             })?),
         };
-    // The first page fixes the snapshot instant; later pages reuse the one
-    // carried in the cursor so the whole sequence shares one stable ordering.
-    let snapshot_at = cursor
-        .as_ref()
-        .map(|c| c.snapshot_at)
-        .unwrap_or_else(chrono::Utc::now);
+    // The first page fixes the MVCC snapshot and its instant; later pages
+    // reuse the ones carried in the cursor so the whole page sequence shares
+    // one stable priority ordering.
+    let (snapshot, snapshot_at) = match &cursor {
+        Some(c) => (c.snapshot.clone(), c.snapshot_at),
+        None => {
+            let row = sqlx::query("SELECT pg_current_snapshot()::text AS snap, now() AS at")
+                .fetch_one(&state.pool)
+                .await?;
+            (
+                row.get::<String, _>("snap"),
+                row.get::<chrono::DateTime<chrono::Utc>, _>("at"),
+            )
+        }
+    };
     let mut sql = format!(
         "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
                 p.family_name, p.given_name, p.identifier, p.facility_id,
@@ -396,7 +435,7 @@ pub async fn worklist(
          FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
          WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'",
     );
-    let mut arg = 3;
+    let mut arg = 4;
     if scope.is_some() {
         arg += 1;
         sql.push_str(&format!(" AND p.facility_id = ANY(${arg})"));
@@ -441,6 +480,7 @@ pub async fn worklist(
     let mut q = sqlx::query(&sql)
         .bind(ctx.tenant_id)
         .bind(ctx.user_id)
+        .bind(&snapshot)
         .bind(snapshot_at);
     if let Some(ids) = &scope {
         q = q.bind(ids);
@@ -460,6 +500,7 @@ pub async fn worklist(
     let next_cursor = if has_more {
         rows.last().map(|r| {
             WorklistCursor {
+                snapshot: snapshot.clone(),
                 snapshot_at,
                 priority: r.get::<i32, _>("snap_priority") == 1,
                 created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),

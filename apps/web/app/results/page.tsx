@@ -90,7 +90,12 @@ function ResultsContent() {
     apiFetch<WorklistPage>(buildUrl(nextCursor))
       .then((d) => {
         if (requestGeneration.current !== generation) return;
-        setItems((prev) => [...(prev ?? []), ...d.items]);
+        // A result demoted from critical to routine mid-sequence can be
+        // returned again on a later page; keep the first occurrence only.
+        setItems((prev) => {
+          const seen = new Set((prev ?? []).map((i) => i.id));
+          return [...(prev ?? []), ...d.items.filter((i) => !seen.has(i.id))];
+        });
         setHasMore(d.has_more === true);
         setNextCursor(d.next_cursor ?? null);
       })

@@ -1807,6 +1807,26 @@ async fn worklist_filters_apply_before_row_cap() {
     .execute(&state.pool)
     .await
     .unwrap();
+    // A routine row beyond the first page whose critical alert is written by
+    // a transaction that starts before the first page is fetched and commits
+    // only afterwards (the straddling-transaction race): its snapshot
+    // priority must stay routine on every page so it is neither skipped nor
+    // repeated.
+    let straddle_sr = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO service_requests (id, tenant_id, encounter_id, patient_id, requester_id,
+                                       code_loinc, display, loop_state, version, created_at)
+         VALUES ($1,$2,$3,$4,$5,'2823-3','Potassium [Moles/volume] in Serum','received',2,
+                 now() - interval '90 minutes')",
+    )
+    .bind(straddle_sr)
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .bind(patient_id)
+    .bind(requester_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
     // A routine row destined for later pages that will turn critical
     // between page fetches.
     let promoted_sr = uuid::Uuid::now_v7();
@@ -1841,6 +1861,37 @@ async fn worklist_filters_apply_before_row_cap() {
         .unwrap();
     }
 
+    // Open the straddling alert transaction before the first page is
+    // fetched; it commits only after the first page (and its snapshot) is
+    // taken.
+    let mut straddle_tx = state.pool.begin().await.unwrap();
+    let straddle_obs = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO observations (id, tenant_id, service_request_id, patient_id, code_loinc,
+                                   value_num, unit, status, source_system, idempotency_key,
+                                   effective_at, received_at)
+         VALUES ($1,$2,$3,$4,'2823-3',7.1,'mmol/L','final','fake-lab',$5, now(), now())",
+    )
+    .bind(straddle_obs)
+    .bind(tenant_id)
+    .bind(straddle_sr)
+    .bind(patient_id)
+    .bind(uniq("straddle-key"))
+    .execute(&mut *straddle_tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO alerts (id, tenant_id, patient_id, observation_id, severity, message, status)
+         VALUES ($1,$2,$3,$4,'critical','Critical potassium 7.1 mmol/L','open')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(patient_id)
+    .bind(straddle_obs)
+    .execute(&mut *straddle_tx)
+    .await
+    .unwrap();
+
     // Unfiltered, the old routine row is buried behind the cap.
     let (st, unfiltered) = call(
         &state,
@@ -1872,8 +1923,11 @@ async fn worklist_filters_apply_before_row_cap() {
             .any(|i| i["id"] == json!(crit_sr)),
         "old critical result must surface on the first page"
     );
+    // The straddling transaction commits only now, after the first page's
+    // snapshot was captured.
+    straddle_tx.commit().await.unwrap();
     // After the first page is fetched, the unseen routine row becomes
-    // critical (e.g. an amendment). The immutable keyset ordering must
+    // critical (e.g. an amendment). The snapshot-stable keyset ordering must
     // still surface it exactly once on a later page.
     let obs_id = uuid::Uuid::now_v7();
     sqlx::query(
@@ -1912,6 +1966,7 @@ async fn worklist_filters_apply_before_row_cap() {
         .collect();
     let mut found_via_paging = false;
     let mut found_promoted = false;
+    let mut found_straddle = false;
     loop {
         let (st, page) = call(
             &state,
@@ -1933,6 +1988,10 @@ async fn worklist_filters_apply_before_row_cap() {
                 found_promoted = true;
                 assert_eq!(item["has_open_alert"], json!(true), "{item}");
             }
+            if item["id"] == json!(straddle_sr) {
+                found_straddle = true;
+                assert_eq!(item["has_open_alert"], json!(true), "{item}");
+            }
         }
         // A row closing between page fetches must not shift later pages:
         // close one first-page row after fetching each page.
@@ -1940,12 +1999,13 @@ async fn worklist_filters_apply_before_row_cap() {
             sqlx::query(
                 "UPDATE service_requests SET loop_state = 'closed'
                  WHERE id = $1 AND loop_state <> 'closed'
-                   AND id <> $2 AND id <> $3 AND id <> $4",
+                   AND id <> $2 AND id <> $3 AND id <> $4 AND id <> $5",
             )
             .bind(open_id.parse::<uuid::Uuid>().unwrap())
             .bind(old_sr)
             .bind(promoted_sr)
             .bind(crit_sr)
+            .bind(straddle_sr)
             .execute(&state.pool)
             .await
             .unwrap();
@@ -1962,6 +2022,10 @@ async fn worklist_filters_apply_before_row_cap() {
     assert!(
         found_promoted,
         "a row turning critical between page fetches must still appear on a later page"
+    );
+    assert!(
+        found_straddle,
+        "an alert transaction straddling the first page must not skip its row"
     );
     let (st, _) = call(
         &state,
