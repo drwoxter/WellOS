@@ -1,0 +1,14 @@
+# cargo-audit configuration.
+#
+# Ignored advisories must be justified here and re-reviewed when dependencies
+# change. Both entries below are lockfile-only optional transitive
+# dependencies that are never compiled into any WellOS target
+# (verify with: cargo tree --target all -i <crate>  -> "nothing to print").
+[advisories]
+ignore = [
+    # rkyv 0.7 (optional feature of rust_decimal, not enabled/compiled)
+    "RUSTSEC-2026-0235",
+    # rsa Marvin timing sidechannel (dependency of sqlx-mysql; WellOS only
+    # enables sqlx's postgres backend, so rsa is never compiled)
+    "RUSTSEC-2023-0071",
+]

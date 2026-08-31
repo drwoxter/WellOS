@@ -1,0 +1,164 @@
+:root {
+  --bg: #f7fafc;
+  --fg: #16232b;
+  --surface: #ffffff;
+  --border: #d4dee5;
+  --muted: #5a6b76;
+  --focus: #1a4f8f;
+  --danger-bg: #fdecec;
+  --danger-fg: #8f1a1a;
+  --ok-bg: #eaf6ee;
+  --ok-fg: #1a5c33;
+}
+
+html[data-theme="north"] {
+  --primary: #0f6f8f;
+  --primary-contrast: #ffffff;
+}
+
+html[data-theme="south"] {
+  --primary: #7a3b8f;
+  --primary-contrast: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+a {
+  color: var(--primary);
+}
+
+header.app {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--primary);
+  color: var(--primary-contrast);
+}
+
+header.app h1 {
+  font-size: 1.1rem;
+  margin: 0;
+  flex: 1;
+}
+
+header.app select,
+header.app button {
+  font: inherit;
+}
+
+main {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.card h2 {
+  margin-top: 0;
+  font-size: 1rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  border: 1px solid var(--border);
+}
+
+.badge.critical {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border-color: var(--danger-fg);
+}
+
+.badge.ok {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  border-color: var(--ok-fg);
+}
+
+button.primary {
+  background: var(--primary);
+  color: var(--primary-contrast);
+  border: none;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 100%;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin: 0.6rem 0 0.2rem;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.error {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border: 1px solid var(--danger-fg);
+  border-radius: 6px;
+  padding: 0.6rem 0.9rem;
+  margin: 0.6rem 0;
+}
