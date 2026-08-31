@@ -83,9 +83,7 @@ describe("development demo login", () => {
     );
     const card = await screen.findByRole("button", { name: /dr\.garcia/ });
     await userEvent.click(card);
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "invalid token",
-    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("invalid token");
     expect(push).not.toHaveBeenCalled();
   });
 });

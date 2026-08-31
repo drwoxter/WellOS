@@ -63,7 +63,9 @@ function setup(worklist: unknown = { items: ITEMS }) {
               display_name: "Dr. García",
               roles: ["physician"],
             },
-            facilities: [{ id: "f", name: "Central Hospital", accessible: true }],
+            facilities: [
+              { id: "f", name: "Central Hospital", accessible: true },
+            ],
           }),
         );
       return Promise.resolve(jsonResponse({}));
@@ -99,9 +101,7 @@ describe("results worklist", () => {
       "critical",
     );
     expect(screen.queryAllByText("Marta Demopatient")).toHaveLength(0);
-    expect(screen.getAllByText("Carlos Demopatient").length).toBeGreaterThan(
-      0,
-    );
+    expect(screen.getAllByText("Carlos Demopatient").length).toBeGreaterThan(0);
     await userEvent.click(
       screen.getByRole("button", { name: "Reset filters" }),
     );

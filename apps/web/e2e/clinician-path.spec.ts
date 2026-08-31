@@ -19,8 +19,9 @@ test("clinician completes the closed-loop workflow on a critical result", async 
   await expect(
     page.getByText("Critical result — requires clinician review"),
   ).toBeVisible();
-  await expect(page.getByRole("list", { name: "Workflow progress" }))
-    .toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "Workflow progress" }),
+  ).toBeVisible();
 
   async function transition(buttonName: string) {
     await page.getByLabel("Workflow notes").fill(`E2E: ${buttonName}`);
@@ -35,8 +36,8 @@ test("clinician completes the closed-loop workflow on a critical result", async 
   await transition("Close loop");
 
   // The stepper ends on the closed state and no further action is offered.
-  await expect(
-    page.locator('.stepper li[aria-current="step"]'),
-  ).toContainText("Closed");
+  await expect(page.locator('.stepper li[aria-current="step"]')).toContainText(
+    "Closed",
+  );
   await expect(page.getByLabel("Workflow notes")).toHaveCount(0);
 });

@@ -16,9 +16,7 @@ async function expectNoSeriousViolations(
   ).toEqual([]);
 }
 
-test("login page has no serious accessibility violations", async ({
-  page,
-}) => {
+test("login page has no serious accessibility violations", async ({ page }) => {
   await page.goto("/");
   await page.getByText("Development only").waitFor();
   await expectNoSeriousViolations(page);
