@@ -128,6 +128,13 @@ export function canActClinically(facilities: FacilityCapability[]): boolean {
   return facilities.some((f) => f.can_act_clinically);
 }
 
+export function canActClinicallyAt(
+  facilities: (FacilityCapability & { id: string })[],
+  facilityId: string,
+): boolean {
+  return facilities.some((f) => f.id === facilityId && f.can_act_clinically);
+}
+
 /** Common orderable laboratory tests covered by the deterministic rules. */
 export const LAB_TESTS: { code_loinc: string; display: string }[] = [
   { code_loinc: "2823-3", display: "Potassium [Moles/volume] in Serum" },

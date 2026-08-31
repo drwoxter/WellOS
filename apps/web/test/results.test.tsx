@@ -68,10 +68,20 @@ function setup(allItems: typeof ITEMS = ITEMS) {
           }
           return true;
         });
-        const offset = Number(params.get("offset") ?? "0");
-        const page = items.slice(offset, offset + 200);
+        // Mirror the API's keyset cursor: `<index>` of the last row of the
+        // previous page (the real API encodes the ordering tuple).
+        const cursor = params.get("cursor");
+        const start = cursor
+          ? items.findIndex((item) => item.id === cursor) + 1
+          : 0;
+        const page = items.slice(start, start + 200);
+        const hasMore = start + 200 < items.length;
         return Promise.resolve(
-          jsonResponse({ items: page, has_more: offset + 200 < items.length }),
+          jsonResponse({
+            items: page,
+            has_more: hasMore,
+            next_cursor: hasMore ? page[page.length - 1]?.id : null,
+          }),
         );
       }
       if (url === "/api/v1/meta/tenant")
@@ -184,6 +194,66 @@ describe("results worklist", () => {
     expect(
       screen.queryByRole("button", { name: "Load more results" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("ignores a stale response after filters change", async () => {
+    let resolveSlow: ((r: Response) => void) | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/session")
+          return Promise.resolve(jsonResponse({ authenticated: true }));
+        if (url === "/api/v1/meta/tenant")
+          return Promise.resolve(
+            jsonResponse({
+              tenant: { id: "t", name: "Demo Tenant", cell: "eu" },
+              user: {
+                username: "dr.garcia",
+                display_name: "Dr. García",
+                roles: ["physician"],
+              },
+              facilities: [],
+            }),
+          );
+        if (url.startsWith("/api/v1/worklist")) {
+          const params = new URL(url, "http://localhost").searchParams;
+          if (params.get("critical") === "true") {
+            // The critical-only request stays pending until after the user
+            // has already switched back to the unfiltered view.
+            return new Promise<Response>((resolve) => {
+              resolveSlow = resolve;
+            });
+          }
+          return Promise.resolve(
+            jsonResponse({ items: ITEMS, has_more: false }),
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      }),
+    );
+    render(
+      <SessionProvider>
+        <ResultsPage />
+      </SessionProvider>,
+    );
+    await screen.findAllByText("Marta Demopatient");
+    // Switch to critical-only (request hangs), then reset filters (resolves
+    // immediately with all items).
+    await userEvent.selectOptions(
+      screen.getByLabelText("Criticality"),
+      "critical",
+    );
+    await waitFor(() => expect(resolveSlow).not.toBeNull());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Reset filters" }),
+    );
+    await screen.findAllByText("Marta Demopatient");
+    // The stale critical-only response arrives late; it must not replace
+    // the current unfiltered view.
+    resolveSlow!(jsonResponse({ items: [ITEMS[0]], has_more: false }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getAllByText("Marta Demopatient").length).toBeGreaterThan(0);
   });
 
   it("shows an empty state when there are no open results", async () => {

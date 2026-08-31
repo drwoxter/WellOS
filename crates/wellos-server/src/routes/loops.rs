@@ -248,14 +248,56 @@ pub struct WorklistQuery {
     pub state: Option<String>,
     /// Case-insensitive patient name/identifier match.
     pub query: Option<String>,
-    /// Number of rows to skip (page offset); each page holds up to
-    /// [`WORKLIST_PAGE_SIZE`] rows.
-    pub offset: Option<i64>,
+    /// Keyset cursor returned as `next_cursor` by the previous page; each
+    /// page holds up to [`WORKLIST_PAGE_SIZE`] rows.
+    pub cursor: Option<String>,
 }
 
 /// Rows returned per worklist page. Older rows stay reachable through the
-/// `offset` parameter rather than being cut off by a fixed cap.
+/// `cursor` parameter rather than being cut off by a fixed cap.
 pub const WORKLIST_PAGE_SIZE: i64 = 200;
+
+/// Keyset cursor over the worklist ordering tuple
+/// `(has_open_alert DESC, created_at DESC, id DESC)`. Unlike an offset,
+/// rows entering or leaving the list between page fetches cannot shift
+/// later pages, so paging never skips or repeats unchanged rows. A row
+/// whose alert priority changes between fetches is re-ranked relative to
+/// the cursor tuple: it may move ahead of (already-passed) or behind the
+/// cursor, which is the expected behavior for a live worklist.
+struct WorklistCursor {
+    has_open_alert: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    id: Uuid,
+}
+
+impl WorklistCursor {
+    /// URL-safe encoding: `{alert}.{epoch_micros}.{uuid}`.
+    fn encode(&self) -> String {
+        format!(
+            "{}.{}.{}",
+            i32::from(self.has_open_alert),
+            self.created_at.timestamp_micros(),
+            self.id
+        )
+    }
+
+    fn decode(raw: &str) -> Option<Self> {
+        let mut parts = raw.splitn(3, '.');
+        let alert = match parts.next()? {
+            "0" => false,
+            "1" => true,
+            _ => return None,
+        };
+        let micros: i64 = parts.next()?.parse().ok()?;
+        let created_at = chrono::DateTime::from_timestamp_micros(micros)?;
+        let id = Uuid::parse_str(parts.next()?).ok()?;
+        Some(Self {
+            has_open_alert: alert,
+            created_at,
+            id,
+        })
+    }
+}
 
 pub async fn worklist(
     State(state): State<AppState>,
@@ -305,15 +347,17 @@ pub async fn worklist(
     // newest rows.
     let scope = facility_scope(&ctx, actions::WORKLIST_READ);
     if matches!(&scope, Some(ids) if ids.is_empty()) {
-        return Ok(Json(json!({ "items": [], "has_more": false })));
-    }
-    let offset = params.offset.unwrap_or(0);
-    if !(0..=1_000_000).contains(&offset) {
-        return Err(ApiError::bad_request(
-            "invalid_offset",
-            "offset out of range",
+        return Ok(Json(
+            json!({ "items": [], "has_more": false, "next_cursor": null }),
         ));
     }
+    let cursor =
+        match params.cursor.as_deref() {
+            None => None,
+            Some(raw) => Some(WorklistCursor::decode(raw).ok_or_else(|| {
+                ApiError::bad_request("invalid_cursor", "malformed worklist cursor")
+            })?),
+        };
     let mut sql = String::from(
         "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
                 p.family_name, p.given_name, p.identifier,
@@ -339,16 +383,30 @@ pub async fn worklist(
     }
     if query_filter.is_some() {
         arg += 1;
+        // Match both display orders ("Family Given" and "Given Family") so a
+        // name copied from the UI finds the row regardless of word order.
         sql.push_str(&format!(
-            " AND (p.family_name || ' ' || p.given_name || ' ' || p.identifier) ILIKE ${arg}"
+            " AND ((p.family_name || ' ' || p.given_name || ' ' || p.identifier) ILIKE ${arg}
+                   OR (p.given_name || ' ' || p.family_name || ' ' || p.identifier) ILIKE ${arg})"
+        ));
+    }
+    if cursor.is_some() {
+        // Keyset predicate: strictly after the cursor tuple in the DESC
+        // ordering below (row-value comparison, all columns descending).
+        sql.push_str(&format!(
+            " AND (EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
+                           WHERE o.service_request_id = sr.id AND a.status = 'open'),
+                   sr.created_at, sr.id) < (${}, ${}, ${})",
+            arg + 1,
+            arg + 2,
+            arg + 3
         ));
     }
     // Deterministic ordering (id tie-breaker) so pages never skip or repeat
     // rows; one extra row is fetched to detect whether more pages exist.
     sql.push_str(&format!(
-        " ORDER BY has_open_alert DESC, sr.created_at DESC, sr.id DESC LIMIT {} OFFSET ${}",
-        WORKLIST_PAGE_SIZE + 1,
-        arg + 1
+        " ORDER BY has_open_alert DESC, sr.created_at DESC, sr.id DESC LIMIT {}",
+        WORKLIST_PAGE_SIZE + 1
     ));
     let mut q = sqlx::query(&sql).bind(ctx.tenant_id);
     if let Some(ids) = &scope {
@@ -360,10 +418,24 @@ pub async fn worklist(
     if let Some(pat) = &query_filter {
         q = q.bind(pat);
     }
-    q = q.bind(offset);
+    if let Some(c) = &cursor {
+        q = q.bind(c.has_open_alert).bind(c.created_at).bind(c.id);
+    }
     let mut rows = q.fetch_all(&state.pool).await?;
     let has_more = rows.len() as i64 > WORKLIST_PAGE_SIZE;
     rows.truncate(WORKLIST_PAGE_SIZE as usize);
+    let next_cursor = if has_more {
+        rows.last().map(|r| {
+            WorklistCursor {
+                has_open_alert: r.get::<bool, _>("has_open_alert"),
+                created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+                id: r.get::<Uuid, _>("id"),
+            }
+            .encode()
+        })
+    } else {
+        None
+    };
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -383,7 +455,9 @@ pub async fn worklist(
             })
         })
         .collect();
-    Ok(Json(json!({ "items": items, "has_more": has_more })))
+    Ok(Json(
+        json!({ "items": items, "has_more": has_more, "next_cursor": next_cursor }),
+    ))
 }
 
 /// Aggregate counts backing the dashboard status cards. Same authorization

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "../chrome";
 import { t } from "@/lib/i18n";
 import { apiFetch, useSession } from "@/lib/session";
@@ -38,43 +38,65 @@ function ResultsContent() {
   }, [query]);
 
   // Filters and paging run in the API so every matching open result stays
-  // reachable, not just the newest rows.
+  // reachable, not just the newest rows. Pages continue from the keyset
+  // cursor the API returned, so live changes never shift page boundaries.
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  // Responses are committed only when they belong to the latest filter set,
+  // so a slow response for stale filters can never replace current results.
+  const requestGeneration = useRef(0);
+
   const buildUrl = useCallback(
-    (offset: number) => {
+    (cursor: string | null) => {
       const params = new URLSearchParams();
       if (criticality === "critical") params.set("critical", "true");
       if (state !== "all") params.set("state", state);
       if (debouncedQuery) params.set("query", debouncedQuery);
-      if (offset > 0) params.set("offset", String(offset));
+      if (cursor) params.set("cursor", cursor);
       const qs = params.toString();
       return `/api/v1/worklist${qs ? `?${qs}` : ""}`;
     },
     [criticality, state, debouncedQuery],
   );
 
+  type WorklistPage = {
+    items: WorklistItem[];
+    has_more?: boolean;
+    next_cursor?: string | null;
+  };
+
   const load = useCallback(() => {
+    const generation = ++requestGeneration.current;
     setError(null);
-    apiFetch<{ items: WorklistItem[]; has_more?: boolean }>(buildUrl(0))
+    apiFetch<WorklistPage>(buildUrl(null))
       .then((d) => {
+        if (requestGeneration.current !== generation) return;
         setItems(d.items);
         setHasMore(d.has_more === true);
+        setNextCursor(d.next_cursor ?? null);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => {
+        if (requestGeneration.current !== generation) return;
+        setError(e instanceof Error ? e.message : String(e));
+      });
   }, [buildUrl]);
 
   const loadMore = useCallback(() => {
-    if (!items || loadingMore) return;
+    if (!items || loadingMore || !nextCursor) return;
+    const generation = requestGeneration.current;
     setLoadingMore(true);
-    apiFetch<{ items: WorklistItem[]; has_more?: boolean }>(
-      buildUrl(items.length),
-    )
+    apiFetch<WorklistPage>(buildUrl(nextCursor))
       .then((d) => {
+        if (requestGeneration.current !== generation) return;
         setItems((prev) => [...(prev ?? []), ...d.items]);
         setHasMore(d.has_more === true);
+        setNextCursor(d.next_cursor ?? null);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .catch((e) => {
+        if (requestGeneration.current !== generation) return;
+        setError(e instanceof Error ? e.message : String(e));
+      })
       .finally(() => setLoadingMore(false));
-  }, [buildUrl, items, loadingMore]);
+  }, [buildUrl, items, loadingMore, nextCursor]);
 
   useEffect(() => {
     if (authenticated) load();

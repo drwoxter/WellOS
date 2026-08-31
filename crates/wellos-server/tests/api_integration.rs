@@ -1802,35 +1802,61 @@ async fn worklist_filters_apply_before_row_cap() {
             .any(|i| i["id"] == json!(old_sr)),
         "old row should be beyond the first page"
     );
-    // Paging reaches the old row even without filters.
-    let mut offset = 200;
+    // Cursor paging reaches the old row even without filters, with no row
+    // skipped or repeated across pages.
+    let mut cursor = unfiltered["next_cursor"].as_str().unwrap().to_string();
+    let mut seen: std::collections::HashSet<String> = unfiltered["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
     let mut found_via_paging = false;
     loop {
         let (st, page) = call(
             &state,
             "GET",
-            &format!("/api/v1/worklist?offset={offset}"),
+            &format!("/api/v1/worklist?cursor={cursor}"),
             "dev-dr.garcia",
             None,
             &[],
         )
         .await;
-        assert_eq!(st, StatusCode::OK);
-        let items = page["items"].as_array().unwrap();
-        if items.iter().any(|i| i["id"] == json!(old_sr)) {
-            found_via_paging = true;
+        assert_eq!(st, StatusCode::OK, "{page}");
+        for item in page["items"].as_array().unwrap() {
+            let id = item["id"].as_str().unwrap().to_string();
+            assert!(seen.insert(id), "cursor paging repeated a row: {item}");
+            if item["id"] == json!(old_sr) {
+                found_via_paging = true;
+            }
+        }
+        // A row closing between page fetches must not shift later pages:
+        // close one first-page row after fetching each page.
+        if let Some(open_id) = seen.iter().next().cloned() {
+            sqlx::query(
+                "UPDATE service_requests SET loop_state = 'closed'
+                 WHERE id = $1 AND loop_state <> 'closed'
+                   AND id <> $2",
+            )
+            .bind(open_id.parse::<uuid::Uuid>().unwrap())
+            .bind(old_sr)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        }
+        if found_via_paging || page["has_more"] != json!(true) {
             break;
         }
-        if page["has_more"] != json!(true) {
-            break;
-        }
-        offset += items.len() as i64;
+        cursor = page["next_cursor"].as_str().unwrap().to_string();
     }
-    assert!(found_via_paging, "paging must reach every open result");
+    assert!(
+        found_via_paging,
+        "cursor paging must reach every open result even when rows close between fetches"
+    );
     let (st, _) = call(
         &state,
         "GET",
-        "/api/v1/worklist?offset=-1",
+        "/api/v1/worklist?cursor=not-a-cursor",
         "dev-dr.garcia",
         None,
         &[],
@@ -1856,6 +1882,26 @@ async fn worklist_filters_apply_before_row_cap() {
             .iter()
             .any(|i| i["id"] == json!(old_sr)),
         "{by_query}"
+    );
+
+    // The displayed order ("Given Family", as shown in the UI) matches too.
+    let (st, by_display_order) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/worklist?query=Cap%20{family}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{by_display_order}");
+    assert!(
+        by_display_order["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == json!(old_sr)),
+        "{by_display_order}"
     );
 
     // A workflow-state filter also reaches it.

@@ -96,6 +96,35 @@ function Stepper({ lang, state }: { lang: Lang; state: string }) {
   );
 }
 
+// Follow-up task statuses set by the backend: open, overdue (escalated),
+// completed, superseded (retired by an amendment). Each renders distinctly
+// so an escalated task is never mistaken for ordinary open work.
+function taskStatusBadge(status: string): string {
+  switch (status) {
+    case "completed":
+      return "ok";
+    case "overdue":
+      return "critical";
+    case "superseded":
+      return "neutral";
+    default:
+      return "warn";
+  }
+}
+
+function taskStatusLabel(lang: Lang, status: string): string {
+  switch (status) {
+    case "completed":
+      return t(lang, "completed");
+    case "overdue":
+      return t(lang, "overdue");
+    case "superseded":
+      return t(lang, "superseded");
+    default:
+      return t(lang, "open");
+  }
+}
+
 function outcomeLabel(lang: Lang, outcome: string | undefined): string {
   switch (outcome) {
     case "critical":
@@ -384,12 +413,8 @@ export default function RequestDetailPage() {
                         ? t(lang, "high")
                         : task.priority}
                     </span>
-                    <span
-                      className={`badge ${task.status === "completed" ? "ok" : "warn"}`}
-                    >
-                      {task.status === "completed"
-                        ? t(lang, "completed")
-                        : t(lang, "open")}
+                    <span className={`badge ${taskStatusBadge(task.status)}`}>
+                      {taskStatusLabel(lang, task.status)}
                     </span>
                   </li>
                 ))}

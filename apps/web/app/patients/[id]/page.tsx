@@ -8,7 +8,7 @@ import type { Lang, TKey } from "@/lib/i18n";
 import { apiFetch, useSession } from "@/lib/session";
 import {
   LAB_TESTS,
-  canActClinically,
+  canActClinicallyAt,
   formatDate,
   formatDateTime,
   loopStateShortLabel,
@@ -18,6 +18,7 @@ import {
 type Chart = {
   patient: {
     id: string;
+    facility_id: string;
     family_name: string;
     given_name: string;
     birth_date: string;
@@ -359,7 +360,8 @@ function PatientWorkspace({ id }: { id: string }) {
         )}
       </div>
 
-      {meta && canActClinically(meta.facilities) ? (
+      {meta &&
+      canActClinicallyAt(meta.facilities, chart.patient.facility_id) ? (
         <Actions chart={chart} lang={lang} onChanged={load} />
       ) : null}
 

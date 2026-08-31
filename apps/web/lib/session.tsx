@@ -45,6 +45,12 @@ type Session = {
 
 const Ctx = createContext<Session | null>(null);
 
+// Notified by apiFetch when the API reports the session is gone (401), so
+// the shell can drop straight to the sign-in state instead of surfacing
+// generic errors on every screen. Ordinary 403s and other errors are not
+// session events and never trigger this.
+let onSessionExpired: (() => void) | null = null;
+
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [meta, setMeta] = useState<TenantMeta | null>(null);
@@ -124,6 +130,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setAuthenticated(false);
   }, []);
 
+  useEffect(() => {
+    onSessionExpired = () => setAuthenticated(false);
+    return () => {
+      onSessionExpired = null;
+    };
+  }, []);
+
   const setLang = useCallback((l: Lang) => {
     localStorage.setItem("wellos.lang", l);
     setLangState(l);
@@ -197,6 +210,7 @@ export async function apiFetch<T>(
     },
   });
   if (!res.ok) {
+    if (res.status === 401) onSessionExpired?.();
     let message = `HTTP ${res.status}`;
     try {
       const body = await res.json();
