@@ -2327,6 +2327,148 @@ async fn service_request_requires_own_active_encounter() {
     assert_eq!(st, StatusCode::OK, "{sr}");
 }
 
+#[tokio::test]
+async fn search_encounter_capability_is_facility_specific() {
+    let (state, _) = test_state().await;
+    let (st, meta) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let facility_a = meta["facilities"][0]["id"].as_str().unwrap().to_string();
+    let (tenant_id,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT tenant_id FROM users WHERE username = 'dr.garcia'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let (facility_b,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT id FROM facilities WHERE tenant_id = $1 AND id <> $2::uuid LIMIT 1")
+            .bind(tenant_id)
+            .bind(&facility_a)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+
+    // A mixed-role user: clinical rights at facility A, search-only
+    // (registration) rights at facility B.
+    let username = create_same_facility_physician(&state, &facility_a).await;
+    let (uid,): (uuid::Uuid,) = sqlx::query_as("SELECT id FROM users WHERE username = $1")
+        .bind(&username)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id)
+         VALUES ($1,$2,$3,'registration_staff',$4)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(uid)
+    .bind(facility_b)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let id_a = uniq("MRN-FACA");
+    let id_b = uniq("MRN-FACB");
+    let (st, pat_a) = call(
+        &state,
+        "POST",
+        "/api/v1/patients",
+        &format!("dev-{username}"),
+        Some(json!({
+            "facility_id": facility_a,
+            "family_name": "Mixed",
+            "given_name": "AtHome",
+            "birth_date": "1980-05-05",
+            "sex": "female",
+            "identifier": id_a,
+        })),
+        &[],
+    )
+    .await;
+    // Registration at facility A may be denied for this user (they only
+    // register at B); fall back to reg.rivera whose facility is A.
+    let pat_a = if st == StatusCode::OK {
+        pat_a
+    } else {
+        let (st, p) = call(
+            &state,
+            "POST",
+            "/api/v1/patients",
+            "dev-reg.rivera",
+            Some(json!({
+                "facility_id": facility_a,
+                "family_name": "Mixed",
+                "given_name": "AtHome",
+                "birth_date": "1980-05-05",
+                "sex": "female",
+                "identifier": id_a,
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        p
+    };
+    let (st, pat_b) = call(
+        &state,
+        "POST",
+        "/api/v1/patients",
+        &format!("dev-{username}"),
+        Some(json!({
+            "facility_id": facility_b,
+            "family_name": "Mixed",
+            "given_name": "Elsewhere",
+            "birth_date": "1981-06-06",
+            "sex": "male",
+            "identifier": id_b,
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{pat_b}");
+
+    // Facility A patient: encounter capability true; facility B: false.
+    for (identifier, patient, expected) in [(&id_a, &pat_a, true), (&id_b, &pat_b, false)] {
+        let (st, hits) = call(
+            &state,
+            "GET",
+            &format!("/api/v1/patients?query={identifier}"),
+            &format!("dev-{username}"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{hits}");
+        let hit = hits["patients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == patient["id"])
+            .expect("patient visible in mixed-role search");
+        assert_eq!(hit["can_start_encounter"], json!(expected), "{hit}");
+    }
+
+    // The display hint matches the backend: starting an encounter at the
+    // search-only facility is denied.
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        &format!("dev-{username}"),
+        Some(json!({ "patient_id": pat_b["id"] })),
+        &[],
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "{body}");
+}
+
 /// Create a fresh physician assigned to the given facility.
 async fn create_same_facility_physician(state: &AppState, facility_id: &str) -> String {
     let username = uniq("dr.other");

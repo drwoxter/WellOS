@@ -239,7 +239,12 @@ export default function RequestDetailPage() {
         <>
           {openAlerts.length > 0 ? (
             <div className="critical-banner" role="alert">
-              {t(lang, "criticalBanner")}
+              {t(
+                lang,
+                sr.loop_state === "received"
+                  ? "criticalBanner"
+                  : "criticalBannerReviewed",
+              )}
               {openAlerts.map((a) => (
                 <div key={a.id} style={{ fontWeight: 400 }}>
                   {a.message}

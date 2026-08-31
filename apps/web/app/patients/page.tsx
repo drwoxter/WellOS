@@ -7,7 +7,6 @@ import { AppShell } from "../chrome";
 import { t } from "@/lib/i18n";
 import { apiFetch, useSession } from "@/lib/session";
 import {
-  canActClinically,
   canRegisterPatients,
   formatDate,
   patientName,
@@ -22,6 +21,7 @@ type PatientHit = {
   sex: string;
   identifier: string;
   can_open_chart: boolean;
+  can_start_encounter: boolean;
 };
 
 function sexLabel(lang: "en" | "es", sex: string): string {
@@ -38,7 +38,7 @@ function sexLabel(lang: "en" | "es", sex: string): string {
 }
 
 function SearchSection() {
-  const { lang, meta } = useSession();
+  const { lang } = useSession();
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [searched, setSearched] = useState<string | null>(null);
@@ -46,7 +46,6 @@ function SearchSection() {
   const [busy, setBusy] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const clinician = meta ? canActClinically(meta.facilities) : false;
 
   // Physician chart reads require an established care relationship, so a
   // clinician's entry point from search is starting an encounter; the chart
@@ -137,7 +136,7 @@ function SearchSection() {
                   {formatDate(lang, p.birth_date)}
                 </div>
               </div>
-              {clinician ? (
+              {p.can_start_encounter ? (
                 <button
                   className="secondary"
                   disabled={starting !== null}

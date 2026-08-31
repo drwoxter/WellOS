@@ -30,6 +30,7 @@ function setup(options: {
   clinician: boolean;
   register: boolean;
   canOpenChart?: boolean;
+  canStartEncounter?: boolean;
 }) {
   const encounterCalls: string[] = [];
   vi.stubGlobal(
@@ -42,7 +43,12 @@ function setup(options: {
         return Promise.resolve(
           jsonResponse({
             patients: [
-              { ...PATIENT, can_open_chart: options.canOpenChart ?? true },
+              {
+                ...PATIENT,
+                can_open_chart: options.canOpenChart ?? true,
+                can_start_encounter:
+                  options.canStartEncounter ?? options.clinician,
+              },
             ],
           }),
         );
@@ -128,6 +134,18 @@ describe("patient directory", () => {
     await searchFor("Fresh");
     await screen.findByText("Encounterless Fresh");
     expect(screen.getByText("Open chart")).toBeInTheDocument();
+  });
+
+  it("hides the encounter action for patients at facilities without clinical rights", async () => {
+    // A clinician at facility A searching a patient at facility B (visible
+    // through a search-only role) must not be offered an encounter start
+    // that the backend would reject.
+    setup({ clinician: true, register: false, canStartEncounter: false });
+    await searchFor("Fresh");
+    await screen.findByText("Encounterless Fresh");
+    expect(
+      screen.queryByRole("button", { name: "Start encounter" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows registration but no encounter action for registration staff", async () => {

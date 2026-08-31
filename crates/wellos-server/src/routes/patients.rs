@@ -152,10 +152,11 @@ pub async fn search(
     // trusted role assignments (never from client input). Tenant-wide
     // scope (allowlisted admin/emergency roles) searches all facilities.
     let scope = facility_scope(&ctx, actions::PATIENT_SEARCH);
+    let encounter_scope = facility_scope(&ctx, actions::ENCOUNTER_START);
     let rows = match &scope {
         None => {
             sqlx::query(
-                "SELECT id, family_name, given_name, birth_date, sex, identifier,
+                "SELECT id, family_name, given_name, birth_date, sex, identifier, facility_id,
                         EXISTS (SELECT 1 FROM encounters e
                                 WHERE e.tenant_id = patients.tenant_id
                                   AND e.patient_id = patients.id
@@ -174,7 +175,7 @@ pub async fn search(
         Some(ids) if ids.is_empty() => Vec::new(),
         Some(ids) => {
             sqlx::query(
-                "SELECT id, family_name, given_name, birth_date, sex, identifier,
+                "SELECT id, family_name, given_name, birth_date, sex, identifier, facility_id,
                         EXISTS (SELECT 1 FROM encounters e
                                 WHERE e.tenant_id = patients.tenant_id
                                   AND e.patient_id = patients.id
@@ -200,6 +201,13 @@ pub async fn search(
     let patients: Vec<Value> = rows
         .iter()
         .map(|r| {
+            let patient_facility: Uuid = r.get("facility_id");
+            // Display-only hint: whether the caller can start an encounter
+            // at this patient's facility, per central assignment semantics.
+            let can_start_encounter = match &encounter_scope {
+                None => true,
+                Some(ids) => ids.contains(&patient_facility),
+            };
             json!({
                 "id": r.get::<Uuid, _>("id"),
                 "family_name": r.get::<String, _>("family_name"),
@@ -209,6 +217,7 @@ pub async fn search(
                 "identifier": r.get::<String, _>("identifier"),
                 "can_open_chart": !chart_needs_relationship
                     || r.get::<bool, _>("has_relationship"),
+                "can_start_encounter": can_start_encounter,
             })
         })
         .collect();

@@ -178,6 +178,7 @@ const dict = {
     // Result detail
     resultDetail: "Result detail",
     criticalBanner: "Critical result — requires clinician review",
+    criticalBannerReviewed: "Critical result — reviewed, follow-up in progress",
     workflowProgress: "Workflow progress",
     stepOrdered: "Ordered",
     stepReceived: "Received",
@@ -402,6 +403,8 @@ const dict = {
     // Result detail
     resultDetail: "Detalle del resultado",
     criticalBanner: "Resultado crítico — requiere revisión clínica",
+    criticalBannerReviewed:
+      "Resultado crítico — revisado, seguimiento en curso",
     workflowProgress: "Progreso del flujo",
     stepOrdered: "Solicitado",
     stepReceived: "Recibido",
