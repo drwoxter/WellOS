@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "../chrome";
 import { t } from "@/lib/i18n";
 import { apiFetch, useSession } from "@/lib/session";
-import { formatDate, patientName } from "@/lib/clinical";
+import { canRegisterPatients, formatDate, patientName } from "@/lib/clinical";
 
 type PatientHit = {
   id: string;
@@ -157,8 +157,9 @@ function RegisterSection() {
     }
   }
 
-  // Users without any registrable facility (e.g. oversight roles) simply
-  // don't see the form; the backend stays the authorization boundary.
+  // Only roles with registration permission see the form (and only with a
+  // registrable facility); the backend stays the authorization boundary.
+  if (!meta || !canRegisterPatients(meta.user.roles)) return null;
   if (accessible.length === 0) return null;
 
   return (

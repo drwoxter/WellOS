@@ -748,6 +748,7 @@ async fn seed_demo_loop(
     } else {
         ArtifactStatus::AwaitingReview
     };
+    let artifact_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO ai_artifacts
          (id, tenant_id, patient_id, service_request_id, observation_id, artifact_type,
@@ -756,7 +757,7 @@ async fn seed_demo_loop(
           reviewed_at, generated_at)
          VALUES ($1,$2,$3,$4,$5,'result_summary','A1',$6,$7,$8,$9,$10,$11,$12,'result-summary.v1',$13,$14,$15,$16,$17,$18,$19)",
     )
-    .bind(Uuid::now_v7())
+    .bind(artifact_id)
     .bind(tenant)
     .bind(spec.patient_id)
     .bind(sr_id)
@@ -777,6 +778,26 @@ async fn seed_demo_loop(
     .bind(effective)
     .execute(&mut *tx)
     .await?;
+
+    // A seeded approval is its own provenance event, mirroring the audit the
+    // interactive AI review endpoint records; it is never derived silently.
+    if reviewed {
+        sqlx::query(
+            "INSERT INTO audit_events
+             (id, tenant_id, actor, action, resource_type, resource_id,
+              decision, reason, purpose_of_use, recorded_at)
+             VALUES ($1,$2,(SELECT username FROM users WHERE id = $3),
+                     'ai.artifact.reviewed','ai_artifact',$4,'allow',
+                     'synthetic demo seed','treatment',$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(tenant)
+        .bind(practitioner)
+        .bind(artifact_id.to_string())
+        .bind(effective + chrono::Duration::hours(1))
+        .execute(&mut *tx)
+        .await?;
+    }
 
     // Clinical documentation for each completed workflow step.
     let mut notes: Vec<(&str, &str, i64)> = Vec::new();

@@ -337,8 +337,10 @@ pub async fn worklist_summary(
             COUNT(*) FILTER (WHERE sr.loop_state = 'received') AS awaiting_review,
             COUNT(*) FILTER (WHERE sr.loop_state = 'reviewed') AS awaiting_notification,
             COUNT(*) FILTER (WHERE sr.loop_state = 'notified') AS awaiting_closure,
-            COUNT(*) FILTER (WHERE sr.loop_state = 'closed'
-                AND sr.created_at > now() - interval '7 days') AS recently_closed
+            COUNT(*) FILTER (WHERE sr.loop_state = 'closed' AND EXISTS (
+                SELECT 1 FROM loop_notes n WHERE n.service_request_id = sr.id
+                    AND n.kind = 'closure'
+                    AND n.created_at > now() - interval '7 days')) AS recently_closed
          FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
          WHERE sr.tenant_id = $1";
     let row = match &scope {

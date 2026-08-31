@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { t } from "@/lib/i18n";
 import { useSession } from "@/lib/session";
+import { canReadWorklist, canSearchPatients } from "@/lib/clinical";
 
 export function AppHeader({ subtitle }: { subtitle?: string }) {
   const { lang, setLang, theme, setTheme, authenticated, signOut } =
@@ -51,12 +52,17 @@ export function AppHeader({ subtitle }: { subtitle?: string }) {
 }
 
 function NavLinks() {
-  const { lang } = useSession();
+  const { lang, meta } = useSession();
   const pathname = usePathname();
+  const roles = meta?.user.roles ?? [];
   const links = [
     { href: "/dashboard", label: t(lang, "navHome") },
-    { href: "/patients", label: t(lang, "navPatients") },
-    { href: "/results", label: t(lang, "navResults") },
+    ...(canSearchPatients(roles)
+      ? [{ href: "/patients", label: t(lang, "navPatients") }]
+      : []),
+    ...(canReadWorklist(roles)
+      ? [{ href: "/results", label: t(lang, "navResults") }]
+      : []),
   ];
   return (
     <>
@@ -84,8 +90,17 @@ function NavLinks() {
  * controls, and sign-out. Redirects to sign-in when no session exists.
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { lang, setLang, theme, setTheme, authenticated, meta, signOut } =
-    useSession();
+  const {
+    lang,
+    setLang,
+    theme,
+    setTheme,
+    authenticated,
+    meta,
+    metaError,
+    reloadMeta,
+    signOut,
+  } = useSession();
   const router = useRouter();
 
   if (authenticated === null) {
@@ -143,6 +158,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </p>
               ) : null}
             </>
+          ) : metaError ? (
+            <p className="muted" style={{ margin: 0 }}>
+              {t(lang, "contextLoadFailed")}{" "}
+              <button className="linklike" onClick={reloadMeta}>
+                {t(lang, "retry")}
+              </button>
+            </p>
           ) : (
             <p className="muted" style={{ margin: 0 }}>
               {t(lang, "loading")}
@@ -161,6 +183,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <>
                 {meta.user.display_name}
                 {facilityLabel ? ` — ${facilityLabel}` : ""}
+              </>
+            ) : metaError ? (
+              <>
+                {t(lang, "contextLoadFailed")}{" "}
+                <button className="linklike" onClick={reloadMeta}>
+                  {t(lang, "retry")}
+                </button>
               </>
             ) : (
               t(lang, "loading")

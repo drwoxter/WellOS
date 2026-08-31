@@ -8,6 +8,7 @@ import type { Lang, TKey } from "@/lib/i18n";
 import { apiFetch, useSession } from "@/lib/session";
 import {
   LAB_TESTS,
+  canActClinically,
   formatDate,
   formatDateTime,
   loopStateShortLabel,
@@ -185,6 +186,9 @@ function Actions({
           body: JSON.stringify({ patient_id: chart.patient.id }),
         });
         encId = enc.id;
+        // Reuse this encounter if the order below fails and is retried,
+        // instead of creating another empty encounter per attempt.
+        setEncounterId(encId);
       }
       const selected = LAB_TESTS.find((x) => x.code_loinc === test);
       if (!selected) return;
@@ -275,7 +279,7 @@ function Actions({
 }
 
 function PatientWorkspace({ id }: { id: string }) {
-  const { lang, authenticated } = useSession();
+  const { lang, authenticated, meta } = useSession();
   const [chart, setChart] = useState<Chart | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState("overview");
@@ -355,7 +359,9 @@ function PatientWorkspace({ id }: { id: string }) {
         )}
       </div>
 
-      <Actions chart={chart} lang={lang} onChanged={load} />
+      {meta && canActClinically(meta.user.roles) ? (
+        <Actions chart={chart} lang={lang} onChanged={load} />
+      ) : null}
 
       <div className="card">
         <div className="tabs" role="tablist">

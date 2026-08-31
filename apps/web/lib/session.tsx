@@ -25,6 +25,9 @@ type Session = {
   authenticated: boolean | null;
   /** Trusted tenant/user/facility context; null until loaded. */
   meta: TenantMeta | null;
+  /** True when loading the tenant context failed; retry via reloadMeta. */
+  metaError: boolean;
+  reloadMeta: () => void;
   lang: Lang;
   theme: Theme;
   signIn: (token: string) => Promise<void>;
@@ -38,18 +41,25 @@ const Ctx = createContext<Session | null>(null);
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [meta, setMeta] = useState<TenantMeta | null>(null);
+  const [metaError, setMetaError] = useState(false);
   const [lang, setLangState] = useState<Lang>("en");
   const [theme, setThemeState] = useState<Theme>("north");
+
+  const reloadMeta = useCallback(() => {
+    setMetaError(false);
+    apiFetch<TenantMeta>("/api/v1/meta/tenant")
+      .then(setMeta)
+      .catch(() => setMetaError(true));
+  }, []);
 
   useEffect(() => {
     if (!authenticated) {
       setMeta(null);
+      setMetaError(false);
       return;
     }
-    apiFetch<TenantMeta>("/api/v1/meta/tenant")
-      .then(setMeta)
-      .catch(() => setMeta(null));
-  }, [authenticated]);
+    reloadMeta();
+  }, [authenticated, reloadMeta]);
 
   useEffect(() => {
     fetch("/api/session", { cache: "no-store" })
@@ -108,6 +118,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     () => ({
       authenticated,
       meta,
+      metaError,
+      reloadMeta,
       lang,
       theme,
       signIn,
@@ -115,7 +127,18 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       setLang,
       setTheme,
     }),
-    [authenticated, meta, lang, theme, signIn, signOut, setLang, setTheme],
+    [
+      authenticated,
+      meta,
+      metaError,
+      reloadMeta,
+      lang,
+      theme,
+      signIn,
+      signOut,
+      setLang,
+      setTheme,
+    ],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

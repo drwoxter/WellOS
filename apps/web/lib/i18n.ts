@@ -61,6 +61,9 @@ const dict = {
     notAuthorized: "You do not have permission to view this information.",
     notFound: "Not found",
     retry: "Try again",
+    contextLoadFailed: "Could not load your workspace context.",
+    noWorklistAccess:
+      "Your role does not include the clinical results worklist.",
     unauthenticated: "Your session has ended. Please sign in again.",
     // Demo login
     devLoginTitle: "Development demo sign-in",
@@ -71,9 +74,9 @@ const dict = {
     roleNurse: "Nurse",
     roleRegistration: "Registration staff",
     rolePrivacy: "Privacy officer",
-    demoGarcia: "Dr. Sofía García — orders tests, reviews and closes results",
+    demoGarcia: "Dr. Gabriel García — orders tests, reviews and closes results",
     demoNurse: "Nurse Ana Kim — monitors results and follow-up tasks",
-    demoRegistration: "Reg. Rocío Rivera — registers patients",
+    demoRegistration: "Reg. Rosa Rivera — registers patients",
     demoPrivacy: "Priv. Petra Wolf — audit and consent oversight",
     signInAs: "Sign in as",
     // Dashboard
@@ -276,6 +279,10 @@ const dict = {
     notAuthorized: "No tiene permiso para ver esta información.",
     notFound: "No encontrado",
     retry: "Reintentar",
+    contextLoadFailed:
+      "No se pudo cargar el contexto de su espacio de trabajo.",
+    noWorklistAccess:
+      "Su rol no incluye la lista de trabajo de resultados clínicos.",
     unauthenticated: "Su sesión ha finalizado. Inicie sesión de nuevo.",
     // Demo login
     devLoginTitle: "Acceso de demostración (desarrollo)",
@@ -287,9 +294,9 @@ const dict = {
     roleRegistration: "Personal de admisión",
     rolePrivacy: "Oficial de privacidad",
     demoGarcia:
-      "Dra. Sofía García — solicita pruebas, revisa y cierra resultados",
+      "Dr. Gabriel García — solicita pruebas, revisa y cierra resultados",
     demoNurse: "Enf. Ana Kim — supervisa resultados y tareas de seguimiento",
-    demoRegistration: "Adm. Rocío Rivera — registra pacientes",
+    demoRegistration: "Adm. Rosa Rivera — registra pacientes",
     demoPrivacy: "Priv. Petra Wolf — auditoría y consentimientos",
     signInAs: "Entrar como",
     // Dashboard

@@ -11,22 +11,31 @@ const DEMO_USERS: {
   username: string;
   roleKey: TKey;
   descriptionKey: TKey;
+  home: string;
 }[] = [
   {
     username: "dr.garcia",
     roleKey: "roleClinician",
     descriptionKey: "demoGarcia",
+    home: "/dashboard",
   },
-  { username: "nurse.kim", roleKey: "roleNurse", descriptionKey: "demoNurse" },
+  {
+    username: "nurse.kim",
+    roleKey: "roleNurse",
+    descriptionKey: "demoNurse",
+    home: "/dashboard",
+  },
   {
     username: "reg.rivera",
     roleKey: "roleRegistration",
     descriptionKey: "demoRegistration",
+    home: "/patients",
   },
   {
     username: "privacy.wolf",
     roleKey: "rolePrivacy",
     descriptionKey: "demoPrivacy",
+    home: "/dashboard",
   },
 ];
 
@@ -40,12 +49,12 @@ export default function SignInPage() {
     if (authenticated) router.replace("/dashboard");
   }, [authenticated, router]);
 
-  async function signInAs(username: string) {
+  async function signInAs(username: string, home: string) {
     setBusy(username);
     setError(null);
     try {
       await sessionSignIn(`dev-${username}`);
-      router.push("/dashboard");
+      router.push(home);
     } catch (err) {
       setError(err instanceof Error ? err.message : t(lang, "error"));
       setBusy(null);
@@ -94,7 +103,7 @@ export default function SignInPage() {
                 key={u.username}
                 className="role-card"
                 disabled={busy !== null}
-                onClick={() => void signInAs(u.username)}
+                onClick={() => void signInAs(u.username, u.home)}
               >
                 <span className="role">{t(lang, u.roleKey)}</span>
                 <span>{t(lang, u.descriptionKey)}</span>
