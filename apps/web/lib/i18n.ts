@@ -201,6 +201,8 @@ const dict = {
     cancel: "Cancel",
     noteRequired: "A note documenting this step is required.",
     actionRecorded: "Action recorded.",
+    refreshFailed:
+      "The action was recorded, but the page could not be refreshed. Retry to load the current state.",
     noActionAvailable:
       "No workflow action is available for this result right now.",
     workflowNotes: "Workflow notes",
@@ -429,6 +431,8 @@ const dict = {
     cancel: "Cancelar",
     noteRequired: "Se requiere una nota que documente este paso.",
     actionRecorded: "Acción registrada.",
+    refreshFailed:
+      "La acción se registró, pero no se pudo actualizar la página. Reintente para cargar el estado actual.",
     noActionAvailable:
       "No hay ninguna acción de flujo disponible para este resultado ahora.",
     workflowNotes: "Notas del flujo",

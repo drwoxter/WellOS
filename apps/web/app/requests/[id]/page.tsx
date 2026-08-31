@@ -151,14 +151,18 @@ export default function RequestDetailPage() {
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState<TransitionKind | null>(null);
 
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     if (!authenticated) return;
-    apiFetch<Detail>(`/api/v1/service-requests/${params.id}`)
-      .then(setData)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    const d = await apiFetch<Detail>(`/api/v1/service-requests/${params.id}`);
+    setData(d);
   }, [authenticated, params.id]);
 
-  useEffect(load, [load]);
+  const refresh = useCallback(() => {
+    setError(null);
+    load().catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [load]);
+
+  useEffect(refresh, [refresh]);
 
   async function runTransition(kind: TransitionKind) {
     if (!authenticated || !data) return;
@@ -174,8 +178,16 @@ export default function RequestDetailPage() {
         }),
       });
       setNote("");
+      // The transition succeeded, so the loaded detail (and its action
+      // area) is stale: drop it before refreshing so the completed action
+      // cannot be resubmitted while the refresh is in flight or has failed.
+      setData(null);
       setSuccess(t(lang, "actionRecorded"));
-      load();
+      try {
+        await load();
+      } catch {
+        setError(t(lang, "refreshFailed"));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -235,6 +247,11 @@ export default function RequestDetailPage() {
         <p role="alert" className="error">
           {error}
         </p>
+      ) : null}
+      {error && !data ? (
+        <button className="secondary" onClick={refresh}>
+          {t(lang, "retry")}
+        </button>
       ) : null}
       {success ? (
         <p role="status" className="success">

@@ -137,7 +137,7 @@ async fn transition(
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE alerts SET status='resolved'
+            "UPDATE alerts SET status='resolved', closed_at=now()
              WHERE tenant_id=$1 AND status='open'
                AND observation_id IN (SELECT id FROM observations WHERE service_request_id=$2)",
         )
@@ -257,29 +257,65 @@ pub struct WorklistQuery {
 /// `cursor` parameter rather than being cut off by a fixed cap.
 pub const WORKLIST_PAGE_SIZE: i64 = 200;
 
-/// Keyset cursor over the immutable worklist ordering tuple
-/// `(created_at DESC, id DESC)`. Both columns never change for a row, so a
-/// row's position relative to the cursor is fixed: alert priority changing
-/// between page fetches (e.g. an amendment turning a routine result
-/// critical) can never skip or repeat rows. Criticality is returned per row
-/// (`has_open_alert`) for display and available as a server-side filter.
+/// Keyset cursor over the ordering tuple
+/// `(snapshot priority DESC, created_at DESC, id DESC)`.
+///
+/// Priority (an open critical alert) is mutable, so ordering by the live
+/// value would let rows cross the cursor boundary between page fetches and
+/// be skipped or repeated. Instead the first page captures a snapshot
+/// instant that later pages carry in the cursor, and priority is evaluated
+/// *as of that instant* from the alert's immutable `created_at` and
+/// monotonic `closed_at`: critical results sort first, and every row's
+/// position stays fixed for the whole page sequence. A row that turns
+/// critical after the snapshot still appears (in its routine position) and
+/// moves to the top on the next refresh; the live `has_open_alert` value is
+/// returned per row for display.
 struct WorklistCursor {
+    snapshot_at: chrono::DateTime<chrono::Utc>,
+    priority: bool,
     created_at: chrono::DateTime<chrono::Utc>,
     id: Uuid,
 }
 
+/// Whether the request had an open critical alert as of `$3` (the snapshot
+/// instant): the alert existed then and had not yet been closed.
+const SNAP_PRIORITY_EXPR: &str = "CASE WHEN EXISTS (
+        SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
+        WHERE o.service_request_id = sr.id
+          AND a.created_at <= $3
+          AND (a.closed_at IS NULL OR a.closed_at > $3)
+    ) THEN 1 ELSE 0 END";
+
 impl WorklistCursor {
-    /// URL-safe encoding: `{epoch_micros}.{uuid}`.
+    /// URL-safe encoding: `{snapshot_micros}.{priority}.{epoch_micros}.{uuid}`.
     fn encode(&self) -> String {
-        format!("{}.{}", self.created_at.timestamp_micros(), self.id)
+        format!(
+            "{}.{}.{}.{}",
+            self.snapshot_at.timestamp_micros(),
+            i32::from(self.priority),
+            self.created_at.timestamp_micros(),
+            self.id
+        )
     }
 
     fn decode(raw: &str) -> Option<Self> {
-        let mut parts = raw.splitn(2, '.');
+        let mut parts = raw.splitn(4, '.');
+        let snap_micros: i64 = parts.next()?.parse().ok()?;
+        let snapshot_at = chrono::DateTime::from_timestamp_micros(snap_micros)?;
+        let priority = match parts.next()? {
+            "0" => false,
+            "1" => true,
+            _ => return None,
+        };
         let micros: i64 = parts.next()?.parse().ok()?;
         let created_at = chrono::DateTime::from_timestamp_micros(micros)?;
         let id = Uuid::parse_str(parts.next()?).ok()?;
-        Some(Self { created_at, id })
+        Some(Self {
+            snapshot_at,
+            priority,
+            created_at,
+            id,
+        })
     }
 }
 
@@ -342,9 +378,16 @@ pub async fn worklist(
                 ApiError::bad_request("invalid_cursor", "malformed worklist cursor")
             })?),
         };
-    let mut sql = String::from(
+    // The first page fixes the snapshot instant; later pages reuse the one
+    // carried in the cursor so the whole sequence shares one stable ordering.
+    let snapshot_at = cursor
+        .as_ref()
+        .map(|c| c.snapshot_at)
+        .unwrap_or_else(chrono::Utc::now);
+    let mut sql = format!(
         "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
                 p.family_name, p.given_name, p.identifier, p.facility_id,
+                {SNAP_PRIORITY_EXPR} AS snap_priority,
                 EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
                         WHERE o.service_request_id = sr.id AND a.status = 'open') AS has_open_alert,
                 EXISTS (SELECT 1 FROM encounters e
@@ -353,7 +396,7 @@ pub async fn worklist(
          FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
          WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'",
     );
-    let mut arg = 2;
+    let mut arg = 3;
     if scope.is_some() {
         arg += 1;
         sql.push_str(&format!(" AND p.facility_id = ANY(${arg})"));
@@ -379,21 +422,26 @@ pub async fn worklist(
     }
     if cursor.is_some() {
         // Keyset predicate: strictly after the cursor tuple in the DESC
-        // ordering below (row-value comparison, both columns descending).
+        // ordering below (row-value comparison, all columns descending).
         sql.push_str(&format!(
-            " AND (sr.created_at, sr.id) < (${}, ${})",
+            " AND ({SNAP_PRIORITY_EXPR}, sr.created_at, sr.id) < (${}, ${}, ${})",
             arg + 1,
-            arg + 2
+            arg + 2,
+            arg + 3
         ));
     }
-    // Deterministic ordering over immutable columns (id tie-breaker) so
-    // pages never skip or repeat rows even when alert priority changes
-    // between fetches; one extra row detects whether more pages exist.
+    // Deterministic ordering (id tie-breaker) over columns that are stable
+    // for the snapshot instant, so pages never skip or repeat rows even when
+    // alert priority changes between fetches; one extra row detects whether
+    // more pages exist.
     sql.push_str(&format!(
-        " ORDER BY sr.created_at DESC, sr.id DESC LIMIT {}",
+        " ORDER BY snap_priority DESC, sr.created_at DESC, sr.id DESC LIMIT {}",
         WORKLIST_PAGE_SIZE + 1
     ));
-    let mut q = sqlx::query(&sql).bind(ctx.tenant_id).bind(ctx.user_id);
+    let mut q = sqlx::query(&sql)
+        .bind(ctx.tenant_id)
+        .bind(ctx.user_id)
+        .bind(snapshot_at);
     if let Some(ids) = &scope {
         q = q.bind(ids);
     }
@@ -404,7 +452,7 @@ pub async fn worklist(
         q = q.bind(pat);
     }
     if let Some(c) = &cursor {
-        q = q.bind(c.created_at).bind(c.id);
+        q = q.bind(i32::from(c.priority)).bind(c.created_at).bind(c.id);
     }
     let mut rows = q.fetch_all(&state.pool).await?;
     let has_more = rows.len() as i64 > WORKLIST_PAGE_SIZE;
@@ -412,6 +460,8 @@ pub async fn worklist(
     let next_cursor = if has_more {
         rows.last().map(|r| {
             WorklistCursor {
+                snapshot_at,
+                priority: r.get::<i32, _>("snap_priority") == 1,
                 created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
                 id: r.get::<Uuid, _>("id"),
             }

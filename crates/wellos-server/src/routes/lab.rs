@@ -203,7 +203,7 @@ pub async fn ingest_result(
         // observation and open follow-up tasks on the request. If the
         // corrected result is still critical, fresh ones are created below.
         sqlx::query(
-            "UPDATE alerts SET status='superseded'
+            "UPDATE alerts SET status='superseded', closed_at=now()
              WHERE tenant_id=$1 AND observation_id=$2 AND status='open'",
         )
         .bind(tenant_id)

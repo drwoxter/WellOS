@@ -1764,6 +1764,49 @@ async fn worklist_filters_apply_before_row_cap() {
     .execute(&state.pool)
     .await
     .unwrap();
+    // An old result that is already critical before paging starts: despite
+    // hundreds of newer routine rows, it must surface on the first page.
+    let crit_sr = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO service_requests (id, tenant_id, encounter_id, patient_id, requester_id,
+                                       code_loinc, display, loop_state, version, created_at)
+         VALUES ($1,$2,$3,$4,$5,'2823-3','Potassium [Moles/volume] in Serum','received',2,
+                 now() - interval '2 days')",
+    )
+    .bind(crit_sr)
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .bind(patient_id)
+    .bind(requester_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let crit_obs = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO observations (id, tenant_id, service_request_id, patient_id, code_loinc,
+                                   value_num, unit, status, source_system, idempotency_key,
+                                   effective_at, received_at)
+         VALUES ($1,$2,$3,$4,'2823-3',7.4,'mmol/L','final','fake-lab',$5, now(), now())",
+    )
+    .bind(crit_obs)
+    .bind(tenant_id)
+    .bind(crit_sr)
+    .bind(patient_id)
+    .bind(uniq("crit-old-key"))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO alerts (id, tenant_id, patient_id, observation_id, severity, message, status)
+         VALUES ($1,$2,$3,$4,'critical','Critical potassium 7.4 mmol/L','open')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(patient_id)
+    .bind(crit_obs)
+    .execute(&state.pool)
+    .await
+    .unwrap();
     // A routine row destined for later pages that will turn critical
     // between page fetches.
     let promoted_sr = uuid::Uuid::now_v7();
@@ -1818,6 +1861,16 @@ async fn worklist_filters_apply_before_row_cap() {
             .iter()
             .any(|i| i["id"] == json!(old_sr)),
         "old row should be beyond the first page"
+    );
+    // Priority-first: the old critical row surfaces on the first page
+    // despite more than a full page of newer routine rows.
+    assert!(
+        unfiltered["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == json!(crit_sr)),
+        "old critical result must surface on the first page"
     );
     // After the first page is fetched, the unseen routine row becomes
     // critical (e.g. an amendment). The immutable keyset ordering must
@@ -1887,11 +1940,12 @@ async fn worklist_filters_apply_before_row_cap() {
             sqlx::query(
                 "UPDATE service_requests SET loop_state = 'closed'
                  WHERE id = $1 AND loop_state <> 'closed'
-                   AND id <> $2 AND id <> $3",
+                   AND id <> $2 AND id <> $3 AND id <> $4",
             )
             .bind(open_id.parse::<uuid::Uuid>().unwrap())
             .bind(old_sr)
             .bind(promoted_sr)
+            .bind(crit_sr)
             .execute(&state.pool)
             .await
             .unwrap();

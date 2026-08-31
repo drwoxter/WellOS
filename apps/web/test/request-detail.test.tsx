@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import RequestDetailPage from "@/app/requests/[id]/page";
 import { SessionProvider } from "@/lib/session";
 
@@ -159,6 +159,70 @@ describe("result detail critical banner", () => {
     expect(
       screen.queryByRole("columnheader", { name: "Recorded" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("hides the completed action and offers retry when the post-transition refresh fails", async () => {
+    let detailCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/session")
+          return Promise.resolve(jsonResponse({ authenticated: true }));
+        if (url === "/api/v1/meta/tenant")
+          return Promise.resolve(
+            jsonResponse({
+              tenant: { id: "t", name: "Demo Tenant", cell: "eu" },
+              user: {
+                username: "dr.garcia",
+                display_name: "Dr. García",
+                roles: ["physician"],
+              },
+              facilities: [
+                {
+                  id: "f",
+                  name: "Central Hospital",
+                  accessible: true,
+                  can_register: false,
+                  can_act_clinically: true,
+                },
+              ],
+            }),
+          );
+        if (
+          url === `/api/v1/service-requests/${SR_ID}/review` &&
+          init?.method === "POST"
+        )
+          return Promise.resolve(jsonResponse({ ok: true }));
+        if (url === `/api/v1/service-requests/${SR_ID}`) {
+          detailCalls += 1;
+          return detailCalls === 1
+            ? Promise.resolve(jsonResponse(detail("received")))
+            : Promise.resolve(jsonResponse({ error: "boom" }, 500));
+        }
+        return Promise.resolve(jsonResponse({}));
+      }),
+    );
+    render(
+      <SessionProvider>
+        <RequestDetailPage />
+      </SessionProvider>,
+    );
+    await screen.findByText("Next action");
+    fireEvent.change(screen.getByLabelText("Workflow notes"), {
+      target: { value: "Reviewed with attending" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Mark reviewed" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    expect(
+      await screen.findByText(/could not be refreshed/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Mark reviewed" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps the follow-up wording after patient notification", async () => {
