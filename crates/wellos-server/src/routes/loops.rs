@@ -240,9 +240,27 @@ pub async fn close(
     .await
 }
 
+#[derive(Deserialize)]
+pub struct WorklistQuery {
+    /// Only items with an open critical alert.
+    pub critical: Option<bool>,
+    /// Restrict to one workflow state (`ordered`..`notified`).
+    pub state: Option<String>,
+    /// Case-insensitive patient name/identifier match.
+    pub query: Option<String>,
+    /// Number of rows to skip (page offset); each page holds up to
+    /// [`WORKLIST_PAGE_SIZE`] rows.
+    pub offset: Option<i64>,
+}
+
+/// Rows returned per worklist page. Older rows stay reachable through the
+/// `offset` parameter rather than being cut off by a fixed cap.
+pub const WORKLIST_PAGE_SIZE: i64 = 200;
+
 pub async fn worklist(
     State(state): State<AppState>,
     ctx: AuthContext,
+    axum::extract::Query(params): axum::extract::Query<WorklistQuery>,
 ) -> Result<Json<Value>, ApiError> {
     guard(
         &state,
@@ -258,35 +276,94 @@ pub async fn worklist(
     .await?
     .record_on_pool(&state, &ctx)
     .await?;
+    let state_filter = match params.state.as_deref() {
+        None | Some("all") => None,
+        Some(s) => Some(
+            LoopState::parse(s)
+                .filter(|st| *st != LoopState::Closed)
+                .ok_or_else(|| ApiError::bad_request("invalid_state", "unknown workflow state"))?
+                .as_str()
+                .to_string(),
+        ),
+    };
+    let query_filter = params
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(|q| {
+            let escaped = q
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("%{escaped}%")
+        });
     // The worklist is filtered to the caller's facility scope, resolved from
     // trusted role assignments (tenant-wide only for allowlisted roles).
+    // Criticality/state/patient filters run in SQL before the row cap so a
+    // filtered view always covers every matching open result, not just the
+    // newest rows.
     let scope = facility_scope(&ctx, actions::WORKLIST_READ);
-    const WORKLIST_SQL: &str =
+    if matches!(&scope, Some(ids) if ids.is_empty()) {
+        return Ok(Json(json!({ "items": [], "has_more": false })));
+    }
+    let offset = params.offset.unwrap_or(0);
+    if !(0..=1_000_000).contains(&offset) {
+        return Err(ApiError::bad_request(
+            "invalid_offset",
+            "offset out of range",
+        ));
+    }
+    let mut sql = String::from(
         "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
                 p.family_name, p.given_name, p.identifier,
                 EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
                         WHERE o.service_request_id = sr.id AND a.status = 'open') AS has_open_alert
          FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
-         WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'";
-    const WORKLIST_ORDER: &str = " ORDER BY has_open_alert DESC, sr.created_at DESC LIMIT 200";
-    let rows = match &scope {
-        None => {
-            sqlx::query(&format!("{WORKLIST_SQL}{WORKLIST_ORDER}"))
-                .bind(ctx.tenant_id)
-                .fetch_all(&state.pool)
-                .await?
-        }
-        Some(ids) if ids.is_empty() => Vec::new(),
-        Some(ids) => {
-            sqlx::query(&format!(
-                "{WORKLIST_SQL} AND p.facility_id = ANY($2){WORKLIST_ORDER}"
-            ))
-            .bind(ctx.tenant_id)
-            .bind(ids)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+         WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'",
+    );
+    let mut arg = 1;
+    if scope.is_some() {
+        arg += 1;
+        sql.push_str(&format!(" AND p.facility_id = ANY(${arg})"));
+    }
+    if state_filter.is_some() {
+        arg += 1;
+        sql.push_str(&format!(" AND sr.loop_state = ${arg}"));
+    }
+    if params.critical == Some(true) {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
+                          WHERE o.service_request_id = sr.id AND a.status = 'open')",
+        );
+    }
+    if query_filter.is_some() {
+        arg += 1;
+        sql.push_str(&format!(
+            " AND (p.family_name || ' ' || p.given_name || ' ' || p.identifier) ILIKE ${arg}"
+        ));
+    }
+    // Deterministic ordering (id tie-breaker) so pages never skip or repeat
+    // rows; one extra row is fetched to detect whether more pages exist.
+    sql.push_str(&format!(
+        " ORDER BY has_open_alert DESC, sr.created_at DESC, sr.id DESC LIMIT {} OFFSET ${}",
+        WORKLIST_PAGE_SIZE + 1,
+        arg + 1
+    ));
+    let mut q = sqlx::query(&sql).bind(ctx.tenant_id);
+    if let Some(ids) = &scope {
+        q = q.bind(ids);
+    }
+    if let Some(s) = &state_filter {
+        q = q.bind(s);
+    }
+    if let Some(pat) = &query_filter {
+        q = q.bind(pat);
+    }
+    q = q.bind(offset);
+    let mut rows = q.fetch_all(&state.pool).await?;
+    let has_more = rows.len() as i64 > WORKLIST_PAGE_SIZE;
+    rows.truncate(WORKLIST_PAGE_SIZE as usize);
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -306,7 +383,7 @@ pub async fn worklist(
             })
         })
         .collect();
-    Ok(Json(json!({ "items": items })))
+    Ok(Json(json!({ "items": items, "has_more": has_more })))
 }
 
 /// Aggregate counts backing the dashboard status cards. Same authorization

@@ -359,7 +359,7 @@ function PatientWorkspace({ id }: { id: string }) {
         )}
       </div>
 
-      {meta && canActClinically(meta.user.roles) ? (
+      {meta && canActClinically(meta.facilities) ? (
         <Actions chart={chart} lang={lang} onChanged={load} />
       ) : null}
 

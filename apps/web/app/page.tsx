@@ -45,9 +45,11 @@ export default function SignInPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const router = useRouter();
 
+  // Redirect only visitors who arrived already authenticated; a role-card
+  // sign-in navigates to its own role-appropriate home instead.
   useEffect(() => {
-    if (authenticated) router.replace("/dashboard");
-  }, [authenticated, router]);
+    if (authenticated && busy === null) router.replace("/dashboard");
+  }, [authenticated, busy, router]);
 
   async function signInAs(username: string, home: string) {
     setBusy(username);

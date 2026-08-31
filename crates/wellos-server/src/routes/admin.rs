@@ -1,7 +1,7 @@
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
-use crate::policy::{actions, ResourceCtx};
+use crate::policy::{actions, null_facility_is_tenant_wide, role_allows, ResourceCtx};
 use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::State;
@@ -45,6 +45,18 @@ pub async fn tenant_meta(
         .bind(ctx.tenant_id)
         .fetch_one(&state.pool)
         .await?;
+    // Per-facility UI capability hints, derived with the same role/NULL-facility
+    // semantics as central policy (display-only; the policy layer remains the
+    // authorization boundary).
+    let allows_in = |action: &str, id: Uuid| {
+        ctx.assignments.iter().any(|a| {
+            role_allows(&a.role, action)
+                && match a.facility_id {
+                    Some(f) => f == id,
+                    None => null_facility_is_tenant_wide(&a.role),
+                }
+        })
+    };
     let facilities =
         sqlx::query("SELECT id, name FROM facilities WHERE tenant_id = $1 ORDER BY name")
             .bind(ctx.tenant_id)
@@ -53,14 +65,16 @@ pub async fn tenant_meta(
             .iter()
             .map(|r| {
                 let id = r.get::<Uuid, _>("id");
-                let accessible = ctx
-                    .assignments
-                    .iter()
-                    .any(|a| a.facility_id.is_none() || a.facility_id == Some(id));
+                let accessible = ctx.assignments.iter().any(|a| match a.facility_id {
+                    Some(f) => f == id,
+                    None => null_facility_is_tenant_wide(&a.role),
+                });
                 json!({
                     "id": id,
                     "name": r.get::<String,_>("name"),
                     "accessible": accessible,
+                    "can_register": allows_in(actions::PATIENT_REGISTER, id),
+                    "can_act_clinically": allows_in(actions::ENCOUNTER_START, id),
                 })
             })
             .collect::<Vec<_>>();

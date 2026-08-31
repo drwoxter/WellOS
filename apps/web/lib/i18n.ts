@@ -163,6 +163,7 @@ const dict = {
     resetFilters: "Reset filters",
     noMatchingResults: "No results match the current filters.",
     noOpenResults: "No open results. All loops are closed.",
+    loadMore: "Load more results",
     routine: "Routine",
     stateOrdered: "Ordered",
     stateReceived: "Received — awaiting review",
@@ -384,6 +385,7 @@ const dict = {
     noMatchingResults: "Ningún resultado coincide con los filtros actuales.",
     noOpenResults:
       "No hay resultados abiertos. Todos los ciclos están cerrados.",
+    loadMore: "Cargar más resultados",
     routine: "Rutinario",
     stateOrdered: "Solicitado",
     stateReceived: "Recibido — pendiente de revisión",

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ResultsPage from "@/app/results/page";
 import { SessionProvider } from "@/lib/session";
@@ -45,15 +45,35 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function setup(worklist: unknown = { items: ITEMS }) {
+function setup(allItems: typeof ITEMS = ITEMS) {
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/session")
         return Promise.resolve(jsonResponse({ authenticated: true }));
-      if (url === "/api/v1/worklist")
-        return Promise.resolve(jsonResponse(worklist));
+      if (url.startsWith("/api/v1/worklist")) {
+        // Mirror the API's server-side filtering.
+        const params = new URL(url, "http://localhost").searchParams;
+        const critical = params.get("critical") === "true";
+        const state = params.get("state");
+        const q = params.get("query")?.toLowerCase();
+        const items = allItems.filter((item) => {
+          if (critical && !item.has_open_alert) return false;
+          if (state && item.loop_state !== state) return false;
+          if (q) {
+            const hay =
+              `${item.patient.family_name} ${item.patient.given_name} ${item.patient.identifier}`.toLowerCase();
+            if (!hay.includes(q)) return false;
+          }
+          return true;
+        });
+        const offset = Number(params.get("offset") ?? "0");
+        const page = items.slice(offset, offset + 200);
+        return Promise.resolve(
+          jsonResponse({ items: page, has_more: offset + 200 < items.length }),
+        );
+      }
       if (url === "/api/v1/meta/tenant")
         return Promise.resolve(
           jsonResponse({
@@ -64,7 +84,13 @@ function setup(worklist: unknown = { items: ITEMS }) {
               roles: ["physician"],
             },
             facilities: [
-              { id: "f", name: "Central Hospital", accessible: true },
+              {
+                id: "f",
+                name: "Central Hospital",
+                accessible: true,
+                can_register: false,
+                can_act_clinically: true,
+              },
             ],
           }),
         );
@@ -100,7 +126,9 @@ describe("results worklist", () => {
       screen.getByLabelText("Criticality"),
       "critical",
     );
-    expect(screen.queryAllByText("Marta Demopatient")).toHaveLength(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText("Marta Demopatient")).toHaveLength(0),
+    );
     expect(screen.getAllByText("Carlos Demopatient").length).toBeGreaterThan(0);
     await userEvent.click(
       screen.getByRole("button", { name: "Reset filters" }),
@@ -117,18 +145,49 @@ describe("results worklist", () => {
       screen.getByLabelText("Filter by patient name or identifier"),
       "Marta",
     );
-    expect(screen.queryAllByText("Carlos Demopatient")).toHaveLength(0);
+    await waitFor(
+      () => expect(screen.queryAllByText("Carlos Demopatient")).toHaveLength(0),
+      { timeout: 2000 },
+    );
     await userEvent.type(
       screen.getByLabelText("Filter by patient name or identifier"),
       "nobody-matches",
     );
     expect(
-      await screen.findByText("No results match the current filters."),
+      await screen.findByText(
+        "No results match the current filters.",
+        {},
+        { timeout: 2000 },
+      ),
     ).toBeInTheDocument();
   });
 
+  it("loads older results beyond the first page on demand", async () => {
+    const many = Array.from({ length: 201 }, (_, i) => ({
+      ...ITEMS[1],
+      id: `33333333-3333-3333-3333-${String(i).padStart(12, "0")}`,
+      patient: {
+        family_name: i === 200 ? "Oldest" : "Bulk",
+        given_name: `Row${i}`,
+        identifier: `SYN-${i}`,
+      },
+    }));
+    setup(many);
+    const button = await screen.findByRole("button", {
+      name: "Load more results",
+    });
+    expect(screen.queryAllByText(/Row200 Oldest/)).toHaveLength(0);
+    await userEvent.click(button);
+    expect(
+      (await screen.findAllByText(/Row200 Oldest/)).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.queryByRole("button", { name: "Load more results" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows an empty state when there are no open results", async () => {
-    setup({ items: [] });
+    setup([]);
     expect(
       await screen.findByText("No open results. All loops are closed."),
     ).toBeInTheDocument();

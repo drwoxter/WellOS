@@ -5,8 +5,9 @@ import SignInPage from "@/app/page";
 import { SessionProvider } from "@/lib/session";
 
 const push = vi.fn();
+const replace = vi.fn();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push, replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push, replace, prefetch: vi.fn() }),
   usePathname: () => "/",
 }));
 
@@ -30,6 +31,7 @@ describe("development demo login", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     push.mockClear();
+    replace.mockClear();
     process.env.NEXT_PUBLIC_WELLOS_DEV_AUTH = "true";
   });
 
@@ -67,6 +69,36 @@ describe("development demo login", () => {
     await waitFor(() => expect(push).toHaveBeenCalledWith("/dashboard"));
     const signInCall = calls.find((c) => c.body);
     expect(signInCall?.body).toContain("dev-dr.garcia");
+  });
+
+  it("routes registration staff to /patients without racing the dashboard redirect", async () => {
+    mockFetch((url, init) => {
+      if (url === "/api/session" && init?.method === "POST") {
+        return jsonResponse({ ok: true });
+      }
+      if (url === "/api/session") return jsonResponse({ authenticated: false });
+      return jsonResponse({}, 200);
+    });
+    render(
+      <SessionProvider>
+        <SignInPage />
+      </SessionProvider>,
+    );
+    const card = await screen.findByRole("button", { name: /reg\.rivera/ });
+    await userEvent.click(card);
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/patients"));
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("redirects an already-authenticated visitor to the dashboard", async () => {
+    mockFetch(() => jsonResponse({ authenticated: true }));
+    render(
+      <SessionProvider>
+        <SignInPage />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/dashboard"));
+    expect(push).not.toHaveBeenCalled();
   });
 
   it("shows an error when sign-in fails", async () => {

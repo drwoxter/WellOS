@@ -6,13 +6,20 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { Lang } from "./i18n";
 
 export type Theme = "north" | "south";
 
-export type Facility = { id: string; name: string; accessible: boolean };
+export type Facility = {
+  id: string;
+  name: string;
+  accessible: boolean;
+  can_register: boolean;
+  can_act_clinically: boolean;
+};
 
 export type TenantMeta = {
   tenant: { id: string; name: string; cell: string };
@@ -45,15 +52,27 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [lang, setLangState] = useState<Lang>("en");
   const [theme, setThemeState] = useState<Theme>("north");
 
+  // Generation counter for metadata loads: a response is applied only when
+  // it belongs to the latest request, so a stale response from a previous
+  // session (or an older overlapping retry) can never overwrite the current
+  // session's context.
+  const metaGeneration = useRef(0);
+
   const reloadMeta = useCallback(() => {
+    const generation = ++metaGeneration.current;
     setMetaError(false);
     apiFetch<TenantMeta>("/api/v1/meta/tenant")
-      .then(setMeta)
-      .catch(() => setMetaError(true));
+      .then((m) => {
+        if (metaGeneration.current === generation) setMeta(m);
+      })
+      .catch(() => {
+        if (metaGeneration.current === generation) setMetaError(true);
+      });
   }, []);
 
   useEffect(() => {
     if (!authenticated) {
+      metaGeneration.current += 1;
       setMeta(null);
       setMetaError(false);
       return;

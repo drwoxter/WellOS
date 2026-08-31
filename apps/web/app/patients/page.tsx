@@ -6,7 +6,13 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "../chrome";
 import { t } from "@/lib/i18n";
 import { apiFetch, useSession } from "@/lib/session";
-import { canRegisterPatients, formatDate, patientName } from "@/lib/clinical";
+import {
+  canActClinically,
+  canRegisterPatients,
+  formatDate,
+  patientName,
+  registrableFacilities,
+} from "@/lib/clinical";
 
 type PatientHit = {
   id: string;
@@ -31,12 +37,33 @@ function sexLabel(lang: "en" | "es", sex: string): string {
 }
 
 function SearchSection() {
-  const { lang } = useSession();
+  const { lang, meta } = useSession();
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [searched, setSearched] = useState<string | null>(null);
   const [hits, setHits] = useState<PatientHit[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [starting, setStarting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const clinician = meta ? canActClinically(meta.facilities) : false;
+
+  // Physician chart reads require an established care relationship, so a
+  // clinician's entry point from search is starting an encounter; the chart
+  // opens once that relationship exists.
+  async function startEncounter(patientId: string) {
+    setStarting(patientId);
+    setError(null);
+    try {
+      await apiFetch<{ id: string }>("/api/v1/encounters", {
+        method: "POST",
+        body: JSON.stringify({ patient_id: patientId }),
+      });
+      router.push(`/patients/${patientId}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStarting(null);
+    }
+  }
 
   async function search(e: React.FormEvent) {
     e.preventDefault();
@@ -109,6 +136,17 @@ function SearchSection() {
                   {formatDate(lang, p.birth_date)}
                 </div>
               </div>
+              {clinician ? (
+                <button
+                  className="secondary"
+                  disabled={starting !== null}
+                  onClick={() => void startEncounter(p.id)}
+                >
+                  {starting === p.id
+                    ? t(lang, "loading")
+                    : t(lang, "startEncounter")}
+                </button>
+              ) : null}
               <Link className="navlink" href={`/patients/${p.id}`}>
                 {t(lang, "openChart")}
               </Link>
@@ -123,7 +161,7 @@ function SearchSection() {
 function RegisterSection() {
   const { lang, meta } = useSession();
   const router = useRouter();
-  const accessible = meta?.facilities.filter((f) => f.accessible) ?? [];
+  const accessible = registrableFacilities(meta?.facilities ?? []);
   const [form, setForm] = useState({
     facility_id: "",
     family_name: "",
@@ -159,7 +197,7 @@ function RegisterSection() {
 
   // Only roles with registration permission see the form (and only with a
   // registrable facility); the backend stays the authorization boundary.
-  if (!meta || !canRegisterPatients(meta.user.roles)) return null;
+  if (!meta || !canRegisterPatients(meta.facilities)) return null;
   if (accessible.length === 0) return null;
 
   return (

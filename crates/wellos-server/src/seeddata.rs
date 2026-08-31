@@ -755,7 +755,7 @@ async fn seed_demo_loop(
           autonomy_level, status, model, model_version, route, template, input_hash, output,
           output_schema, citations, limitations, reviewer_id, review_decision, review_note,
           reviewed_at, generated_at)
-         VALUES ($1,$2,$3,$4,$5,'result_summary','A1',$6,$7,$8,$9,$10,$11,$12,'result-summary.v1',$13,$14,$15,$16,$17,$18,$19)",
+         VALUES ($1,$2,$3,$4,$5,'result_summary','A2',$6,$7,$8,$9,$10,$11,$12,'result-summary.v1',$13,$14,$15,$16,$17,$18,$19)",
     )
     .bind(artifact_id)
     .bind(tenant)

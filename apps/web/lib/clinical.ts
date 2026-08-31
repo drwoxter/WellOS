@@ -105,12 +105,27 @@ export function canSearchPatients(roles: string[]): boolean {
   return roles.some((r) => PATIENT_SEARCH_ROLES.includes(r));
 }
 
-export function canRegisterPatients(roles: string[]): boolean {
-  return roles.includes("registration_staff");
+type FacilityCapability = {
+  accessible: boolean;
+  can_register: boolean;
+  can_act_clinically: boolean;
+};
+
+// Registration and clinical capabilities are facility-specific: the server
+// derives them per facility from the caller's role assignments, so controls
+// only appear for facilities where the role actually applies.
+export function registrableFacilities<F extends FacilityCapability>(
+  facilities: F[],
+): F[] {
+  return facilities.filter((f) => f.can_register);
 }
 
-export function canActClinically(roles: string[]): boolean {
-  return roles.includes("physician");
+export function canRegisterPatients(facilities: FacilityCapability[]): boolean {
+  return facilities.some((f) => f.can_register);
+}
+
+export function canActClinically(facilities: FacilityCapability[]): boolean {
+  return facilities.some((f) => f.can_act_clinically);
 }
 
 /** Common orderable laboratory tests covered by the deterministic rules. */

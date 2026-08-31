@@ -10,6 +10,7 @@ import {
   loopStateLabel,
   loopStateShortLabel,
   patientName,
+  registrableFacilities,
 } from "@/lib/clinical";
 
 describe("clinical helpers", () => {
@@ -48,9 +49,29 @@ describe("clinical helpers", () => {
     expect(canReadWorklist(["privacy_officer"])).toBe(false);
     expect(canSearchPatients(["registration_staff"])).toBe(true);
     expect(canSearchPatients(["privacy_officer"])).toBe(false);
-    expect(canRegisterPatients(["registration_staff"])).toBe(true);
-    expect(canRegisterPatients(["physician"])).toBe(false);
-    expect(canActClinically(["physician"])).toBe(true);
-    expect(canActClinically(["nurse"])).toBe(false);
+  });
+
+  it("derives registration and clinical capabilities per facility", () => {
+    const facilities = [
+      {
+        id: "a",
+        name: "Central",
+        accessible: true,
+        can_register: true,
+        can_act_clinically: false,
+      },
+      {
+        id: "b",
+        name: "Annex",
+        accessible: true,
+        can_register: false,
+        can_act_clinically: false,
+      },
+    ];
+    expect(canRegisterPatients(facilities)).toBe(true);
+    expect(registrableFacilities(facilities).map((f) => f.id)).toEqual(["a"]);
+    expect(canActClinically(facilities)).toBe(false);
+    expect(canRegisterPatients([])).toBe(false);
+    expect(canActClinically([])).toBe(false);
   });
 });

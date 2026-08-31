@@ -96,13 +96,13 @@ function DashboardContent() {
   if (canSearchPatients(roles)) {
     quickActions.push({ href: "/patients", key: "actionFindPatient" });
   }
-  if (canRegisterPatients(roles)) {
+  if (meta && canRegisterPatients(meta.facilities)) {
     quickActions.push({
       href: "/patients#register",
       key: "actionRegisterPatient",
     });
   }
-  if (canActClinically(roles)) {
+  if (meta && canActClinically(meta.facilities)) {
     quickActions.push({ href: "/patients", key: "actionStartEncounter" });
     quickActions.push({ href: "/patients", key: "actionOrderLab" });
   }

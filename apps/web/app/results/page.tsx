@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "../chrome";
 import { t } from "@/lib/i18n";
 import { apiFetch, useSession } from "@/lib/session";
@@ -24,36 +24,63 @@ type WorklistItem = {
 function ResultsContent() {
   const { lang, authenticated } = useSession();
   const [items, setItems] = useState<WorklistItem[] | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [criticality, setCriticality] = useState<"all" | "critical">("all");
   const [state, setState] = useState("all");
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => clearTimeout(handle);
+  }, [query]);
+
+  // Filters and paging run in the API so every matching open result stays
+  // reachable, not just the newest rows.
+  const buildUrl = useCallback(
+    (offset: number) => {
+      const params = new URLSearchParams();
+      if (criticality === "critical") params.set("critical", "true");
+      if (state !== "all") params.set("state", state);
+      if (debouncedQuery) params.set("query", debouncedQuery);
+      if (offset > 0) params.set("offset", String(offset));
+      const qs = params.toString();
+      return `/api/v1/worklist${qs ? `?${qs}` : ""}`;
+    },
+    [criticality, state, debouncedQuery],
+  );
 
   const load = useCallback(() => {
     setError(null);
-    apiFetch<{ items: WorklistItem[] }>("/api/v1/worklist")
-      .then((d) => setItems(d.items))
+    apiFetch<{ items: WorklistItem[]; has_more?: boolean }>(buildUrl(0))
+      .then((d) => {
+        setItems(d.items);
+        setHasMore(d.has_more === true);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, []);
+  }, [buildUrl]);
+
+  const loadMore = useCallback(() => {
+    if (!items || loadingMore) return;
+    setLoadingMore(true);
+    apiFetch<{ items: WorklistItem[]; has_more?: boolean }>(
+      buildUrl(items.length),
+    )
+      .then((d) => {
+        setItems((prev) => [...(prev ?? []), ...d.items]);
+        setHasMore(d.has_more === true);
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoadingMore(false));
+  }, [buildUrl, items, loadingMore]);
 
   useEffect(() => {
     if (authenticated) load();
   }, [authenticated, load]);
 
-  const filtered = useMemo(() => {
-    if (!items) return null;
-    const q = query.trim().toLowerCase();
-    return items.filter((item) => {
-      if (criticality === "critical" && !item.has_open_alert) return false;
-      if (state !== "all" && item.loop_state !== state) return false;
-      if (q) {
-        const hay =
-          `${item.patient.given_name} ${item.patient.family_name} ${item.patient.identifier}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [items, criticality, state, query]);
+  const filtered = items;
 
   const hasFilters = criticality !== "all" || state !== "all" || query !== "";
 
@@ -228,6 +255,17 @@ function ResultsContent() {
                 </li>
               ))}
             </ul>
+            {hasMore ? (
+              <p style={{ textAlign: "center", marginBottom: 0 }}>
+                <button
+                  className="secondary"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? t(lang, "loading") : t(lang, "loadMore")}
+                </button>
+              </p>
+            ) : null}
           </>
         )}
       </div>
