@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/service-requests/:id/notify", post(loops::notify))
         .route("/api/v1/service-requests/:id/close", post(loops::close))
         .route("/api/v1/worklist", get(loops::worklist))
+        .route("/api/v1/worklist/summary", get(loops::worklist_summary))
         .route("/api/v1/lab/results", post(lab::ingest_result))
         .route("/api/v1/ai-artifacts/:id/review", post(ai::review_artifact))
         .route("/api/v1/consents", post(consent::set_consent))

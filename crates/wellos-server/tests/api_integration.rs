@@ -1688,3 +1688,1046 @@ async fn patient_search_query_length_is_bounded() {
     assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"]["code"], "validation_failed");
 }
+
+#[tokio::test]
+async fn worklist_filters_apply_before_row_cap() {
+    let (state, _) = test_state().await;
+    // Copy tenant/facility context from a service request already visible to
+    // dr.garcia so every inserted row falls inside the caller's scope.
+    let (st, base) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist",
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{base}");
+    let seed_sr: uuid::Uuid = base["items"][0]["id"].as_str().unwrap().parse().unwrap();
+    let (tenant_id, requester_id, template_patient): (uuid::Uuid, uuid::Uuid, uuid::Uuid) =
+        sqlx::query_as(
+            "SELECT tenant_id, requester_id, patient_id FROM service_requests WHERE id = $1",
+        )
+        .bind(seed_sr)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let (facility_id,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT facility_id FROM patients WHERE id = $1")
+            .bind(template_patient)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+
+    // A dedicated patient with one old open result that a bounded worklist
+    // would otherwise hide behind newer rows.
+    let family = uniq("Backlog");
+    let patient_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO patients (id, tenant_id, facility_id, family_name, given_name, birth_date, sex, identifier)
+         VALUES ($1,$2,$3,$4,'Cap','1970-01-01','female',$5)",
+    )
+    .bind(patient_id)
+    .bind(tenant_id)
+    .bind(facility_id)
+    .bind(&family)
+    .bind(uniq("SYN-CAP"))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let encounter_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id, status, started_at)
+         VALUES ($1,$2,$3,$4,$5,'in_progress', now() - interval '30 days')",
+    )
+    .bind(encounter_id)
+    .bind(tenant_id)
+    .bind(facility_id)
+    .bind(patient_id)
+    .bind(requester_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let old_sr = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO service_requests (id, tenant_id, encounter_id, patient_id, requester_id,
+                                       code_loinc, display, loop_state, version, created_at)
+         VALUES ($1,$2,$3,$4,$5,'2345-7','Glucose [Mass/volume] in Serum','received',2,
+                 now() - interval '30 days')",
+    )
+    .bind(old_sr)
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .bind(patient_id)
+    .bind(requester_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    // An old result that is already critical before paging starts: despite
+    // hundreds of newer routine rows, it must surface on the first page.
+    let crit_sr = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO service_requests (id, tenant_id, encounter_id, patient_id, requester_id,
+                                       code_loinc, display, loop_state, version, created_at)
+         VALUES ($1,$2,$3,$4,$5,'2823-3','Potassium [Moles/volume] in Serum','received',2,
+                 now() - interval '2 days')",
+    )
+    .bind(crit_sr)
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .bind(patient_id)
+    .bind(requester_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let crit_obs = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO observations (id, tenant_id, service_request_id, patient_id, code_loinc,
+                                   value_num, unit, status, source_system, idempotency_key,
+                                   effective_at, received_at)
+         VALUES ($1,$2,$3,$4,'2823-3',7.4,'mmol/L','final','fake-lab',$5, now(), now())",
+    )
+    .bind(crit_obs)
+    .bind(tenant_id)
+    .bind(crit_sr)
+    .bind(patient_id)
+    .bind(uniq("crit-old-key"))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO alerts (id, tenant_id, patient_id, observation_id, severity, message, status)
+         VALUES ($1,$2,$3,$4,'critical','Critical potassium 7.4 mmol/L','open')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(patient_id)
+    .bind(crit_obs)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    // A routine row beyond the first page whose critical alert is written by
+    // a transaction that starts before the first page is fetched and commits
+    // only afterwards (the straddling-transaction race): its snapshot
+    // priority must stay routine on every page so it is neither skipped nor
+    // repeated.
+    let straddle_sr = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO service_requests (id, tenant_id, encounter_id, patient_id, requester_id,
+                                       code_loinc, display, loop_state, version, created_at)
+         VALUES ($1,$2,$3,$4,$5,'2823-3','Potassium [Moles/volume] in Serum','received',2,
+                 now() - interval '90 minutes')",
+    )
+    .bind(straddle_sr)
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .bind(patient_id)
+    .bind(requester_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    // A routine row destined for later pages that will turn critical
+    // between page fetches.
+    let promoted_sr = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO service_requests (id, tenant_id, encounter_id, patient_id, requester_id,
+                                       code_loinc, display, loop_state, version, created_at)
+         VALUES ($1,$2,$3,$4,$5,'2823-3','Potassium [Moles/volume] in Serum','received',2,
+                 now() - interval '1 hour')",
+    )
+    .bind(promoted_sr)
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .bind(patient_id)
+    .bind(requester_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    // More routine, newer rows than the API's row cap.
+    for _ in 0..210 {
+        sqlx::query(
+            "INSERT INTO service_requests (id, tenant_id, encounter_id, patient_id, requester_id,
+                                           code_loinc, display, loop_state, version, created_at)
+             VALUES ($1,$2,$3,$4,$5,'2823-3','Potassium [Moles/volume] in Serum','ordered',1, now())",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(tenant_id)
+        .bind(encounter_id)
+        .bind(template_patient)
+        .bind(requester_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    }
+
+    // Open the straddling alert transaction before the first page is
+    // fetched; it commits only after the first page (and its snapshot) is
+    // taken.
+    let mut straddle_tx = state.pool.begin().await.unwrap();
+    let straddle_obs = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO observations (id, tenant_id, service_request_id, patient_id, code_loinc,
+                                   value_num, unit, status, source_system, idempotency_key,
+                                   effective_at, received_at)
+         VALUES ($1,$2,$3,$4,'2823-3',7.1,'mmol/L','final','fake-lab',$5, now(), now())",
+    )
+    .bind(straddle_obs)
+    .bind(tenant_id)
+    .bind(straddle_sr)
+    .bind(patient_id)
+    .bind(uniq("straddle-key"))
+    .execute(&mut *straddle_tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO alerts (id, tenant_id, patient_id, observation_id, severity, message, status)
+         VALUES ($1,$2,$3,$4,'critical','Critical potassium 7.1 mmol/L','open')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(patient_id)
+    .bind(straddle_obs)
+    .execute(&mut *straddle_tx)
+    .await
+    .unwrap();
+
+    // Unfiltered, the old routine row is buried behind the cap.
+    let (st, unfiltered) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist",
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(unfiltered["items"].as_array().unwrap().len(), 200);
+    assert_eq!(unfiltered["has_more"], json!(true));
+    assert!(
+        !unfiltered["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == json!(old_sr)),
+        "old row should be beyond the first page"
+    );
+    // Priority-first: the old critical row surfaces on the first page
+    // despite more than a full page of newer routine rows.
+    assert!(
+        unfiltered["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == json!(crit_sr)),
+        "old critical result must surface on the first page"
+    );
+    // The straddling transaction commits only now, after the first page's
+    // snapshot was captured.
+    straddle_tx.commit().await.unwrap();
+    // After the first page is fetched, the unseen routine row becomes
+    // critical (e.g. an amendment). The snapshot-stable keyset ordering must
+    // still surface it exactly once on a later page.
+    let obs_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO observations (id, tenant_id, service_request_id, patient_id, code_loinc,
+                                   value_num, unit, status, source_system, idempotency_key,
+                                   effective_at, received_at)
+         VALUES ($1,$2,$3,$4,'2823-3',7.2,'mmol/L','final','fake-lab',$5, now(), now())",
+    )
+    .bind(obs_id)
+    .bind(tenant_id)
+    .bind(promoted_sr)
+    .bind(patient_id)
+    .bind(uniq("promoted-key"))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO alerts (id, tenant_id, patient_id, observation_id, severity, message, status)
+         VALUES ($1,$2,$3,$4,'critical','Critical potassium 7.2 mmol/L','open')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(patient_id)
+    .bind(obs_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    // Cursor paging reaches the old row even without filters, with no row
+    // skipped or repeated across pages.
+    let mut cursor = unfiltered["next_cursor"].as_str().unwrap().to_string();
+    let mut seen: std::collections::HashSet<String> = unfiltered["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    let mut found_via_paging = false;
+    let mut found_promoted = false;
+    let mut found_straddle = false;
+    loop {
+        let (st, page) = call(
+            &state,
+            "GET",
+            &format!("/api/v1/worklist?cursor={cursor}"),
+            "dev-dr.garcia",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{page}");
+        for item in page["items"].as_array().unwrap() {
+            let id = item["id"].as_str().unwrap().to_string();
+            assert!(seen.insert(id), "cursor paging repeated a row: {item}");
+            if item["id"] == json!(old_sr) {
+                found_via_paging = true;
+            }
+            if item["id"] == json!(promoted_sr) {
+                found_promoted = true;
+                assert_eq!(item["has_open_alert"], json!(true), "{item}");
+            }
+            if item["id"] == json!(straddle_sr) {
+                found_straddle = true;
+                assert_eq!(item["has_open_alert"], json!(true), "{item}");
+            }
+        }
+        // A row closing between page fetches must not shift later pages:
+        // close one first-page row after fetching each page.
+        if let Some(open_id) = seen.iter().next().cloned() {
+            sqlx::query(
+                "UPDATE service_requests SET loop_state = 'closed'
+                 WHERE id = $1 AND loop_state <> 'closed'
+                   AND id <> $2 AND id <> $3 AND id <> $4 AND id <> $5",
+            )
+            .bind(open_id.parse::<uuid::Uuid>().unwrap())
+            .bind(old_sr)
+            .bind(promoted_sr)
+            .bind(crit_sr)
+            .bind(straddle_sr)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        }
+        if found_via_paging || page["has_more"] != json!(true) {
+            break;
+        }
+        cursor = page["next_cursor"].as_str().unwrap().to_string();
+    }
+    assert!(
+        found_via_paging,
+        "cursor paging must reach every open result even when rows close between fetches"
+    );
+    assert!(
+        found_promoted,
+        "a row turning critical between page fetches must still appear on a later page"
+    );
+    assert!(
+        found_straddle,
+        "an alert transaction straddling the first page must not skip its row"
+    );
+    let (st, _) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist?cursor=not-a-cursor",
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // A patient query filter is applied in SQL, so the old row is reachable.
+    let (st, by_query) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/worklist?query={family}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{by_query}");
+    assert!(
+        by_query["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == json!(old_sr)),
+        "{by_query}"
+    );
+
+    // The displayed order ("Given Family", as shown in the UI) matches too.
+    let (st, by_display_order) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/worklist?query=Cap%20{family}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{by_display_order}");
+    assert!(
+        by_display_order["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == json!(old_sr)),
+        "{by_display_order}"
+    );
+
+    // A workflow-state filter also reaches it.
+    let (st, by_state) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist?state=received",
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    for item in by_state["items"].as_array().unwrap() {
+        assert_eq!(item["loop_state"], "received");
+    }
+
+    // Criticality filter returns only rows with open alerts.
+    let (st, by_critical) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist?critical=true",
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    for item in by_critical["items"].as_array().unwrap() {
+        assert_eq!(item["has_open_alert"], json!(true));
+    }
+
+    // Unknown states are rejected, and `closed` is not a worklist state.
+    for bad in ["closed", "bogus"] {
+        let (st, _) = call(
+            &state,
+            "GET",
+            &format!("/api/v1/worklist?state={bad}"),
+            "dev-dr.garcia",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "state {bad}");
+    }
+}
+
+#[tokio::test]
+async fn tenant_meta_reports_facility_specific_capabilities() {
+    let (state, _) = test_state().await;
+    // Registration staff: can_register only in explicitly assigned facilities,
+    // never clinical capability.
+    let (st, meta) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{meta}");
+    let facilities = meta["facilities"].as_array().unwrap();
+    let (rid, tid): (uuid::Uuid, uuid::Uuid) =
+        sqlx::query_as("SELECT id, tenant_id FROM users WHERE username = 'reg.rivera'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let assigned: Vec<(Option<uuid::Uuid>,)> = sqlx::query_as(
+        "SELECT facility_id FROM role_assignments
+         WHERE tenant_id = $1 AND user_id = $2 AND role = 'registration_staff'",
+    )
+    .bind(tid)
+    .bind(rid)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    let assigned: Vec<uuid::Uuid> = assigned.into_iter().filter_map(|(f,)| f).collect();
+    for f in facilities {
+        let id: uuid::Uuid = f["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            f["can_register"],
+            json!(assigned.contains(&id)),
+            "registration capability must be facility-specific: {f}"
+        );
+        assert_eq!(f["can_act_clinically"], json!(false), "{f}");
+    }
+
+    // Physician: clinical capability only in assigned facilities, no
+    // registration capability anywhere.
+    let (st, meta) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let facilities = meta["facilities"].as_array().unwrap();
+    assert!(facilities
+        .iter()
+        .any(|f| f["can_act_clinically"] == json!(true)));
+    assert!(facilities.iter().all(|f| f["can_register"] == json!(false)));
+    // A physician assigned to a single facility (dr.annex, North Annex only)
+    // must not report clinical capability in the others.
+    let (st, meta) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-dr.annex",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{meta}");
+    let facilities = meta["facilities"].as_array().unwrap();
+    assert!(facilities.len() > 1, "{meta}");
+    assert!(
+        facilities
+            .iter()
+            .any(|f| f["can_act_clinically"] == json!(true)),
+        "{meta}"
+    );
+    assert!(
+        facilities
+            .iter()
+            .any(|f| f["can_act_clinically"] == json!(false)),
+        "clinical capability must not leak to unassigned facilities: {meta}"
+    );
+
+    // An ordinary clinical role with a NULL facility assignment gains no
+    // facility capability (NULL is tenant-wide only for allowlisted roles).
+    let username = uniq("dr.null");
+    let uid = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, username, display_name) VALUES ($1,$2,$3,'Null Facility Physician')",
+    )
+    .bind(uid)
+    .bind(tid)
+    .bind(&username)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id) VALUES ($1,$2,$3,'physician',NULL)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tid)
+    .bind(uid)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let (st, meta) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        &format!("dev-{username}"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{meta}");
+    for f in meta["facilities"].as_array().unwrap() {
+        assert_eq!(f["can_act_clinically"], json!(false), "{f}");
+        assert_eq!(f["accessible"], json!(false), "{f}");
+    }
+}
+
+#[tokio::test]
+async fn seeded_ai_artifacts_use_governed_autonomy_level() {
+    let (state, _) = test_state().await;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT autonomy_level FROM ai_artifacts WHERE artifact_type = 'result_summary'",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert!(!rows.is_empty());
+    for (level,) in rows {
+        assert_eq!(level, "A2", "result summaries are governed at A2");
+    }
+}
+
+#[tokio::test]
+async fn physician_can_open_chart_after_starting_encounter_from_search() {
+    let (state, _) = test_state().await;
+    // Register a brand-new patient (no prior encounters) as registration staff.
+    let identifier = uniq("SYN-ENC");
+    let (facility_id,): (uuid::Uuid,) = sqlx::query_as(
+        "SELECT ra.facility_id FROM role_assignments ra
+         JOIN users u ON u.id = ra.user_id
+         WHERE u.username = 'reg.rivera' AND ra.role = 'registration_staff'
+           AND ra.facility_id IS NOT NULL LIMIT 1",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    let (st, created) = call(
+        &state,
+        "POST",
+        "/api/v1/patients",
+        "dev-reg.rivera",
+        Some(json!({
+            "facility_id": facility_id,
+            "family_name": "Fresh",
+            "given_name": "Encounterless",
+            "birth_date": "1982-03-04",
+            "sex": "male",
+            "identifier": identifier,
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{created}");
+    let patient_id = created["id"].as_str().unwrap().to_string();
+
+    // A physician without a care relationship cannot open the chart yet.
+    let (st, _) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{patient_id}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Search reflects that: the display-only capability is false for the
+    // physician, but true for registration staff (facility-scoped reads).
+    let (st, hits) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients?query={identifier}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{hits}");
+    let hit = hits["patients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(patient_id))
+        .expect("registered patient in physician search results");
+    assert_eq!(hit["can_open_chart"], json!(false), "{hit}");
+    let (st, hits) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients?query={identifier}"),
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{hits}");
+    let hit = hits["patients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(patient_id))
+        .expect("registered patient in registration search results");
+    assert_eq!(hit["can_open_chart"], json!(true), "{hit}");
+
+    // Starting an encounter (the search-result action) establishes it.
+    let (st, enc) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        "dev-dr.garcia",
+        Some(json!({ "patient_id": patient_id })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{enc}");
+    let (st, chart) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{patient_id}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{chart}");
+
+    // With the relationship established the search capability flips to true.
+    let (st, hits) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients?query={identifier}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{hits}");
+    let hit = hits["patients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(patient_id))
+        .expect("patient in physician search results after encounter");
+    assert_eq!(hit["can_open_chart"], json!(true), "{hit}");
+}
+
+#[tokio::test]
+async fn service_request_requires_own_active_encounter() {
+    let (state, _) = test_state().await;
+    let (st, meta) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let facility = meta["facilities"][0]["id"].as_str().unwrap().to_string();
+    let (st, patient) = call(
+        &state,
+        "POST",
+        "/api/v1/patients",
+        "dev-reg.rivera",
+        Some(json!({
+            "facility_id": facility,
+            "family_name": "Ordering",
+            "given_name": "Guard",
+            "birth_date": "1970-01-15",
+            "sex": "female",
+            "identifier": uniq("MRN-ORD"),
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{patient}");
+    let patient_id = patient["id"].as_str().unwrap().to_string();
+
+    // A completed encounter is not a valid ordering context.
+    let (st, enc) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        "dev-dr.garcia",
+        Some(json!({ "patient_id": patient_id })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{enc}");
+    let completed_enc = enc["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE encounters SET status = 'completed' WHERE id = $1::uuid")
+        .bind(&completed_enc)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/v1/service-requests",
+        "dev-dr.garcia",
+        Some(json!({
+            "encounter_id": completed_enc,
+            "code_loinc": "2823-3",
+            "display": "Potassium",
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"]["code"],
+        json!("encounter_not_active"),
+        "{body}"
+    );
+
+    // Another practitioner's active encounter is not a valid ordering
+    // context either, even for a physician assigned to the same facility.
+    let (st, enc) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        "dev-dr.garcia",
+        Some(json!({ "patient_id": patient_id })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{enc}");
+    let garcia_enc = enc["id"].as_str().unwrap().to_string();
+    let other = create_same_facility_physician(&state, &facility).await;
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/v1/service-requests",
+        &format!("dev-{other}"),
+        Some(json!({
+            "encounter_id": garcia_enc,
+            "code_loinc": "2823-3",
+            "display": "Potassium",
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+
+    // The encounter's own practitioner can still order on it.
+    let (st, sr) = call(
+        &state,
+        "POST",
+        "/api/v1/service-requests",
+        "dev-dr.garcia",
+        Some(json!({
+            "encounter_id": garcia_enc,
+            "code_loinc": "2823-3",
+            "display": "Potassium",
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{sr}");
+}
+
+#[tokio::test]
+async fn search_encounter_capability_is_facility_specific() {
+    let (state, _) = test_state().await;
+    let (st, meta) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let facility_a = meta["facilities"][0]["id"].as_str().unwrap().to_string();
+    let (tenant_id,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT tenant_id FROM users WHERE username = 'dr.garcia'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let (facility_b,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT id FROM facilities WHERE tenant_id = $1 AND id <> $2::uuid LIMIT 1")
+            .bind(tenant_id)
+            .bind(&facility_a)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+
+    // A mixed-role user: clinical rights at facility A, search-only
+    // (registration) rights at facility B.
+    let username = create_same_facility_physician(&state, &facility_a).await;
+    let (uid,): (uuid::Uuid,) = sqlx::query_as("SELECT id FROM users WHERE username = $1")
+        .bind(&username)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id)
+         VALUES ($1,$2,$3,'registration_staff',$4)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(uid)
+    .bind(facility_b)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let id_a = uniq("MRN-FACA");
+    let id_b = uniq("MRN-FACB");
+    let (st, pat_a) = call(
+        &state,
+        "POST",
+        "/api/v1/patients",
+        &format!("dev-{username}"),
+        Some(json!({
+            "facility_id": facility_a,
+            "family_name": "Mixed",
+            "given_name": "AtHome",
+            "birth_date": "1980-05-05",
+            "sex": "female",
+            "identifier": id_a,
+        })),
+        &[],
+    )
+    .await;
+    // Registration at facility A may be denied for this user (they only
+    // register at B); fall back to reg.rivera whose facility is A.
+    let pat_a = if st == StatusCode::OK {
+        pat_a
+    } else {
+        let (st, p) = call(
+            &state,
+            "POST",
+            "/api/v1/patients",
+            "dev-reg.rivera",
+            Some(json!({
+                "facility_id": facility_a,
+                "family_name": "Mixed",
+                "given_name": "AtHome",
+                "birth_date": "1980-05-05",
+                "sex": "female",
+                "identifier": id_a,
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        p
+    };
+    let (st, pat_b) = call(
+        &state,
+        "POST",
+        "/api/v1/patients",
+        &format!("dev-{username}"),
+        Some(json!({
+            "facility_id": facility_b,
+            "family_name": "Mixed",
+            "given_name": "Elsewhere",
+            "birth_date": "1981-06-06",
+            "sex": "male",
+            "identifier": id_b,
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{pat_b}");
+
+    // Facility A patient: encounter capability true; facility B: false.
+    for (identifier, patient, expected) in [(&id_a, &pat_a, true), (&id_b, &pat_b, false)] {
+        let (st, hits) = call(
+            &state,
+            "GET",
+            &format!("/api/v1/patients?query={identifier}"),
+            &format!("dev-{username}"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{hits}");
+        let hit = hits["patients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == patient["id"])
+            .expect("patient visible in mixed-role search");
+        assert_eq!(hit["can_start_encounter"], json!(expected), "{hit}");
+    }
+
+    // The display hint matches the backend: starting an encounter at the
+    // search-only facility is denied.
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        &format!("dev-{username}"),
+        Some(json!({ "patient_id": pat_b["id"] })),
+        &[],
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn worklist_detail_capabilities_match_backend_policy() {
+    let (state, _) = test_state().await;
+    let lp = run_to_received(&state, 7.1).await;
+
+    let find_item = |body: &serde_json::Value| -> Option<serde_json::Value> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == json!(lp.service_request_id))
+            .cloned()
+    };
+
+    // The ordering physician has a care relationship: detail is reachable
+    // and the transition capability is granted.
+    let (st, body) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist",
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let item = find_item(&body).expect("ordering physician sees the row");
+    assert_eq!(item["can_open_detail"], json!(true), "{item}");
+    let (st, detail) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/service-requests/{}", lp.service_request_id),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{detail}");
+    assert_eq!(detail["capabilities"]["review"], json!(true), "{detail}");
+
+    // A laboratory professional reads the worklist but cannot open the
+    // patient-detail view: the hint is false and the endpoint denies.
+    let (st, body) = call(&state, "GET", "/api/v1/worklist", "dev-lab.chen", None, &[]).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let item = find_item(&body).expect("laboratory professional sees the row");
+    assert_eq!(item["can_open_detail"], json!(false), "{item}");
+    let (st, body) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/service-requests/{}", lp.service_request_id),
+        "dev-lab.chen",
+        None,
+        &[],
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "{body}");
+}
+
+/// Create a fresh physician assigned to the given facility.
+async fn create_same_facility_physician(state: &AppState, facility_id: &str) -> String {
+    let username = uniq("dr.other");
+    let (tenant_id,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT tenant_id FROM users WHERE username = 'dr.garcia'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let uid = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, username, display_name) VALUES ($1,$2,$3,'Other Test Physician')",
+    )
+    .bind(uid)
+    .bind(tenant_id)
+    .bind(&username)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id) VALUES ($1,$2,$3,'physician',$4::uuid)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(uid)
+    .bind(facility_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    username
+}

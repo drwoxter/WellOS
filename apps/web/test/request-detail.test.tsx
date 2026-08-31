@@ -1,0 +1,239 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import RequestDetailPage from "@/app/requests/[id]/page";
+import { SessionProvider } from "@/lib/session";
+
+const SR_ID = "55555555-5555-5555-5555-555555555555";
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  usePathname: () => `/requests/${SR_ID}`,
+  useParams: () => ({ id: SR_ID }),
+}));
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function detail(
+  loopState: string,
+  capabilities = { review: true, notify: true, close: true },
+) {
+  return {
+    service_request: {
+      id: SR_ID,
+      display: "Potassium [Moles/volume] in Serum",
+      code_loinc: "2823-3",
+      loop_state: loopState,
+      version: 2,
+      created_at: "2026-08-01T09:00:00Z",
+      patient: {
+        id: "p1",
+        family_name: "Demopatient",
+        given_name: "Carlos",
+        identifier: "SYN-0001",
+      },
+    },
+    observations: [
+      {
+        id: "o1",
+        value: "6.9",
+        unit: "mmol/L",
+        reference_range: "3.5-5.1",
+        status: "final",
+        amends: null,
+        effective_at: "2026-08-01T09:30:00Z",
+        received_at: "2026-08-01T10:15:00Z",
+      },
+    ],
+    rule_evaluations: [],
+    ai_artifacts: [],
+    follow_up_tasks: [],
+    alerts: [
+      {
+        id: "a1",
+        severity: "critical",
+        message: "Critical potassium 6.9 mmol/L",
+        status: "open",
+      },
+    ],
+    data_quality_issues: [],
+    notes: [],
+    capabilities,
+  };
+}
+
+function setup(
+  loopState: string,
+  capabilities = { review: true, notify: true, close: true },
+) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/session")
+        return Promise.resolve(jsonResponse({ authenticated: true }));
+      if (url === `/api/v1/service-requests/${SR_ID}`)
+        return Promise.resolve(jsonResponse(detail(loopState, capabilities)));
+      if (url === "/api/v1/meta/tenant")
+        return Promise.resolve(
+          jsonResponse({
+            tenant: { id: "t", name: "Demo Tenant", cell: "eu" },
+            user: {
+              username: "dr.garcia",
+              display_name: "Dr. García",
+              roles: ["physician"],
+            },
+            facilities: [
+              {
+                id: "f",
+                name: "Central Hospital",
+                accessible: true,
+                can_register: false,
+                can_act_clinically: true,
+              },
+            ],
+          }),
+        );
+      return Promise.resolve(jsonResponse({}));
+    }),
+  );
+  render(
+    <SessionProvider>
+      <RequestDetailPage />
+    </SessionProvider>,
+  );
+}
+
+describe("result detail critical banner", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("asks for clinician review while the result awaits review", async () => {
+    setup("received");
+    expect(
+      await screen.findByText(/Critical result — requires clinician review/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows follow-up wording once the result is reviewed", async () => {
+    setup("reviewed");
+    expect(
+      await screen.findByText(
+        /Critical result — reviewed, follow-up in progress/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Critical result — requires clinician review/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides the transition action when the server denies the capability", async () => {
+    setup("received", { review: false, notify: false, close: false });
+    await screen.findByText(/Critical result — requires clinician review/);
+    expect(
+      screen.queryByRole("button", { name: "Mark reviewed" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Next action")).not.toBeInTheDocument();
+  });
+
+  it("offers the transition when the server grants the capability", async () => {
+    setup("received");
+    await screen.findByText(/Critical result — requires clinician review/);
+    expect(await screen.findByText("Next action")).toBeInTheDocument();
+  });
+
+  it("labels observation collection and receipt times separately", async () => {
+    setup("received");
+    await screen.findByText(/Critical result — requires clinician review/);
+    expect(
+      screen.getByRole("columnheader", { name: "Collected" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "Received" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Recorded" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides the completed action and offers retry when the post-transition refresh fails", async () => {
+    let detailCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/session")
+          return Promise.resolve(jsonResponse({ authenticated: true }));
+        if (url === "/api/v1/meta/tenant")
+          return Promise.resolve(
+            jsonResponse({
+              tenant: { id: "t", name: "Demo Tenant", cell: "eu" },
+              user: {
+                username: "dr.garcia",
+                display_name: "Dr. García",
+                roles: ["physician"],
+              },
+              facilities: [
+                {
+                  id: "f",
+                  name: "Central Hospital",
+                  accessible: true,
+                  can_register: false,
+                  can_act_clinically: true,
+                },
+              ],
+            }),
+          );
+        if (
+          url === `/api/v1/service-requests/${SR_ID}/review` &&
+          init?.method === "POST"
+        )
+          return Promise.resolve(jsonResponse({ ok: true }));
+        if (url === `/api/v1/service-requests/${SR_ID}`) {
+          detailCalls += 1;
+          return detailCalls === 1
+            ? Promise.resolve(jsonResponse(detail("received")))
+            : Promise.resolve(jsonResponse({ error: "boom" }, 500));
+        }
+        return Promise.resolve(jsonResponse({}));
+      }),
+    );
+    render(
+      <SessionProvider>
+        <RequestDetailPage />
+      </SessionProvider>,
+    );
+    await screen.findByText("Next action");
+    fireEvent.change(screen.getByLabelText("Workflow notes"), {
+      target: { value: "Reviewed with attending" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Mark reviewed" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    expect(
+      await screen.findByText(/could not be refreshed/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Mark reviewed" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the follow-up wording after patient notification", async () => {
+    setup("notified");
+    expect(
+      await screen.findByText(
+        /Critical result — reviewed, follow-up in progress/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Critical result — requires clinician review/),
+    ).not.toBeInTheDocument();
+  });
+});

@@ -1,4 +1,4 @@
-.PHONY: help up down migrate seed server web fmt lint test test-integration e2e check
+.PHONY: help up down migrate seed reset server web fmt lint test test-integration e2e check
 
 help:
 	@grep -E '^[a-z-]+:' Makefile | sed 's/:.*//'
@@ -14,6 +14,11 @@ migrate: ## run migrations from empty database (idempotent)
 
 seed: ## seed synthetic (non-PHI) demo data
 	cargo run -p wellos-server --bin seed
+
+reset: ## drop all data and reseed the synthetic demo dataset
+	docker compose -f infra/docker-compose.yml exec postgres \
+		psql -U wellos -d wellos -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+	$(MAKE) migrate seed
 
 server: ## run the API server (loads .env)
 	set -a; . ./.env; set +a; cargo run -p wellos-server

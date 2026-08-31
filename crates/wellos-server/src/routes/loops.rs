@@ -3,7 +3,7 @@
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
-use crate::policy::{actions, facility_scope, ResourceCtx};
+use crate::policy::{actions, facility_scope, roles, ResourceCtx};
 use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -137,7 +137,7 @@ async fn transition(
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE alerts SET status='resolved'
+            "UPDATE alerts SET status='resolved', closed_at=now()
              WHERE tenant_id=$1 AND status='open'
                AND observation_id IN (SELECT id FROM observations WHERE service_request_id=$2)",
         )
@@ -240,7 +240,318 @@ pub async fn close(
     .await
 }
 
+#[derive(Deserialize)]
+pub struct WorklistQuery {
+    /// Only items with an open critical alert.
+    pub critical: Option<bool>,
+    /// Restrict to one workflow state (`ordered`..`notified`).
+    pub state: Option<String>,
+    /// Case-insensitive patient name/identifier match.
+    pub query: Option<String>,
+    /// Keyset cursor returned as `next_cursor` by the previous page; each
+    /// page holds up to [`WORKLIST_PAGE_SIZE`] rows.
+    pub cursor: Option<String>,
+}
+
+/// Rows returned per worklist page. Older rows stay reachable through the
+/// `cursor` parameter rather than being cut off by a fixed cap.
+pub const WORKLIST_PAGE_SIZE: i64 = 200;
+
+/// Keyset cursor over the ordering tuple
+/// `(snapshot priority DESC, created_at DESC, id DESC)`.
+///
+/// Priority (an open critical alert) is mutable, so ordering by the live
+/// value would let rows cross the cursor boundary between page fetches and
+/// be skipped or repeated. Instead the first page captures an MVCC snapshot
+/// (`pg_current_snapshot()`) plus its instant, both carried in the cursor,
+/// and priority is evaluated *as of that snapshot*: an alert counts only if
+/// its row version was already committed and visible in the snapshot
+/// (`pg_visible_in_snapshot` on `xmin`) and had not been closed by then
+/// (monotonic `closed_at`). The visibility check is decided by transaction
+/// commit order, so a write transaction straddling the first page cannot
+/// make later pages reconstruct a different priority than any page computed:
+/// the expression yields the same value for a given alert row version on
+/// every page, and no row can be skipped. The one residual reordering is an
+/// alert row *updated* (closed) mid-sequence — its new version is invisible
+/// in the snapshot, so the result demotes to its routine position and, if it
+/// was already emitted in the priority section, can be returned twice; the
+/// client deduplicates by id. A row that turns critical after the snapshot
+/// still appears (in its routine position) and moves to the top on the next
+/// refresh; the live `has_open_alert` value is returned per row for display.
+struct WorklistCursor {
+    snapshot: String,
+    snapshot_at: chrono::DateTime<chrono::Utc>,
+    priority: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    id: Uuid,
+}
+
+/// Whether the request had an open critical alert as of the snapshot: the
+/// alert row version was visible in the MVCC snapshot (`$3`) and had not
+/// been closed at the snapshot instant (`$4`).
+const SNAP_PRIORITY_EXPR: &str = "CASE WHEN EXISTS (
+        SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
+        WHERE o.service_request_id = sr.id
+          AND pg_visible_in_snapshot(a.xmin::text::xid8, $3::pg_snapshot)
+          AND (a.closed_at IS NULL OR a.closed_at > $4)
+    ) THEN 1 ELSE 0 END";
+
+/// `pg_snapshot` textual form: `xmin:xmax:xip1,...` (digits only).
+fn valid_pg_snapshot(raw: &str) -> bool {
+    let mut parts = raw.split(':');
+    let (Some(xmin), Some(xmax), Some(xip), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    all_digits(xmin) && all_digits(xmax) && (xip.is_empty() || xip.split(',').all(all_digits))
+}
+
+impl WorklistCursor {
+    /// URL-safe encoding:
+    /// `{pg_snapshot}.{snapshot_micros}.{priority}.{epoch_micros}.{uuid}`
+    /// (the `pg_snapshot` text never contains `.`).
+    fn encode(&self) -> String {
+        format!(
+            "{}.{}.{}.{}.{}",
+            self.snapshot,
+            self.snapshot_at.timestamp_micros(),
+            i32::from(self.priority),
+            self.created_at.timestamp_micros(),
+            self.id
+        )
+    }
+
+    fn decode(raw: &str) -> Option<Self> {
+        let mut parts = raw.splitn(5, '.');
+        let snapshot = parts.next()?.to_string();
+        if !valid_pg_snapshot(&snapshot) {
+            return None;
+        }
+        let snap_micros: i64 = parts.next()?.parse().ok()?;
+        let snapshot_at = chrono::DateTime::from_timestamp_micros(snap_micros)?;
+        let priority = match parts.next()? {
+            "0" => false,
+            "1" => true,
+            _ => return None,
+        };
+        let micros: i64 = parts.next()?.parse().ok()?;
+        let created_at = chrono::DateTime::from_timestamp_micros(micros)?;
+        let id = Uuid::parse_str(parts.next()?).ok()?;
+        Some(Self {
+            snapshot,
+            snapshot_at,
+            priority,
+            created_at,
+            id,
+        })
+    }
+}
+
 pub async fn worklist(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    axum::extract::Query(params): axum::extract::Query<WorklistQuery>,
+) -> Result<Json<Value>, ApiError> {
+    guard(
+        &state,
+        &ctx,
+        actions::WORKLIST_READ,
+        "worklist",
+        Some(ResourceCtx {
+            tenant_id: ctx.tenant_id,
+            patient_id: None,
+            facility_id: None,
+        }),
+    )
+    .await?
+    .record_on_pool(&state, &ctx)
+    .await?;
+    let state_filter = match params.state.as_deref() {
+        None | Some("all") => None,
+        Some(s) => Some(
+            LoopState::parse(s)
+                .filter(|st| *st != LoopState::Closed)
+                .ok_or_else(|| ApiError::bad_request("invalid_state", "unknown workflow state"))?
+                .as_str()
+                .to_string(),
+        ),
+    };
+    let query_filter = params
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(|q| {
+            let escaped = q
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("%{escaped}%")
+        });
+    // The worklist is filtered to the caller's facility scope, resolved from
+    // trusted role assignments (tenant-wide only for allowlisted roles).
+    // Criticality/state/patient filters run in SQL before the row cap so a
+    // filtered view always covers every matching open result, not just the
+    // newest rows.
+    let scope = facility_scope(&ctx, actions::WORKLIST_READ);
+    if matches!(&scope, Some(ids) if ids.is_empty()) {
+        return Ok(Json(
+            json!({ "items": [], "has_more": false, "next_cursor": null }),
+        ));
+    }
+    let cursor =
+        match params.cursor.as_deref() {
+            None => None,
+            Some(raw) => Some(WorklistCursor::decode(raw).ok_or_else(|| {
+                ApiError::bad_request("invalid_cursor", "malformed worklist cursor")
+            })?),
+        };
+    // The first page fixes the MVCC snapshot and its instant; later pages
+    // reuse the ones carried in the cursor so the whole page sequence shares
+    // one stable priority ordering.
+    let (snapshot, snapshot_at) = match &cursor {
+        Some(c) => (c.snapshot.clone(), c.snapshot_at),
+        None => {
+            let row = sqlx::query("SELECT pg_current_snapshot()::text AS snap, now() AS at")
+                .fetch_one(&state.pool)
+                .await?;
+            (
+                row.get::<String, _>("snap"),
+                row.get::<chrono::DateTime<chrono::Utc>, _>("at"),
+            )
+        }
+    };
+    let mut sql = format!(
+        "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
+                p.family_name, p.given_name, p.identifier, p.facility_id,
+                {SNAP_PRIORITY_EXPR} AS snap_priority,
+                EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
+                        WHERE o.service_request_id = sr.id AND a.status = 'open') AS has_open_alert,
+                EXISTS (SELECT 1 FROM encounters e
+                        WHERE e.tenant_id = sr.tenant_id AND e.patient_id = p.id
+                          AND e.practitioner_id = $2) AS has_relationship
+         FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
+         WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'",
+    );
+    let mut arg = 4;
+    if scope.is_some() {
+        arg += 1;
+        sql.push_str(&format!(" AND p.facility_id = ANY(${arg})"));
+    }
+    if state_filter.is_some() {
+        arg += 1;
+        sql.push_str(&format!(" AND sr.loop_state = ${arg}"));
+    }
+    if params.critical == Some(true) {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
+                          WHERE o.service_request_id = sr.id AND a.status = 'open')",
+        );
+    }
+    if query_filter.is_some() {
+        arg += 1;
+        // Match both display orders ("Family Given" and "Given Family") so a
+        // name copied from the UI finds the row regardless of word order.
+        sql.push_str(&format!(
+            " AND ((p.family_name || ' ' || p.given_name || ' ' || p.identifier) ILIKE ${arg}
+                   OR (p.given_name || ' ' || p.family_name || ' ' || p.identifier) ILIKE ${arg})"
+        ));
+    }
+    if cursor.is_some() {
+        // Keyset predicate: strictly after the cursor tuple in the DESC
+        // ordering below (row-value comparison, all columns descending).
+        sql.push_str(&format!(
+            " AND ({SNAP_PRIORITY_EXPR}, sr.created_at, sr.id) < (${}, ${}, ${})",
+            arg + 1,
+            arg + 2,
+            arg + 3
+        ));
+    }
+    // Deterministic ordering (id tie-breaker) over columns that are stable
+    // for the snapshot instant, so pages never skip or repeat rows even when
+    // alert priority changes between fetches; one extra row detects whether
+    // more pages exist.
+    sql.push_str(&format!(
+        " ORDER BY snap_priority DESC, sr.created_at DESC, sr.id DESC LIMIT {}",
+        WORKLIST_PAGE_SIZE + 1
+    ));
+    let mut q = sqlx::query(&sql)
+        .bind(ctx.tenant_id)
+        .bind(ctx.user_id)
+        .bind(&snapshot)
+        .bind(snapshot_at);
+    if let Some(ids) = &scope {
+        q = q.bind(ids);
+    }
+    if let Some(s) = &state_filter {
+        q = q.bind(s);
+    }
+    if let Some(pat) = &query_filter {
+        q = q.bind(pat);
+    }
+    if let Some(c) = &cursor {
+        q = q.bind(i32::from(c.priority)).bind(c.created_at).bind(c.id);
+    }
+    let mut rows = q.fetch_all(&state.pool).await?;
+    let has_more = rows.len() as i64 > WORKLIST_PAGE_SIZE;
+    rows.truncate(WORKLIST_PAGE_SIZE as usize);
+    let next_cursor = if has_more {
+        rows.last().map(|r| {
+            WorklistCursor {
+                snapshot: snapshot.clone(),
+                snapshot_at,
+                priority: r.get::<i32, _>("snap_priority") == 1,
+                created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+                id: r.get::<Uuid, _>("id"),
+            }
+            .encode()
+        })
+    } else {
+        None
+    };
+    // Display-only hint mirroring the detail endpoint's PATIENT_READ policy
+    // (role grant at the result's facility; care relationship for physicians
+    // without an administrative role). The detail guard stays authoritative.
+    let read_scope = facility_scope(&ctx, actions::PATIENT_READ);
+    let read_needs_relationship =
+        ctx.has_role(roles::PHYSICIAN) && !ctx.has_role(roles::CLINICAL_ADMIN);
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let patient_facility: Uuid = r.get("facility_id");
+            let at_facility = match &read_scope {
+                None => true,
+                Some(ids) => ids.contains(&patient_facility),
+            };
+            let can_open_detail =
+                at_facility && (!read_needs_relationship || r.get::<bool, _>("has_relationship"));
+            json!({
+                "id": r.get::<Uuid,_>("id"),
+                "display": r.get::<String,_>("display"),
+                "code_loinc": r.get::<String,_>("code_loinc"),
+                "loop_state": r.get::<String,_>("loop_state"),
+                "version": r.get::<i64,_>("version"),
+                "created_at": r.get::<chrono::DateTime<chrono::Utc>,_>("created_at"),
+                "patient": {
+                    "family_name": r.get::<String,_>("family_name"),
+                    "given_name": r.get::<String,_>("given_name"),
+                    "identifier": r.get::<String,_>("identifier"),
+                },
+                "has_open_alert": r.get::<bool,_>("has_open_alert"),
+                "can_open_detail": can_open_detail,
+            })
+        })
+        .collect();
+    Ok(Json(
+        json!({ "items": items, "has_more": has_more, "next_cursor": next_cursor }),
+    ))
+}
+
+/// Aggregate counts backing the dashboard status cards. Same authorization
+/// and facility scoping as the worklist; returns only numbers.
+pub async fn worklist_summary(
     State(state): State<AppState>,
     ctx: AuthContext,
 ) -> Result<Json<Value>, ApiError> {
@@ -258,55 +569,51 @@ pub async fn worklist(
     .await?
     .record_on_pool(&state, &ctx)
     .await?;
-    // The worklist is filtered to the caller's facility scope, resolved from
-    // trusted role assignments (tenant-wide only for allowlisted roles).
     let scope = facility_scope(&ctx, actions::WORKLIST_READ);
-    const WORKLIST_SQL: &str =
-        "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
-                p.family_name, p.given_name, p.identifier,
-                EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
-                        WHERE o.service_request_id = sr.id AND a.status = 'open') AS has_open_alert
+    const SUMMARY_SQL: &str = "SELECT
+            COUNT(*) FILTER (WHERE sr.loop_state <> 'closed' AND EXISTS (
+                SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
+                WHERE o.service_request_id = sr.id AND a.status = 'open')) AS critical_open,
+            COUNT(*) FILTER (WHERE sr.loop_state = 'received') AS awaiting_review,
+            COUNT(*) FILTER (WHERE sr.loop_state = 'reviewed') AS awaiting_notification,
+            COUNT(*) FILTER (WHERE sr.loop_state = 'notified') AS awaiting_closure,
+            COUNT(*) FILTER (WHERE sr.loop_state = 'closed' AND EXISTS (
+                SELECT 1 FROM loop_notes n WHERE n.service_request_id = sr.id
+                    AND n.kind = 'closure'
+                    AND n.created_at > now() - interval '7 days')) AS recently_closed
          FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
-         WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'";
-    const WORKLIST_ORDER: &str = " ORDER BY has_open_alert DESC, sr.created_at DESC LIMIT 200";
-    let rows = match &scope {
+         WHERE sr.tenant_id = $1";
+    let row = match &scope {
         None => {
-            sqlx::query(&format!("{WORKLIST_SQL}{WORKLIST_ORDER}"))
+            sqlx::query(SUMMARY_SQL)
                 .bind(ctx.tenant_id)
-                .fetch_all(&state.pool)
+                .fetch_one(&state.pool)
                 .await?
         }
-        Some(ids) if ids.is_empty() => Vec::new(),
+        Some(ids) if ids.is_empty() => {
+            return Ok(Json(json!({
+                "critical_open": 0,
+                "awaiting_review": 0,
+                "awaiting_notification": 0,
+                "awaiting_closure": 0,
+                "recently_closed": 0,
+            })));
+        }
         Some(ids) => {
-            sqlx::query(&format!(
-                "{WORKLIST_SQL} AND p.facility_id = ANY($2){WORKLIST_ORDER}"
-            ))
-            .bind(ctx.tenant_id)
-            .bind(ids)
-            .fetch_all(&state.pool)
-            .await?
+            sqlx::query(&format!("{SUMMARY_SQL} AND p.facility_id = ANY($2)"))
+                .bind(ctx.tenant_id)
+                .bind(ids)
+                .fetch_one(&state.pool)
+                .await?
         }
     };
-    let items: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            json!({
-                "id": r.get::<Uuid,_>("id"),
-                "display": r.get::<String,_>("display"),
-                "code_loinc": r.get::<String,_>("code_loinc"),
-                "loop_state": r.get::<String,_>("loop_state"),
-                "version": r.get::<i64,_>("version"),
-                "created_at": r.get::<chrono::DateTime<chrono::Utc>,_>("created_at"),
-                "patient": {
-                    "family_name": r.get::<String,_>("family_name"),
-                    "given_name": r.get::<String,_>("given_name"),
-                    "identifier": r.get::<String,_>("identifier"),
-                },
-                "has_open_alert": r.get::<bool,_>("has_open_alert"),
-            })
-        })
-        .collect();
-    Ok(Json(json!({ "items": items })))
+    Ok(Json(json!({
+        "critical_open": row.get::<i64,_>("critical_open"),
+        "awaiting_review": row.get::<i64,_>("awaiting_review"),
+        "awaiting_notification": row.get::<i64,_>("awaiting_notification"),
+        "awaiting_closure": row.get::<i64,_>("awaiting_closure"),
+        "recently_closed": row.get::<i64,_>("recently_closed"),
+    })))
 }
 
 pub async fn detail(
@@ -338,6 +645,32 @@ pub async fn detail(
     .bind(id)
     .fetch_one(&state.pool)
     .await?;
+
+    // Display-only capability hints mirroring the central policy for the
+    // consequential loop transitions: role grant at this result's facility
+    // plus an established care relationship. The guards on the transition
+    // endpoints stay authoritative.
+    let (has_relationship,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM encounters
+         WHERE tenant_id = $1 AND patient_id = $2 AND practitioner_id = $3)",
+    )
+    .bind(sr.tenant_id)
+    .bind(sr.patient_id)
+    .bind(ctx.user_id)
+    .fetch_one(&state.pool)
+    .await?;
+    let can_transition = |action: &str| -> bool {
+        let at_facility = match facility_scope(&ctx, action) {
+            None => true,
+            Some(ids) => ids.contains(&sr.facility_id),
+        };
+        at_facility && has_relationship
+    };
+    let capabilities = json!({
+        "review": can_transition(actions::RESULT_REVIEW),
+        "notify": can_transition(actions::PATIENT_NOTIFY),
+        "close": can_transition(actions::LOOP_CLOSE),
+    });
 
     let observation_rows = sqlx::query(
         "SELECT id, code_loinc, value_num::text AS value_num, unit, reference_range, status,
@@ -533,5 +866,6 @@ pub async fn detail(
         "alerts": alerts,
         "data_quality_issues": dq,
         "notes": notes,
+        "capabilities": capabilities,
     })))
 }

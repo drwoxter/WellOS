@@ -6,15 +6,35 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { Lang } from "./i18n";
 
 export type Theme = "north" | "south";
 
+export type Facility = {
+  id: string;
+  name: string;
+  accessible: boolean;
+  can_register: boolean;
+  can_act_clinically: boolean;
+};
+
+export type TenantMeta = {
+  tenant: { id: string; name: string; cell: string };
+  user: { username: string; display_name: string; roles: string[] };
+  facilities: Facility[];
+};
+
 type Session = {
   /** null = unknown (loading), otherwise whether a server session exists. */
   authenticated: boolean | null;
+  /** Trusted tenant/user/facility context; null until loaded. */
+  meta: TenantMeta | null;
+  /** True when loading the tenant context failed; retry via reloadMeta. */
+  metaError: boolean;
+  reloadMeta: () => void;
   lang: Lang;
   theme: Theme;
   signIn: (token: string) => Promise<void>;
@@ -25,10 +45,46 @@ type Session = {
 
 const Ctx = createContext<Session | null>(null);
 
+// Notified by apiFetch when the API reports the session is gone (401), so
+// the shell can drop straight to the sign-in state instead of surfacing
+// generic errors on every screen. Ordinary 403s and other errors are not
+// session events and never trigger this.
+let onSessionExpired: (() => void) | null = null;
+
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [meta, setMeta] = useState<TenantMeta | null>(null);
+  const [metaError, setMetaError] = useState(false);
   const [lang, setLangState] = useState<Lang>("en");
   const [theme, setThemeState] = useState<Theme>("north");
+
+  // Generation counter for metadata loads: a response is applied only when
+  // it belongs to the latest request, so a stale response from a previous
+  // session (or an older overlapping retry) can never overwrite the current
+  // session's context.
+  const metaGeneration = useRef(0);
+
+  const reloadMeta = useCallback(() => {
+    const generation = ++metaGeneration.current;
+    setMetaError(false);
+    apiFetch<TenantMeta>("/api/v1/meta/tenant")
+      .then((m) => {
+        if (metaGeneration.current === generation) setMeta(m);
+      })
+      .catch(() => {
+        if (metaGeneration.current === generation) setMetaError(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!authenticated) {
+      metaGeneration.current += 1;
+      setMeta(null);
+      setMetaError(false);
+      return;
+    }
+    reloadMeta();
+  }, [authenticated, reloadMeta]);
 
   useEffect(() => {
     fetch("/api/session", { cache: "no-store" })
@@ -74,6 +130,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setAuthenticated(false);
   }, []);
 
+  useEffect(() => {
+    onSessionExpired = () => setAuthenticated(false);
+    return () => {
+      onSessionExpired = null;
+    };
+  }, []);
+
   const setLang = useCallback((l: Lang) => {
     localStorage.setItem("wellos.lang", l);
     setLangState(l);
@@ -84,8 +147,30 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ authenticated, lang, theme, signIn, signOut, setLang, setTheme }),
-    [authenticated, lang, theme, signIn, signOut, setLang, setTheme],
+    () => ({
+      authenticated,
+      meta,
+      metaError,
+      reloadMeta,
+      lang,
+      theme,
+      signIn,
+      signOut,
+      setLang,
+      setTheme,
+    }),
+    [
+      authenticated,
+      meta,
+      metaError,
+      reloadMeta,
+      lang,
+      theme,
+      signIn,
+      signOut,
+      setLang,
+      setTheme,
+    ],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -125,6 +210,7 @@ export async function apiFetch<T>(
     },
   });
   if (!res.ok) {
+    if (res.status === 401) onSessionExpired?.();
     let message = `HTTP ${res.status}`;
     try {
       const body = await res.json();

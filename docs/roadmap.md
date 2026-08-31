@@ -41,6 +41,18 @@ facility coverage); shared PostgreSQL-backed rate limiting (anonymous
 login/callback per hashed client address, per-principal patient search /
 credential admin / general API, HTTP 429 + Retry-After, fail-closed store).
 
+Clinical Workspace MVP: demo-ready clinical workspace on the existing APIs —
+authenticated app shell (sidebar/mobile nav, facility + user context,
+language/theme, sign-out), development role-card sign-in, `/dashboard`
+(workload counts via a minimal worklist summary endpoint, prioritized pending
+results, quick actions), `/patients` directory (search + registration),
+`/patients/[id]` workspace (safety information, tabs, clinical timeline,
+start encounter, order laboratory test), `/results` worklist (priority-first,
+filters, responsive table/cards; `/worklist` redirects), `/requests/[id]`
+result detail (workflow stepper, critical banner, advisory dMind section,
+confirmed transitions), richer synthetic demo states, component + Playwright
+browser/accessibility/responsive tests.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
@@ -58,8 +70,8 @@ credential admin / general API, HTTP 429 + Retry-After, fail-closed store).
    overdue critical results (currently a deterministic job + audit only).
 6. **FHIR hardening**: search, Bundles, CapabilityStatement, validator-backed
    contract tests in CI.
-7. **Frontend test depth**: component tests, automated accessibility (axe)
-   checks, and browser E2E of the primary and failure scenarios.
+7. **Frontend test depth**: browser E2E of failure and permission-denied
+   scenarios beyond the golden clinician path now covered.
 8. **Observability**: OpenTelemetry traces/metrics with PHI-free attribute
    linting, dashboards for loop latency and overdue counts.
 9. **Object storage abstraction** (S3-compatible) for large artifacts, with
