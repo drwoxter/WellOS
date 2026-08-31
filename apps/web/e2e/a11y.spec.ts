@@ -36,6 +36,23 @@ test("patients page has no serious accessibility violations", async ({
   await expectNoSeriousViolations(page);
 });
 
+test("encounter workspace has no serious accessibility violations", async ({
+  page,
+}) => {
+  await signInAs(page, "dr.garcia");
+  await page.goto("/patients");
+  await page.getByLabel("Search patients").fill("SYN-0001");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page
+    .locator(".result-card")
+    .first()
+    .getByRole("link", { name: "Open chart" })
+    .click();
+  await page.getByRole("link", { name: /Resume consultation/ }).click();
+  await page.getByRole("button", { name: "Save draft" }).waitFor();
+  await expectNoSeriousViolations(page);
+});
+
 test("results page has no serious accessibility violations", async ({
   page,
 }) => {

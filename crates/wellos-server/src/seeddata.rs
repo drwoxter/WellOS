@@ -594,6 +594,249 @@ async fn seed_demo_states(
     for spec in specs {
         seed_demo_loop(&mut *tx, tenant, facility, practitioner, &spec).await?;
     }
+
+    seed_demo_encounters(
+        &mut *tx,
+        tenant,
+        facility,
+        practitioner,
+        patient_alba,
+        carlos,
+        marta,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Seed consultation documentation in every lifecycle state: a partially
+/// documented draft (Alba), a signed encounter with vitals, a diagnosis and a
+/// plan (Carlos), and a signed encounter with a later addendum (Marta). Jonás
+/// remains ready for a fresh consultation.
+async fn seed_demo_encounters(
+    tx: &mut PgConnection,
+    tenant: Uuid,
+    facility: Uuid,
+    practitioner: Uuid,
+    alba: Uuid,
+    carlos: Uuid,
+    marta: Uuid,
+) -> anyhow::Result<()> {
+    let now = chrono::Utc::now();
+
+    // 1) Partially documented draft consultation, still in progress.
+    let draft_enc = Uuid::now_v7();
+    let draft_started = now - chrono::Duration::hours(1);
+    sqlx::query(
+        "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id,
+                                 status, encounter_type, started_at)
+         VALUES ($1,$2,$3,$4,$5,'in_progress','consultation',$6)",
+    )
+    .bind(draft_enc)
+    .bind(tenant)
+    .bind(facility)
+    .bind(alba)
+    .bind(practitioner)
+    .bind(draft_started)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO encounter_notes
+         (id, tenant_id, encounter_id, patient_id, author_id, status, version,
+          reason_for_encounter, history_present_illness, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,'draft',2,
+                 'Follow-up of hypertension control (synthetic)',
+                 'Reports good adherence; occasional morning headaches over the last two weeks (synthetic).',
+                 $6,$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant)
+    .bind(draft_enc)
+    .bind(alba)
+    .bind(practitioner)
+    .bind(draft_started)
+    .execute(&mut *tx)
+    .await?;
+    seed_vitals(
+        &mut *tx,
+        tenant,
+        draft_enc,
+        alba,
+        practitioner,
+        draft_started,
+        (148, 92, 78, 14, "36.8", 98, "82.5", 168),
+    )
+    .await?;
+
+    // 2) Signed consultation with vitals, diagnosis and plan.
+    let signed_enc = Uuid::now_v7();
+    let signed_started = now - chrono::Duration::hours(50);
+    let signed_at = signed_started + chrono::Duration::minutes(40);
+    sqlx::query(
+        "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id,
+                                 status, encounter_type, started_at, completed_at)
+         VALUES ($1,$2,$3,$4,$5,'completed','consultation',$6,$7)",
+    )
+    .bind(signed_enc)
+    .bind(tenant)
+    .bind(facility)
+    .bind(carlos)
+    .bind(practitioner)
+    .bind(signed_started)
+    .bind(signed_at)
+    .execute(&mut *tx)
+    .await?;
+    let signed_note = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO encounter_notes
+         (id, tenant_id, encounter_id, patient_id, author_id, status, version,
+          reason_for_encounter, history_present_illness, physical_exam, assessment, plan,
+          follow_up, created_at, updated_at, signed_at, signed_by)
+         VALUES ($1,$2,$3,$4,$5,'signed',3,
+                 'Diabetes review and fatigue (synthetic)',
+                 'Three weeks of fatigue and increased thirst; no fever (synthetic).',
+                 'Alert, well hydrated; cardiopulmonary examination unremarkable (synthetic).',
+                 'Suboptimal glycaemic control in known type 2 diabetes (synthetic).',
+                 'Reinforce diet and adherence; repeat glucose and HbA1c; review in 2 weeks (synthetic).',
+                 'Return earlier if symptoms worsen (synthetic).',
+                 $6,$7,$7,$5)",
+    )
+    .bind(signed_note)
+    .bind(tenant)
+    .bind(signed_enc)
+    .bind(carlos)
+    .bind(practitioner)
+    .bind(signed_started)
+    .bind(signed_at)
+    .execute(&mut *tx)
+    .await?;
+    seed_vitals(
+        &mut *tx,
+        tenant,
+        signed_enc,
+        carlos,
+        practitioner,
+        signed_started + chrono::Duration::minutes(5),
+        (132, 84, 88, 16, "36.6", 97, "91.0", 175),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO conditions (id, tenant_id, patient_id, code, display, clinical_status,
+                                 encounter_id, recorded_by, recorded_at)
+         VALUES ($1,$2,$3,'E11.9','Type 2 diabetes, suboptimal control (synthetic)','active',$4,$5,$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant)
+    .bind(carlos)
+    .bind(signed_enc)
+    .bind(practitioner)
+    .bind(signed_at)
+    .execute(&mut *tx)
+    .await?;
+
+    // 3) Signed consultation with a later dated addendum.
+    let amended_enc = Uuid::now_v7();
+    let amended_started = now - chrono::Duration::hours(120);
+    let amended_signed_at = amended_started + chrono::Duration::minutes(35);
+    sqlx::query(
+        "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id,
+                                 status, encounter_type, started_at, completed_at)
+         VALUES ($1,$2,$3,$4,$5,'completed','consultation',$6,$7)",
+    )
+    .bind(amended_enc)
+    .bind(tenant)
+    .bind(facility)
+    .bind(marta)
+    .bind(practitioner)
+    .bind(amended_started)
+    .bind(amended_signed_at)
+    .execute(&mut *tx)
+    .await?;
+    let amended_note = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO encounter_notes
+         (id, tenant_id, encounter_id, patient_id, author_id, status, version,
+          reason_for_encounter, history_present_illness, assessment, plan,
+          created_at, updated_at, signed_at, signed_by)
+         VALUES ($1,$2,$3,$4,$5,'signed',2,
+                 'Dizziness after skipped meals (synthetic)',
+                 'Two episodes of light-headedness before lunch this week (synthetic).',
+                 'Probable hypoglycaemic episodes; thyroid replacement stable (synthetic).',
+                 'Regular meal schedule; capillary glucose diary; repeat glucose testing (synthetic).',
+                 $6,$7,$7,$5)",
+    )
+    .bind(amended_note)
+    .bind(tenant)
+    .bind(amended_enc)
+    .bind(marta)
+    .bind(practitioner)
+    .bind(amended_started)
+    .bind(amended_signed_at)
+    .execute(&mut *tx)
+    .await?;
+    seed_vitals(
+        &mut *tx,
+        tenant,
+        amended_enc,
+        marta,
+        practitioner,
+        amended_started + chrono::Duration::minutes(5),
+        (118, 74, 72, 14, "36.5", 99, "63.0", 165),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO encounter_note_addenda (id, tenant_id, note_id, author_id, body, created_at)
+         VALUES ($1,$2,$3,$4,
+                 'Addendum: laboratory glucose from the same day returned critically low; patient contacted and follow-up arranged (synthetic).',
+                 $5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant)
+    .bind(amended_note)
+    .bind(practitioner)
+    .bind(amended_signed_at + chrono::Duration::hours(6))
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_vitals(
+    tx: &mut PgConnection,
+    tenant: Uuid,
+    encounter: Uuid,
+    patient: Uuid,
+    recorded_by: Uuid,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+    (sys, dia, hr, rr, temp, spo2, weight, height): (i64, i64, i64, i64, &str, i64, &str, i64),
+) -> anyhow::Result<()> {
+    let weight: Decimal = weight.parse()?;
+    let height = Decimal::from(height);
+    let meters = height / Decimal::from(100);
+    let bmi = (weight / (meters * meters)).round_dp(1);
+    sqlx::query(
+        "INSERT INTO vital_signs
+         (id, tenant_id, encounter_id, patient_id, recorded_by, systolic_mmhg, diastolic_mmhg,
+          heart_rate_bpm, respiratory_rate_bpm, temperature_c, spo2_percent, weight_kg,
+          height_cm, bmi, recorded_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant)
+    .bind(encounter)
+    .bind(patient)
+    .bind(recorded_by)
+    .bind(Decimal::from(sys))
+    .bind(Decimal::from(dia))
+    .bind(Decimal::from(hr))
+    .bind(Decimal::from(rr))
+    .bind(temp.parse::<Decimal>()?)
+    .bind(Decimal::from(spo2))
+    .bind(weight)
+    .bind(height)
+    .bind(bmi)
+    .bind(recorded_at)
+    .execute(&mut *tx)
+    .await?;
     Ok(())
 }
 

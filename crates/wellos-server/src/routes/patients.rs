@@ -267,8 +267,8 @@ pub async fn chart(
     ).await?;
     let conditions = fetch_list(
         &state,
-        "SELECT code AS a, display AS b FROM conditions WHERE tenant_id=$1 AND patient_id=$2 ORDER BY recorded_at",
-        ctx.tenant_id, id, |r| json!({"code": r.get::<String,_>("a"), "display": r.get::<String,_>("b")}),
+        "SELECT code AS a, display AS b, clinical_status AS c FROM conditions WHERE tenant_id=$1 AND patient_id=$2 ORDER BY recorded_at",
+        ctx.tenant_id, id, |r| json!({"code": r.get::<String,_>("a"), "display": r.get::<String,_>("b"), "status": r.get::<String,_>("c")}),
     ).await?;
 
     let observations = sqlx::query(
@@ -324,9 +324,15 @@ pub async fn chart(
     .collect::<Vec<_>>();
 
     let encounters = sqlx::query(
-        "SELECT e.id, e.status, e.started_at, e.practitioner_id,
-                u.display_name AS practitioner
-         FROM encounters e JOIN users u ON u.id = e.practitioner_id
+        "SELECT e.id, e.status, e.encounter_type, e.started_at, e.completed_at,
+                e.practitioner_id, u.display_name AS practitioner,
+                n.status AS note_status,
+                (SELECT count(*) FROM encounter_note_addenda a
+                 WHERE a.tenant_id = e.tenant_id AND a.note_id = n.id) AS addenda_count
+         FROM encounters e
+         JOIN users u ON u.id = e.practitioner_id
+         LEFT JOIN encounter_notes n
+           ON n.tenant_id = e.tenant_id AND n.encounter_id = e.id
          WHERE e.tenant_id=$1 AND e.patient_id=$2 ORDER BY e.started_at DESC",
     )
     .bind(ctx.tenant_id)
@@ -338,9 +344,44 @@ pub async fn chart(
         json!({
             "id": r.get::<Uuid,_>("id"),
             "status": r.get::<String,_>("status"),
+            "encounter_type": r.get::<String,_>("encounter_type"),
             "started_at": r.get::<chrono::DateTime<chrono::Utc>,_>("started_at"),
+            "completed_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("completed_at"),
             "practitioner": r.get::<String,_>("practitioner"),
             "own": r.get::<Uuid,_>("practitioner_id") == ctx.user_id,
+            "note_status": r.get::<Option<String>,_>("note_status"),
+            "addenda_count": r.get::<Option<i64>,_>("addenda_count").unwrap_or(0),
+        })
+    })
+    .collect::<Vec<_>>();
+
+    // Recent vital-sign sets so trends are visible from the chart.
+    let vitals = sqlx::query(
+        "SELECT id, encounter_id, systolic_mmhg, diastolic_mmhg, heart_rate_bpm,
+                respiratory_rate_bpm, temperature_c, spo2_percent, weight_kg, height_cm,
+                bmi, recorded_at
+         FROM vital_signs WHERE tenant_id=$1 AND patient_id=$2
+         ORDER BY recorded_at DESC LIMIT 10",
+    )
+    .bind(ctx.tenant_id)
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?
+    .iter()
+    .map(|r| {
+        json!({
+            "id": r.get::<Uuid,_>("id"),
+            "encounter_id": r.get::<Uuid,_>("encounter_id"),
+            "systolic_mmhg": r.get::<Option<rust_decimal::Decimal>,_>("systolic_mmhg"),
+            "diastolic_mmhg": r.get::<Option<rust_decimal::Decimal>,_>("diastolic_mmhg"),
+            "heart_rate_bpm": r.get::<Option<rust_decimal::Decimal>,_>("heart_rate_bpm"),
+            "respiratory_rate_bpm": r.get::<Option<rust_decimal::Decimal>,_>("respiratory_rate_bpm"),
+            "temperature_c": r.get::<Option<rust_decimal::Decimal>,_>("temperature_c"),
+            "spo2_percent": r.get::<Option<rust_decimal::Decimal>,_>("spo2_percent"),
+            "weight_kg": r.get::<Option<rust_decimal::Decimal>,_>("weight_kg"),
+            "height_cm": r.get::<Option<rust_decimal::Decimal>,_>("height_cm"),
+            "bmi": r.get::<Option<rust_decimal::Decimal>,_>("bmi"),
+            "recorded_at": r.get::<chrono::DateTime<chrono::Utc>,_>("recorded_at"),
         })
     })
     .collect::<Vec<_>>();
@@ -389,6 +430,7 @@ pub async fn chart(
         "observations": observations,
         "service_requests": requests,
         "encounters": encounters,
+        "vitals": vitals,
         "consents": consents,
         "alerts": alerts,
     })))

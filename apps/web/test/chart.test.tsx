@@ -26,6 +26,7 @@ const CHART = {
   encounters: [],
   consents: [],
   alerts: [],
+  vitals: [],
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -82,7 +83,7 @@ describe("patient chart clinical actions", () => {
       },
     ]);
     expect(
-      await screen.findByRole("button", { name: "Start encounter" }),
+      await screen.findByRole("button", { name: "Start consultation" }),
     ).toBeInTheDocument();
   });
 
@@ -107,7 +108,7 @@ describe("patient chart clinical actions", () => {
       (await screen.findAllByText("Carlos Demopatient")).length,
     ).toBeGreaterThan(0);
     expect(
-      screen.queryByRole("button", { name: "Start encounter" }),
+      screen.queryByRole("button", { name: "Start consultation" }),
     ).not.toBeInTheDocument();
   });
 });

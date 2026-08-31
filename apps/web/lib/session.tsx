@@ -189,6 +189,19 @@ function csrfToken(): string | undefined {
   return match?.slice("wellos_csrf=".length);
 }
 
+/** API failure carrying the bounded machine-readable error code. */
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 /**
  * Call the API through the same-origin BFF proxy. The opaque session
  * identifier lives in an HttpOnly cookie (no access token ever reaches
@@ -212,13 +225,15 @@ export async function apiFetch<T>(
   if (!res.ok) {
     if (res.status === 401) onSessionExpired?.();
     let message = `HTTP ${res.status}`;
+    let code: string | undefined;
     try {
       const body = await res.json();
       message = body?.error?.message ?? message;
+      code = body?.error?.code;
     } catch {
       // keep default message
     }
-    throw new Error(message);
+    throw new ApiRequestError(message, res.status, code);
   }
   return (await res.json()) as T;
 }
