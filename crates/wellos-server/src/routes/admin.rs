@@ -51,7 +51,18 @@ pub async fn tenant_meta(
             .fetch_all(&state.pool)
             .await?
             .iter()
-            .map(|r| json!({ "id": r.get::<Uuid,_>("id"), "name": r.get::<String,_>("name") }))
+            .map(|r| {
+                let id = r.get::<Uuid, _>("id");
+                let accessible = ctx
+                    .assignments
+                    .iter()
+                    .any(|a| a.facility_id.is_none() || a.facility_id == Some(id));
+                json!({
+                    "id": id,
+                    "name": r.get::<String,_>("name"),
+                    "accessible": accessible,
+                })
+            })
             .collect::<Vec<_>>();
     Ok(Json(json!({
         "tenant": {

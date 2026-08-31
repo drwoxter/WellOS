@@ -12,9 +12,19 @@ import type { Lang } from "./i18n";
 
 export type Theme = "north" | "south";
 
+export type Facility = { id: string; name: string; accessible: boolean };
+
+export type TenantMeta = {
+  tenant: { id: string; name: string; cell: string };
+  user: { username: string; display_name: string; roles: string[] };
+  facilities: Facility[];
+};
+
 type Session = {
   /** null = unknown (loading), otherwise whether a server session exists. */
   authenticated: boolean | null;
+  /** Trusted tenant/user/facility context; null until loaded. */
+  meta: TenantMeta | null;
   lang: Lang;
   theme: Theme;
   signIn: (token: string) => Promise<void>;
@@ -27,8 +37,19 @@ const Ctx = createContext<Session | null>(null);
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [meta, setMeta] = useState<TenantMeta | null>(null);
   const [lang, setLangState] = useState<Lang>("en");
   const [theme, setThemeState] = useState<Theme>("north");
+
+  useEffect(() => {
+    if (!authenticated) {
+      setMeta(null);
+      return;
+    }
+    apiFetch<TenantMeta>("/api/v1/meta/tenant")
+      .then(setMeta)
+      .catch(() => setMeta(null));
+  }, [authenticated]);
 
   useEffect(() => {
     fetch("/api/session", { cache: "no-store" })
@@ -84,8 +105,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ authenticated, lang, theme, signIn, signOut, setLang, setTheme }),
-    [authenticated, lang, theme, signIn, signOut, setLang, setTheme],
+    () => ({
+      authenticated,
+      meta,
+      lang,
+      theme,
+      signIn,
+      signOut,
+      setLang,
+      setTheme,
+    }),
+    [authenticated, meta, lang, theme, signIn, signOut, setLang, setTheme],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

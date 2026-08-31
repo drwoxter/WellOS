@@ -50,10 +50,31 @@ make server    # run the API on :8080
 make web       # run the clinician UI on :3000 (separate shell)
 ```
 
-Sign in at http://localhost:3000 with a development token such as
-`dev-dr.garcia` (physician), `dev-reg.rivera` (registration),
-`dev-nurse.kim` (nurse), `dev-lab.chen` (laboratory),
-`dev-privacy.wolf` (privacy officer). Development tokens work only against
+`make reset` drops all data and reloads the synthetic demo dataset (useful
+after completing the demo workflow, which closes the seeded critical loop).
+
+### Demo sign-in and screens
+
+Open http://localhost:3000 and pick a demo role card (development builds
+only): **Dr. García** (physician), **Nurse Kim** (nurse), **Reg. Rivera**
+(registration staff) or **Privacy Officer Wolf**. The cards use the seeded
+synthetic users' development tokens (`dev-<username>`) under the hood; no
+token needs to be typed.
+
+| URL | Screen |
+| --- | --- |
+| `/dashboard` | Home: facility context, workload counts, prioritized pending results, quick actions |
+| `/patients` | Patient directory: search by name or identifier, register a patient |
+| `/patients/[id]` | Patient workspace: demographics, allergies/alerts, tabs, clinical timeline, start encounter, order laboratory test |
+| `/results` | Results worklist: priority-first, criticality/state filters, patient search (`/worklist` redirects here) |
+| `/requests/[id]` | Result detail: workflow stepper, critical banner, deterministic rule evaluation, advisory dMind summary, review → notification → closure |
+
+The seed includes a critical potassium result awaiting review (Carlos
+Demopatient), a reviewed glucose result awaiting patient notification (Marta
+Demopatient) and a closed potassium loop (Jonás Demopatient), plus patients
+with encounters, allergies, medications and laboratory history.
+
+Development tokens work only against
 seeded synthetic users and only when `WELLOS_ENV=development` and
 `WELLOS_DEV_AUTH=true` (the server refuses to start with dev auth enabled in
 any other environment). On sign-in the Next.js BFF exchanges the credential
@@ -102,6 +123,13 @@ make test               # unit tests (domain rules, state machine, policy, gatew
 make test-integration   # API integration tests (requires running PostgreSQL)
 ```
 
+Frontend tests (from `apps/web`):
+
+```bash
+npm run test       # component tests (Vitest + Testing Library)
+npm run test:e2e   # browser tests (Playwright; requires Postgres, seeds mutated — run `make reset` after)
+```
+
 ## Limitations
 
 - Synthetic data only; no real PHI anywhere (code, fixtures, tests, logs).
@@ -116,6 +144,11 @@ make test-integration   # API integration tests (requires running PostgreSQL)
 - No claims of HIPAA/GDPR compliance, clinical validation, or device
   certification are made or implied.
 - Not production-deployable: no TLS termination, HA, or backup automation here.
+- The workspace UI covers the closed-loop result slice only; scheduling,
+  documentation, orders beyond the two seeded laboratory tests, and care-team
+  based notification permissions are future work.
+- Completing the demo workflow mutates the seed data; use `make reset` to
+  restore the demo states.
 
 See `docs/` for the architecture, decision records, clinical safety case
 outline, threat model, and roadmap.

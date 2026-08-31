@@ -309,6 +309,71 @@ pub async fn worklist(
     Ok(Json(json!({ "items": items })))
 }
 
+/// Aggregate counts backing the dashboard status cards. Same authorization
+/// and facility scoping as the worklist; returns only numbers.
+pub async fn worklist_summary(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+) -> Result<Json<Value>, ApiError> {
+    guard(
+        &state,
+        &ctx,
+        actions::WORKLIST_READ,
+        "worklist",
+        Some(ResourceCtx {
+            tenant_id: ctx.tenant_id,
+            patient_id: None,
+            facility_id: None,
+        }),
+    )
+    .await?
+    .record_on_pool(&state, &ctx)
+    .await?;
+    let scope = facility_scope(&ctx, actions::WORKLIST_READ);
+    const SUMMARY_SQL: &str = "SELECT
+            COUNT(*) FILTER (WHERE sr.loop_state <> 'closed' AND EXISTS (
+                SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
+                WHERE o.service_request_id = sr.id AND a.status = 'open')) AS critical_open,
+            COUNT(*) FILTER (WHERE sr.loop_state = 'received') AS awaiting_review,
+            COUNT(*) FILTER (WHERE sr.loop_state = 'reviewed') AS awaiting_notification,
+            COUNT(*) FILTER (WHERE sr.loop_state = 'notified') AS awaiting_closure,
+            COUNT(*) FILTER (WHERE sr.loop_state = 'closed'
+                AND sr.created_at > now() - interval '7 days') AS recently_closed
+         FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
+         WHERE sr.tenant_id = $1";
+    let row = match &scope {
+        None => {
+            sqlx::query(SUMMARY_SQL)
+                .bind(ctx.tenant_id)
+                .fetch_one(&state.pool)
+                .await?
+        }
+        Some(ids) if ids.is_empty() => {
+            return Ok(Json(json!({
+                "critical_open": 0,
+                "awaiting_review": 0,
+                "awaiting_notification": 0,
+                "awaiting_closure": 0,
+                "recently_closed": 0,
+            })));
+        }
+        Some(ids) => {
+            sqlx::query(&format!("{SUMMARY_SQL} AND p.facility_id = ANY($2)"))
+                .bind(ctx.tenant_id)
+                .bind(ids)
+                .fetch_one(&state.pool)
+                .await?
+        }
+    };
+    Ok(Json(json!({
+        "critical_open": row.get::<i64,_>("critical_open"),
+        "awaiting_review": row.get::<i64,_>("awaiting_review"),
+        "awaiting_notification": row.get::<i64,_>("awaiting_notification"),
+        "awaiting_closure": row.get::<i64,_>("awaiting_closure"),
+        "recently_closed": row.get::<i64,_>("recently_closed"),
+    })))
+}
+
 pub async fn detail(
     State(state): State<AppState>,
     ctx: AuthContext,

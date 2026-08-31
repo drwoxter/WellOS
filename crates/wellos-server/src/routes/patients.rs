@@ -317,6 +317,24 @@ pub async fn chart(
     })
     .collect::<Vec<_>>();
 
+    let alerts = sqlx::query(
+        "SELECT severity, message, created_at FROM alerts
+         WHERE tenant_id=$1 AND patient_id=$2 AND status='open' ORDER BY created_at DESC",
+    )
+    .bind(ctx.tenant_id)
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?
+    .iter()
+    .map(|r| {
+        json!({
+            "severity": r.get::<String,_>("severity"),
+            "message": r.get::<String,_>("message"),
+            "created_at": r.get::<chrono::DateTime<chrono::Utc>,_>("created_at"),
+        })
+    })
+    .collect::<Vec<_>>();
+
     let consents = fetch_list(
         &state,
         "SELECT DISTINCT ON (purpose) purpose AS a, status AS b FROM consents
@@ -344,6 +362,7 @@ pub async fn chart(
         "service_requests": requests,
         "encounters": encounters,
         "consents": consents,
+        "alerts": alerts,
     })))
 }
 
