@@ -18,7 +18,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function detail(loopState: string) {
+function detail(
+  loopState: string,
+  capabilities = { review: true, notify: true, close: true },
+) {
   return {
     service_request: {
       id: SR_ID,
@@ -48,10 +51,14 @@ function detail(loopState: string) {
     ],
     data_quality_issues: [],
     notes: [],
+    capabilities,
   };
 }
 
-function setup(loopState: string) {
+function setup(
+  loopState: string,
+  capabilities = { review: true, notify: true, close: true },
+) {
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL) => {
@@ -59,7 +66,7 @@ function setup(loopState: string) {
       if (url === "/api/session")
         return Promise.resolve(jsonResponse({ authenticated: true }));
       if (url === `/api/v1/service-requests/${SR_ID}`)
-        return Promise.resolve(jsonResponse(detail(loopState)));
+        return Promise.resolve(jsonResponse(detail(loopState, capabilities)));
       if (url === "/api/v1/meta/tenant")
         return Promise.resolve(
           jsonResponse({
@@ -112,6 +119,21 @@ describe("result detail critical banner", () => {
     expect(
       screen.queryByText(/Critical result — requires clinician review/),
     ).not.toBeInTheDocument();
+  });
+
+  it("hides the transition action when the server denies the capability", async () => {
+    setup("received", { review: false, notify: false, close: false });
+    await screen.findByText(/Critical result — requires clinician review/);
+    expect(
+      screen.queryByRole("button", { name: "Mark reviewed" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Next action")).not.toBeInTheDocument();
+  });
+
+  it("offers the transition when the server grants the capability", async () => {
+    setup("received");
+    await screen.findByText(/Critical result — requires clinician review/);
+    expect(await screen.findByText("Next action")).toBeInTheDocument();
   });
 
   it("keeps the follow-up wording after patient notification", async () => {

@@ -2469,6 +2469,64 @@ async fn search_encounter_capability_is_facility_specific() {
     assert_ne!(st, StatusCode::OK, "{body}");
 }
 
+#[tokio::test]
+async fn worklist_detail_capabilities_match_backend_policy() {
+    let (state, _) = test_state().await;
+    let lp = run_to_received(&state, 7.1).await;
+
+    let find_item = |body: &serde_json::Value| -> Option<serde_json::Value> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == json!(lp.service_request_id))
+            .cloned()
+    };
+
+    // The ordering physician has a care relationship: detail is reachable
+    // and the transition capability is granted.
+    let (st, body) = call(
+        &state,
+        "GET",
+        "/api/v1/worklist",
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let item = find_item(&body).expect("ordering physician sees the row");
+    assert_eq!(item["can_open_detail"], json!(true), "{item}");
+    let (st, detail) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/service-requests/{}", lp.service_request_id),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{detail}");
+    assert_eq!(detail["capabilities"]["review"], json!(true), "{detail}");
+
+    // A laboratory professional reads the worklist but cannot open the
+    // patient-detail view: the hint is false and the endpoint denies.
+    let (st, body) = call(&state, "GET", "/api/v1/worklist", "dev-lab.chen", None, &[]).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let item = find_item(&body).expect("laboratory professional sees the row");
+    assert_eq!(item["can_open_detail"], json!(false), "{item}");
+    let (st, body) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/service-requests/{}", lp.service_request_id),
+        "dev-lab.chen",
+        None,
+        &[],
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "{body}");
+}
+
 /// Create a fresh physician assigned to the given facility.
 async fn create_same_facility_physician(state: &AppState, facility_id: &str) -> String {
     let username = uniq("dr.other");

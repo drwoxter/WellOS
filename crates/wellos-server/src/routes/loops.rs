@@ -3,7 +3,7 @@
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
-use crate::policy::{actions, facility_scope, ResourceCtx};
+use crate::policy::{actions, facility_scope, roles, ResourceCtx};
 use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -360,13 +360,16 @@ pub async fn worklist(
         };
     let mut sql = String::from(
         "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
-                p.family_name, p.given_name, p.identifier,
+                p.family_name, p.given_name, p.identifier, p.facility_id,
                 EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
-                        WHERE o.service_request_id = sr.id AND a.status = 'open') AS has_open_alert
+                        WHERE o.service_request_id = sr.id AND a.status = 'open') AS has_open_alert,
+                EXISTS (SELECT 1 FROM encounters e
+                        WHERE e.tenant_id = sr.tenant_id AND e.patient_id = p.id
+                          AND e.practitioner_id = $2) AS has_relationship
          FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
          WHERE sr.tenant_id = $1 AND sr.loop_state <> 'closed'",
     );
-    let mut arg = 1;
+    let mut arg = 2;
     if scope.is_some() {
         arg += 1;
         sql.push_str(&format!(" AND p.facility_id = ANY(${arg})"));
@@ -408,7 +411,7 @@ pub async fn worklist(
         " ORDER BY has_open_alert DESC, sr.created_at DESC, sr.id DESC LIMIT {}",
         WORKLIST_PAGE_SIZE + 1
     ));
-    let mut q = sqlx::query(&sql).bind(ctx.tenant_id);
+    let mut q = sqlx::query(&sql).bind(ctx.tenant_id).bind(ctx.user_id);
     if let Some(ids) = &scope {
         q = q.bind(ids);
     }
@@ -436,9 +439,22 @@ pub async fn worklist(
     } else {
         None
     };
+    // Display-only hint mirroring the detail endpoint's PATIENT_READ policy
+    // (role grant at the result's facility; care relationship for physicians
+    // without an administrative role). The detail guard stays authoritative.
+    let read_scope = facility_scope(&ctx, actions::PATIENT_READ);
+    let read_needs_relationship =
+        ctx.has_role(roles::PHYSICIAN) && !ctx.has_role(roles::CLINICAL_ADMIN);
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
+            let patient_facility: Uuid = r.get("facility_id");
+            let at_facility = match &read_scope {
+                None => true,
+                Some(ids) => ids.contains(&patient_facility),
+            };
+            let can_open_detail =
+                at_facility && (!read_needs_relationship || r.get::<bool, _>("has_relationship"));
             json!({
                 "id": r.get::<Uuid,_>("id"),
                 "display": r.get::<String,_>("display"),
@@ -452,6 +468,7 @@ pub async fn worklist(
                     "identifier": r.get::<String,_>("identifier"),
                 },
                 "has_open_alert": r.get::<bool,_>("has_open_alert"),
+                "can_open_detail": can_open_detail,
             })
         })
         .collect();
@@ -556,6 +573,32 @@ pub async fn detail(
     .bind(id)
     .fetch_one(&state.pool)
     .await?;
+
+    // Display-only capability hints mirroring the central policy for the
+    // consequential loop transitions: role grant at this result's facility
+    // plus an established care relationship. The guards on the transition
+    // endpoints stay authoritative.
+    let (has_relationship,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM encounters
+         WHERE tenant_id = $1 AND patient_id = $2 AND practitioner_id = $3)",
+    )
+    .bind(sr.tenant_id)
+    .bind(sr.patient_id)
+    .bind(ctx.user_id)
+    .fetch_one(&state.pool)
+    .await?;
+    let can_transition = |action: &str| -> bool {
+        let at_facility = match facility_scope(&ctx, action) {
+            None => true,
+            Some(ids) => ids.contains(&sr.facility_id),
+        };
+        at_facility && has_relationship
+    };
+    let capabilities = json!({
+        "review": can_transition(actions::RESULT_REVIEW),
+        "notify": can_transition(actions::PATIENT_NOTIFY),
+        "close": can_transition(actions::LOOP_CLOSE),
+    });
 
     let observation_rows = sqlx::query(
         "SELECT id, code_loinc, value_num::text AS value_num, unit, reference_range, status,
@@ -751,5 +794,6 @@ pub async fn detail(
         "alerts": alerts,
         "data_quality_issues": dq,
         "notes": notes,
+        "capabilities": capabilities,
     })))
 }

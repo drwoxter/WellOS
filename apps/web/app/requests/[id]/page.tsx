@@ -66,6 +66,7 @@ type Detail = {
   alerts: { id: string; severity: string; message: string; status: string }[];
   data_quality_issues: { issue: string; created_at: string }[];
   notes: { kind: string; note: string; author: string; created_at: string }[];
+  capabilities: { review: boolean; notify: boolean; close: boolean };
 };
 
 type TransitionKind = "review" | "notify" | "close";
@@ -139,7 +140,7 @@ function outcomeLabel(lang: Lang, outcome: string | undefined): string {
 }
 
 export default function RequestDetailPage() {
-  const { authenticated, lang, meta } = useSession();
+  const { authenticated, lang } = useSession();
   const params = useParams<{ id: string }>();
   const [data, setData] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -194,7 +195,6 @@ export default function RequestDetailPage() {
   const sr = data?.service_request;
   const artifact = data?.ai_artifacts[data.ai_artifacts.length - 1];
   const openAlerts = data?.alerts.filter((a) => a.status === "open") ?? [];
-  const isPhysician = meta?.user.roles.includes("physician") ?? false;
 
   const nextAction: TransitionKind | null =
     sr?.loop_state === "received"
@@ -204,6 +204,15 @@ export default function RequestDetailPage() {
         : sr?.loop_state === "notified"
           ? "close"
           : null;
+  // Server-derived, result-specific capability hints; the backend guards on
+  // the transition endpoints remain the authorization boundary.
+  const canRunNextAction =
+    nextAction !== null && (data?.capabilities?.[nextAction] ?? false);
+  const anyTransitionCapability =
+    (data?.capabilities?.review ||
+      data?.capabilities?.notify ||
+      data?.capabilities?.close) ??
+    false;
 
   const actionLabel: Record<TransitionKind, TKey> = {
     review: "review",
@@ -320,7 +329,7 @@ export default function RequestDetailPage() {
             </div>
           </div>
 
-          {nextAction && isPhysician ? (
+          {nextAction && canRunNextAction ? (
             <div className="action-area">
               <h2>{t(lang, "nextAction")}</h2>
               <label htmlFor="note">{t(lang, "workflowNotes")}</label>
@@ -346,7 +355,7 @@ export default function RequestDetailPage() {
                 </button>
               </p>
             </div>
-          ) : sr.loop_state !== "closed" && isPhysician ? (
+          ) : sr.loop_state !== "closed" && anyTransitionCapability ? (
             <p className="muted">{t(lang, "noActionAvailable")}</p>
           ) : null}
 

@@ -18,6 +18,7 @@ type WorklistItem = {
   loop_state: string;
   has_open_alert: boolean;
   created_at: string;
+  can_open_detail: boolean;
   patient: { family_name: string; given_name: string; identifier: string };
 };
 
@@ -67,6 +68,7 @@ function ResultsContent() {
   const load = useCallback(() => {
     const generation = ++requestGeneration.current;
     setError(null);
+    setLoadingMore(false);
     apiFetch<WorklistPage>(buildUrl(null))
       .then((d) => {
         if (requestGeneration.current !== generation) return;
@@ -95,7 +97,9 @@ function ResultsContent() {
         if (requestGeneration.current !== generation) return;
         setError(e instanceof Error ? e.message : String(e));
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => {
+        if (requestGeneration.current === generation) setLoadingMore(false);
+      });
   }, [buildUrl, items, loadingMore, nextCursor]);
 
   useEffect(() => {
@@ -237,9 +241,11 @@ function ResultsContent() {
                       </td>
                       <td>{formatDateTime(lang, item.created_at)}</td>
                       <td>
-                        <Link href={`/requests/${item.id}`}>
-                          {t(lang, "openResult")}
-                        </Link>
+                        {item.can_open_detail ? (
+                          <Link href={`/requests/${item.id}`}>
+                            {t(lang, "openResult")}
+                          </Link>
+                        ) : null}
                       </td>
                     </tr>
                   ))}
@@ -271,9 +277,11 @@ function ResultsContent() {
                   <span className="badge neutral">
                     {loopStateShortLabel(lang, item.loop_state)}
                   </span>
-                  <Link className="navlink" href={`/requests/${item.id}`}>
-                    {t(lang, "openResult")}
-                  </Link>
+                  {item.can_open_detail ? (
+                    <Link className="navlink" href={`/requests/${item.id}`}>
+                      {t(lang, "openResult")}
+                    </Link>
+                  ) : null}
                 </li>
               ))}
             </ul>

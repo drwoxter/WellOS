@@ -16,6 +16,7 @@ const ITEMS = [
     code_loinc: "2823-3",
     loop_state: "received",
     has_open_alert: true,
+    can_open_detail: true,
     created_at: "2026-08-28T10:00:00Z",
     patient: {
       family_name: "Demopatient",
@@ -29,6 +30,7 @@ const ITEMS = [
     code_loinc: "2345-7",
     loop_state: "reviewed",
     has_open_alert: false,
+    can_open_detail: true,
     created_at: "2026-08-28T08:00:00Z",
     patient: {
       family_name: "Demopatient",
@@ -254,6 +256,94 @@ describe("results worklist", () => {
     resolveSlow!(jsonResponse({ items: [ITEMS[0]], has_more: false }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.getAllByText("Marta Demopatient").length).toBeGreaterThan(0);
+  });
+
+  it("hides the result link when the server denies detail access", async () => {
+    setup([
+      { ...ITEMS[0], can_open_detail: false },
+      { ...ITEMS[1], can_open_detail: true },
+    ]);
+    await screen.findAllByText("Carlos Demopatient");
+    // One item allows detail (desktop + mobile render), one does not.
+    expect(screen.getAllByRole("link", { name: "Open result" })).toHaveLength(
+      2,
+    );
+  });
+
+  it("re-enables pagination when filters change during a hung load-more", async () => {
+    let resolveSlow: ((r: Response) => void) | null = null;
+    const page = (start: number, count: number, total: number) => ({
+      items: Array.from({ length: count }, (_, i) => ({
+        ...ITEMS[1],
+        id: `44444444-4444-4444-4444-${String(start + i).padStart(12, "0")}`,
+        patient: {
+          family_name: "Bulk",
+          given_name: `Row${start + i}`,
+          identifier: `SYN-${start + i}`,
+        },
+      })),
+      has_more: start + count < total,
+      next_cursor: start + count < total ? String(start + count) : null,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/session")
+          return Promise.resolve(jsonResponse({ authenticated: true }));
+        if (url === "/api/v1/meta/tenant")
+          return Promise.resolve(
+            jsonResponse({
+              tenant: { id: "t", name: "Demo Tenant", cell: "eu" },
+              user: {
+                username: "dr.garcia",
+                display_name: "Dr. García",
+                roles: ["physician"],
+              },
+              facilities: [],
+            }),
+          );
+        if (url.startsWith("/api/v1/worklist")) {
+          const params = new URL(url, "http://localhost").searchParams;
+          const cursor = params.get("cursor");
+          if (cursor && params.get("critical") !== "true") {
+            // The unfiltered load-more request hangs until after the user
+            // switches filters.
+            return new Promise<Response>((resolve) => {
+              resolveSlow = resolve;
+            });
+          }
+          const start = cursor ? Number(cursor) : 0;
+          return Promise.resolve(jsonResponse(page(start, 200, 400)));
+        }
+        return Promise.resolve(jsonResponse({}));
+      }),
+    );
+    render(
+      <SessionProvider>
+        <ResultsPage />
+      </SessionProvider>,
+    );
+    const button = await screen.findByRole("button", {
+      name: "Load more results",
+    });
+    await userEvent.click(button);
+    await waitFor(() => expect(resolveSlow).not.toBeNull());
+    // Switching filters starts a fresh base load; the stale pagination
+    // request must not keep the new view's load-more disabled.
+    await userEvent.selectOptions(
+      screen.getByLabelText("Criticality"),
+      "critical",
+    );
+    const newButton = await screen.findByRole("button", {
+      name: "Load more results",
+    });
+    await waitFor(() => expect(newButton).toBeEnabled());
+    resolveSlow!(jsonResponse(page(200, 200, 400)));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      screen.getByRole("button", { name: "Load more results" }),
+    ).toBeEnabled();
   });
 
   it("shows an empty state when there are no open results", async () => {
