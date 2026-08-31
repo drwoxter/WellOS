@@ -65,14 +65,20 @@ token needs to be typed.
 | --- | --- |
 | `/dashboard` | Home: facility context, workload counts, prioritized pending results, quick actions |
 | `/patients` | Patient directory: search by name or identifier, register a patient |
-| `/patients/[id]` | Patient workspace: demographics, allergies/alerts, tabs, clinical timeline, start encounter, order laboratory test |
+| `/patients/[id]` | Patient workspace: demographics, allergies/alerts, tabs, clinical timeline, recent vital trends, start/resume consultation, order laboratory test |
+| `/encounters/[id]` | Consultation workspace: patient safety header, vital signs (validated, BMI), structured clinical note, diagnoses, laboratory order, dMind documentation aid, draft save, sign-and-complete, addenda on signed notes |
 | `/results` | Results worklist: priority-first, criticality/state filters, patient search (`/worklist` redirects here) |
 | `/requests/[id]` | Result detail: workflow stepper, critical banner, deterministic rule evaluation, advisory dMind summary, review → notification → closure |
 
 The seed includes a critical potassium result awaiting review (Carlos
 Demopatient), a reviewed glucose result awaiting patient notification (Marta
 Demopatient) and a closed potassium loop (Jonás Demopatient), plus patients
-with encounters, allergies, medications and laboratory history.
+with encounters, allergies, medications and laboratory history. For
+consultation documentation it also seeds an in-progress draft consultation
+(Alba Demopatient), a signed encounter with vital signs, a diagnosis and a
+plan (Carlos Demopatient), a signed encounter with a later addendum (Marta
+Demopatient) and a patient ready for a fresh consultation (Jonás
+Demopatient). `make reset` restores all demo states.
 
 Development tokens work only against
 seeded synthetic users and only when `WELLOS_ENV=development` and

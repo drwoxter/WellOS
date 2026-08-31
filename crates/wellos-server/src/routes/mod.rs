@@ -2,6 +2,7 @@ pub mod admin;
 pub mod ai;
 pub mod consent;
 pub mod creds;
+pub mod encounter_docs;
 pub mod encounters;
 pub mod fhir;
 pub mod lab;
@@ -55,6 +56,32 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/patients/:id", get(patients::chart))
         .route("/api/v1/encounters", post(encounters::start))
+        .route("/api/v1/encounters/:id", get(encounter_docs::workspace))
+        .route(
+            "/api/v1/encounters/:id/note",
+            post(encounter_docs::save_note),
+        )
+        .route("/api/v1/encounters/:id/sign", post(encounter_docs::sign))
+        .route(
+            "/api/v1/encounters/:id/addenda",
+            post(encounter_docs::add_addendum),
+        )
+        .route(
+            "/api/v1/encounters/:id/vitals",
+            post(encounter_docs::record_vitals),
+        )
+        .route(
+            "/api/v1/encounters/:id/diagnoses",
+            post(encounter_docs::add_diagnosis),
+        )
+        .route(
+            "/api/v1/encounters/:id/cancel",
+            post(encounter_docs::cancel),
+        )
+        .route(
+            "/api/v1/encounters/:id/ai-draft",
+            post(encounter_docs::ai_draft),
+        )
         .route(
             "/api/v1/service-requests",
             post(encounters::create_service_request),

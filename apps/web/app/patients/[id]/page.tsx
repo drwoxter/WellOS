@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppShell } from "../../chrome";
 import { t } from "@/lib/i18n";
@@ -27,7 +28,7 @@ type Chart = {
   };
   allergies: { substance: string; criticality: string }[];
   medications: { name: string; status: string }[];
-  conditions: { code: string; display: string }[];
+  conditions: { code: string; display: string; status: string }[];
   observations: {
     id: string;
     code_loinc: string;
@@ -46,13 +47,51 @@ type Chart = {
   encounters: {
     id: string;
     status: string;
+    encounter_type: string;
     started_at: string;
+    completed_at: string | null;
     practitioner: string;
     own: boolean;
+    note_status: string | null;
+    addenda_count: number;
   }[];
   consents: { purpose: string; status: string }[];
   alerts: { severity: string; message: string; created_at: string }[];
+  vitals: {
+    id: string;
+    encounter_id: string;
+    systolic_mmhg: string | null;
+    diastolic_mmhg: string | null;
+    heart_rate_bpm: string | null;
+    temperature_c: string | null;
+    spo2_percent: string | null;
+    weight_kg: string | null;
+    bmi: string | null;
+    recorded_at: string;
+  }[];
 };
+
+function encounterStatusKey(status: string): TKey {
+  switch (status) {
+    case "completed":
+      return "encStatusCompleted";
+    case "cancelled":
+      return "encStatusCancelled";
+    default:
+      return "encStatusInProgress";
+  }
+}
+
+function encounterStatusBadge(status: string): string {
+  switch (status) {
+    case "completed":
+      return "ok";
+    case "cancelled":
+      return "warn";
+    default:
+      return "neutral";
+  }
+}
 
 const TABS: { id: string; key: TKey }[] = [
   { id: "overview", key: "tabOverview" },
@@ -104,9 +143,17 @@ function Timeline({ chart, lang }: { chart: Chart; lang: Lang }) {
   const events = useMemo(() => {
     const evts: { when: string; text: string; href?: string }[] = [];
     for (const e of chart.encounters) {
+      const addenda =
+        e.addenda_count > 0
+          ? ` · ${t(lang, "addenda")}: ${e.addenda_count}`
+          : "";
       evts.push({
         when: e.started_at,
-        text: `${t(lang, "encounters")}: ${e.practitioner}`,
+        text: `${t(lang, "consultation")}: ${e.practitioner} — ${t(
+          lang,
+          encounterStatusKey(e.status),
+        )}${addenda}`,
+        href: `/encounters/${e.id}`,
       });
     }
     for (const sr of chart.service_requests) {
@@ -156,18 +203,22 @@ function Actions({
   const [showOrder, setShowOrder] = useState(false);
   const [test, setTest] = useState(LAB_TESTS[0].code_loinc);
   const [encounterId, setEncounterId] = useState("new");
+  const router = useRouter();
+
+  const resumable = chart.encounters.find(
+    (e) => e.status === "in_progress" && e.own,
+  );
 
   async function startEncounter() {
     setBusy(true);
     setError(null);
     setSuccess(null);
     try {
-      await apiFetch("/api/v1/encounters", {
+      const enc = await apiFetch<{ id: string }>("/api/v1/encounters", {
         method: "POST",
         body: JSON.stringify({ patient_id: chart.patient.id }),
       });
-      setSuccess(t(lang, "encounterStarted"));
-      onChanged();
+      router.push(`/encounters/${enc.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -231,8 +282,14 @@ function Actions({
           disabled={busy}
           onClick={() => void startEncounter()}
         >
-          {t(lang, "startEncounter")}
+          {t(lang, "startConsultation")}
         </button>
+        {resumable ? (
+          <Link className="navlink" href={`/encounters/${resumable.id}`}>
+            {t(lang, "resumeConsultation")} —{" "}
+            {formatDateTime(lang, resumable.started_at)}
+          </Link>
+        ) : null}
         <button
           className="secondary"
           disabled={busy}
@@ -384,6 +441,56 @@ function PatientWorkspace({ id }: { id: string }) {
 
         {tab === "overview" ? (
           <>
+            {chart.vitals.length > 0 ? (
+              <>
+                <h3 style={{ fontSize: "0.95rem" }}>{t(lang, "vitalSigns")}</h3>
+                <div className="table-scroll">
+                  <table className="vitals-trend">
+                    <thead>
+                      <tr>
+                        <th scope="col">{t(lang, "recordedAt")}</th>
+                        <th scope="col">{t(lang, "bloodPressure")}</th>
+                        <th scope="col">{t(lang, "heartRate")}</th>
+                        <th scope="col">{t(lang, "temperature")}</th>
+                        <th scope="col">{t(lang, "oxygenSaturation")}</th>
+                        <th scope="col">{t(lang, "weight")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {chart.vitals.slice(0, 5).map((v) => (
+                        <tr key={v.id}>
+                          <td>{formatDateTime(lang, v.recorded_at)}</td>
+                          <td>
+                            {v.systolic_mmhg !== null &&
+                            v.diastolic_mmhg !== null
+                              ? `${v.systolic_mmhg}/${v.diastolic_mmhg} mmHg`
+                              : "—"}
+                          </td>
+                          <td>
+                            {v.heart_rate_bpm !== null
+                              ? `${v.heart_rate_bpm} bpm`
+                              : "—"}
+                          </td>
+                          <td>
+                            {v.temperature_c !== null
+                              ? `${v.temperature_c} °C`
+                              : "—"}
+                          </td>
+                          <td>
+                            {v.spo2_percent !== null
+                              ? `${v.spo2_percent} %`
+                              : "—"}
+                          </td>
+                          <td>
+                            {v.weight_kg !== null ? `${v.weight_kg} kg` : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : null}
             <h3 style={{ fontSize: "0.95rem" }}>
               {t(lang, "clinicalTimeline")}
             </h3>
@@ -396,11 +503,26 @@ function PatientWorkspace({ id }: { id: string }) {
             <p className="muted">{t(lang, "noConditions")}</p>
           ) : (
             <ul className="result-list">
-              {chart.conditions.map((c) => (
-                <li key={c.code} className="result-card">
-                  <div className="grow title">{c.display}</div>
-                  <span className="badge neutral">
-                    {t(lang, "code")}: {c.code}
+              {chart.conditions.map((c, i) => (
+                <li key={`${c.code}-${i}`} className="result-card">
+                  <div className="grow">
+                    <div className="title">{c.display}</div>
+                    {c.code ? (
+                      <div className="muted">
+                        {t(lang, "code")}: {c.code}
+                      </div>
+                    ) : null}
+                  </div>
+                  <span
+                    className={`badge ${c.status === "resolved" ? "ok" : "neutral"}`}
+                  >
+                    {c.status === "active"
+                      ? t(lang, "dxActive")
+                      : c.status === "provisional"
+                        ? t(lang, "dxProvisional")
+                        : c.status === "resolved"
+                          ? t(lang, "dxResolved")
+                          : c.status}
                   </span>
                 </li>
               ))}
@@ -438,9 +560,19 @@ function PatientWorkspace({ id }: { id: string }) {
                     <div className="title">{e.practitioner}</div>
                     <div className="muted">
                       {t(lang, "started")}: {formatDateTime(lang, e.started_at)}
+                      {e.addenda_count > 0
+                        ? ` · ${t(lang, "addenda")}: ${e.addenda_count}`
+                        : null}
                     </div>
                   </div>
-                  <span className="badge neutral">{e.status}</span>
+                  <span className={`badge ${encounterStatusBadge(e.status)}`}>
+                    {t(lang, encounterStatusKey(e.status))}
+                  </span>
+                  <Link className="navlink" href={`/encounters/${e.id}`}>
+                    {e.status === "in_progress" && e.own
+                      ? t(lang, "resumeConsultation")
+                      : t(lang, "openSummary")}
+                  </Link>
                 </li>
               ))}
             </ul>
