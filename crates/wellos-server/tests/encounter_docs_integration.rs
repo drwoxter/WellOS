@@ -661,3 +661,141 @@ async fn ai_draft_generation_acceptance_and_rejection() {
     assert_eq!(ws["note"]["status"], json!("draft"));
     assert_eq!(ws["encounter"]["status"], json!("in_progress"));
 }
+
+/// Cancel the encounter inside an uncommitted transaction that holds the row
+/// lock, launch the given request while the lock is held, then commit. The
+/// request's pre-transaction status read sees the encounter as still active,
+/// so this reproduces a cancellation racing with the mutation.
+async fn race_with_cancellation(
+    state: &AppState,
+    enc: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let enc_id = uuid::Uuid::parse_str(enc).unwrap();
+    let mut tx = state.pool.begin().await.unwrap();
+    sqlx::query("UPDATE encounters SET status='cancelled' WHERE id = $1 AND status='in_progress'")
+        .bind(enc_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let st = state.clone();
+    let (method, path) = (method.to_string(), path.to_string());
+    let handle =
+        tokio::spawn(async move { call(&st, &method, &path, "dev-dr.garcia", body).await });
+
+    // Give the request time to pass its pre-transaction read and block on the
+    // encounter row lock, then commit the cancellation.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.commit().await.unwrap();
+    handle.await.unwrap()
+}
+
+#[tokio::test]
+async fn sign_racing_cancellation_conflicts() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+    let (st, note) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Cough", "assessment": "Viral URTI" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{note}");
+
+    let (st, err) = race_with_cancellation(
+        &state,
+        &enc,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/sign"),
+        Some(json!({ "version": 1 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("encounter_not_active"));
+
+    // The cancelled encounter holds no signed note and stays cancelled.
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ws}");
+    assert_eq!(ws["encounter"]["status"], json!("cancelled"));
+    assert_eq!(ws["note"]["status"], json!("draft"));
+}
+
+#[tokio::test]
+async fn documentation_writes_racing_cancellation_conflict() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+
+    let (st, err) = race_with_cancellation(
+        &state,
+        &enc,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        Some(json!({ "assessment": "written after cancellation" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("encounter_not_active"));
+
+    let (st, err) = race_with_cancellation(
+        &state,
+        &enc,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/vitals"),
+        Some(json!({ "heart_rate_bpm": 72 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("encounter_not_active"));
+}
+
+#[tokio::test]
+async fn concurrent_ai_drafts_leave_one_reviewable_artifact() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Headache", "assessment": "Tension headache" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let st = state.clone();
+        let path = format!("/api/v1/encounters/{enc}/ai-draft");
+        handles.push(tokio::spawn(async move {
+            call(&st, "POST", &path, "dev-dr.garcia", Some(json!({}))).await
+        }));
+    }
+    for h in handles {
+        let (st, body) = h.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{body}");
+    }
+
+    // Generation is serialized on the encounter row, so supersession leaves
+    // exactly one draft awaiting review.
+    let enc_id = uuid::Uuid::parse_str(&enc).unwrap();
+    let (awaiting,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM ai_artifacts WHERE encounter_id = $1 AND status = 'awaiting_review'",
+    )
+    .bind(enc_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(awaiting, 1);
+}

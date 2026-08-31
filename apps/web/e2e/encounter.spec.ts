@@ -69,7 +69,7 @@ test("clinician documents and signs a consultation end to end", async ({
     .click();
   await expect(page.getByText("Diagnosis added.")).toBeVisible();
   await expect(
-    page.locator(".result-card .title", { hasText: "Fatigue" }),
+    page.locator(".result-card .title", { hasText: "Fatigue" }).first(),
   ).toBeVisible();
 
   // Save the draft.

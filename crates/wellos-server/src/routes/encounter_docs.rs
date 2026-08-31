@@ -56,6 +56,30 @@ fn resource_ctx(enc: &EncounterCtx) -> ResourceCtx {
     }
 }
 
+/// Lock the encounter row for the duration of a mutation transaction so
+/// concurrent lifecycle transitions (sign, cancel) serialize, and return the
+/// row's state as of the lock.
+async fn lock_encounter(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+) -> Result<EncounterCtx, ApiError> {
+    let row = sqlx::query(
+        "SELECT tenant_id, patient_id, facility_id, practitioner_id, status
+         FROM encounters WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    Ok(EncounterCtx {
+        tenant_id: row.get("tenant_id"),
+        patient_id: row.get("patient_id"),
+        facility_id: row.get("facility_id"),
+        practitioner_id: row.get("practitioner_id"),
+        status: row.get("status"),
+    })
+}
+
 /// Documentation writes attach to the practitioner's own active encounter.
 fn require_own_active(enc: &EncounterCtx, ctx: &AuthContext) -> Result<(), ApiError> {
     if enc.practitioner_id != ctx.user_id {
@@ -453,6 +477,8 @@ pub async fn save_note(
     require_own_active(&enc, &ctx)?;
 
     let mut tx = state.pool.begin().await?;
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     let existing = sqlx::query(
         "SELECT id, status, version FROM encounter_notes
@@ -576,6 +602,8 @@ pub async fn sign(
     require_own_active(&enc, &ctx)?;
 
     let mut tx = state.pool.begin().await?;
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     let note = sqlx::query(
         "SELECT id, status, version, reason_for_encounter, assessment, plan
@@ -614,7 +642,7 @@ pub async fn sign(
             "an assessment or plan is required before signing",
         ));
     }
-    sqlx::query(
+    let note_updated = sqlx::query(
         "UPDATE encounter_notes SET status='signed', version = version + 1,
                 signed_at = now(), signed_by = $1, updated_at = now()
          WHERE id = $2 AND status = 'draft' AND version = $3",
@@ -624,13 +652,19 @@ pub async fn sign(
     .bind(body.version)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    let encounter_updated = sqlx::query(
         "UPDATE encounters SET status='completed', completed_at = now()
          WHERE id = $1 AND status = 'in_progress'",
     )
     .bind(id)
     .execute(&mut *tx)
     .await?;
+    if note_updated.rows_affected() != 1 || encounter_updated.rows_affected() != 1 {
+        return Err(ApiError::conflict(
+            "encounter_not_active",
+            "this encounter is no longer in progress",
+        ));
+    }
     audit::emit(
         &mut *tx,
         &ctx,
@@ -877,6 +911,8 @@ pub async fn record_vitals(
 
     let vitals_id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     sqlx::query(
         "INSERT INTO vital_signs
@@ -967,6 +1003,8 @@ pub async fn add_diagnosis(
 
     let dx_id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     sqlx::query(
         "INSERT INTO conditions
@@ -1018,6 +1056,8 @@ pub async fn cancel(
     require_own_active(&enc, &ctx)?;
 
     let mut tx = state.pool.begin().await?;
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     let signed: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM encounter_notes
@@ -1233,6 +1273,11 @@ pub async fn ai_draft(
 
     let artifact_id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    // Locking the encounter also serializes concurrent draft generation, so
+    // the supersede-then-insert below leaves exactly one awaiting_review
+    // draft per encounter.
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     // Any previous unreviewed draft for this encounter is superseded so only
     // one draft awaits review at a time.

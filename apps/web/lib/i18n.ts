@@ -269,6 +269,8 @@ const dict = {
     author: "Author",
     versionConflict:
       "This note was changed by someone else. Reload the page before saving again.",
+    unsavedLeaveConfirm:
+      "You have unsaved documentation. Leave this consultation without saving?",
     noteImmutable:
       "This note is signed and can no longer be edited. Add an addendum for corrections.",
     signRequiresReason: "A reason for consultation is required before signing.",
@@ -609,6 +611,8 @@ const dict = {
     author: "Autor",
     versionConflict:
       "Otra persona modificó esta nota. Recargue la página antes de guardar de nuevo.",
+    unsavedLeaveConfirm:
+      "Hay documentación sin guardar. ¿Salir de la consulta sin guardar?",
     noteImmutable:
       "Esta nota está firmada y ya no puede editarse. Añada una adenda para correcciones.",
     signRequiresReason: "Se requiere un motivo de consulta antes de firmar.",

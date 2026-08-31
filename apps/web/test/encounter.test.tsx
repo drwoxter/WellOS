@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import EncounterPage from "@/app/encounters/[id]/page";
 import { SessionProvider } from "@/lib/session";
@@ -356,6 +356,102 @@ describe("encounter documentation workspace", () => {
     expect(
       screen.getByRole("button", { name: "Reject draft" }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps dirty local edits when a refresh returns a newer note version", async () => {
+    const user = userEvent.setup();
+    const baseNote = {
+      id: "n1",
+      status: "draft",
+      version: 3,
+      reason_for_encounter: "Cough",
+      history_present_illness: null,
+      medical_history: null,
+      review_of_systems: null,
+      physical_exam: null,
+      assessment: null,
+      plan: null,
+      follow_up: null,
+      author: "Dr. García",
+      updated_at: "2026-08-29T09:10:00Z",
+      signed_at: null,
+      signed_by: null,
+    };
+    let currentWs = workspace({ note: baseNote });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/session")
+        return Promise.resolve(jsonResponse({ authenticated: true }));
+      if (url === "/api/v1/meta/tenant")
+        return Promise.resolve(jsonResponse(META));
+      if (init?.method === "POST" && url === "/api/v1/encounters/e1/vitals") {
+        // Simulate the note advancing on the server before the refresh.
+        currentWs = workspace({
+          note: {
+            ...baseNote,
+            version: 4,
+            reason_for_encounter: "Rewritten elsewhere",
+          },
+        });
+        return Promise.resolve(jsonResponse({ id: "v1", bmi: null }));
+      }
+      if (url === "/api/v1/encounters/e1")
+        return Promise.resolve(jsonResponse(currentWs));
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <SessionProvider>
+        <EncounterPage params={{ id: "e1" }} />
+      </SessionProvider>,
+    );
+
+    const reason = await screen.findByLabelText(/Reason for consultation/);
+    await user.type(reason, " and fever");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    // Recording vitals triggers a workspace refresh with the newer note.
+    await user.click(
+      await screen.findByRole("button", { name: "Record vital signs" }),
+    );
+    await user.type(screen.getByLabelText(/Heart rate/), "72");
+    const submit = screen
+      .getAllByRole("button", { name: "Record vital signs" })
+      .find((b) => b.getAttribute("type") === "submit");
+    await user.click(submit as HTMLElement);
+
+    // Local dirty edits are preserved and the version drift is surfaced as a
+    // conflict instead of silently adopting the newer server note.
+    expect(
+      await screen.findByText(/changed by someone else/i),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue(
+      "Cough and fever",
+    );
+  });
+
+  it("asks for confirmation before internal navigation with unsaved edits", async () => {
+    const user = userEvent.setup();
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+    setup(workspace());
+    const reason = await screen.findByLabelText(/Reason for consultation/);
+    await user.type(reason, "Chest pain");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    const anchor = document.createElement("a");
+    anchor.href = "/patients/p1";
+    anchor.textContent = "Patient chart";
+    document.body.appendChild(anchor);
+    const cancelled = !fireEvent.click(anchor);
+    expect(confirmMock).toHaveBeenCalledWith(
+      expect.stringMatching(/unsaved documentation/i),
+    );
+    expect(cancelled).toBe(true);
+    expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue(
+      "Chest pain",
+    );
+    anchor.remove();
   });
 
   it("shows an unauthorized state for out-of-scope encounters", async () => {

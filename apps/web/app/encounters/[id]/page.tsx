@@ -956,34 +956,66 @@ function EncounterWorkspace({ id }: { id: string }) {
     follow_up: true,
   });
   const hydratedNote = useRef(false);
+  const dirtyRef = useRef(false);
+  const noteVersionRef = useRef<number | null>(null);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+  useEffect(() => {
+    noteVersionRef.current = noteVersion;
+  }, [noteVersion]);
 
   const load = useCallback(() => {
     setLoadError(null);
     apiFetch<Workspace>(`/api/v1/encounters/${id}`)
       .then((data) => {
         setWs(data);
-        setNoteVersion(data.note?.version ?? null);
+        const serverVersion = data.note?.version ?? null;
         if (!hydratedNote.current) {
           setSections(sectionsFromNote(data.note));
+          setNoteVersion(serverVersion);
           hydratedNote.current = true;
+        } else if (!dirtyRef.current) {
+          setSections(sectionsFromNote(data.note));
+          setNoteVersion(serverVersion);
+        } else if (serverVersion !== noteVersionRef.current) {
+          // The note changed on the server while local edits are unsaved.
+          // Keep the local version so the next save surfaces a conflict
+          // instead of silently overwriting the newer note.
+          setSaveError(t(lang, "versionConflict"));
         }
       })
       .catch((e) => setLoadError(errMessage(e)));
-  }, [id]);
+  }, [id, lang]);
 
   useEffect(() => {
     if (authenticated) load();
   }, [authenticated, load]);
 
-  // Protect against losing unsaved documentation on navigation.
+  // Protect against losing unsaved documentation on navigation: browser
+  // unloads (refresh, tab close, external links) and client-side App Router
+  // navigation through internal links.
   useEffect(() => {
     if (!dirty) return;
     const handler = (e: BeforeUnloadEvent) => {
       e.preventDefault();
     };
+    const clickHandler = (e: MouseEvent) => {
+      const target = e.target instanceof Element ? e.target : null;
+      const anchor = target?.closest("a[href]");
+      if (!anchor) return;
+      if (!window.confirm(t(lang, "unsavedLeaveConfirm"))) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
     window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, [dirty]);
+    document.addEventListener("click", clickHandler, true);
+    return () => {
+      window.removeEventListener("beforeunload", handler);
+      document.removeEventListener("click", clickHandler, true);
+    };
+  }, [dirty, lang]);
 
   const editable = Boolean(
     ws && ws.capabilities.can_document && ws.note?.status !== "signed",
