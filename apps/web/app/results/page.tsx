@@ -69,6 +69,7 @@ function ResultsContent() {
     const generation = ++requestGeneration.current;
     setError(null);
     setLoadingMore(false);
+    setItems(null);
     apiFetch<WorklistPage>(buildUrl(null))
       .then((d) => {
         if (requestGeneration.current !== generation) return;
@@ -128,13 +129,6 @@ function ResultsContent() {
       </div>
     );
   }
-  if (!filtered) {
-    return (
-      <p className="muted" role="status">
-        {t(lang, "loading")}
-      </p>
-    );
-  }
 
   return (
     <>
@@ -190,7 +184,11 @@ function ResultsContent() {
           </div>
         </div>
 
-        {filtered.length === 0 ? (
+        {!filtered ? (
+          <p className="muted" role="status">
+            {t(lang, "loading")}
+          </p>
+        ) : filtered.length === 0 ? (
           <p className="muted">
             {hasFilters
               ? t(lang, "noMatchingResults")

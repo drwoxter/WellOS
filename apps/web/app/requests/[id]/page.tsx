@@ -37,6 +37,7 @@ type Detail = {
     status: string;
     amends: string | null;
     effective_at: string;
+    received_at: string;
   }[];
   rule_evaluations: {
     rule_id: string;
@@ -296,7 +297,8 @@ export default function RequestDetailPage() {
                     <th scope="col">{t(lang, "value")}</th>
                     <th scope="col">{t(lang, "referenceRange")}</th>
                     <th scope="col">{t(lang, "state")}</th>
-                    <th scope="col">{t(lang, "recorded")}</th>
+                    <th scope="col">{t(lang, "collected")}</th>
+                    <th scope="col">{t(lang, "received")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -322,6 +324,7 @@ export default function RequestDetailPage() {
                         )}
                       </td>
                       <td>{formatDateTime(lang, o.effective_at)}</td>
+                      <td>{formatDateTime(lang, o.received_at)}</td>
                     </tr>
                   ))}
                 </tbody>

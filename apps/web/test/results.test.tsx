@@ -258,6 +258,59 @@ describe("results worklist", () => {
     expect(screen.getAllByText("Marta Demopatient").length).toBeGreaterThan(0);
   });
 
+  it("clears stale rows and shows loading while a filter change is in flight", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/session")
+          return Promise.resolve(jsonResponse({ authenticated: true }));
+        if (url === "/api/v1/meta/tenant")
+          return Promise.resolve(
+            jsonResponse({
+              tenant: { id: "t", name: "Demo Tenant", cell: "eu" },
+              user: {
+                username: "dr.garcia",
+                display_name: "Dr. García",
+                roles: ["physician"],
+              },
+              facilities: [],
+            }),
+          );
+        if (url.startsWith("/api/v1/worklist")) {
+          const params = new URL(url, "http://localhost").searchParams;
+          if (params.get("critical") === "true") {
+            // The critical-only request never resolves within the test.
+            return new Promise<Response>(() => {});
+          }
+          return Promise.resolve(
+            jsonResponse({ items: ITEMS, has_more: false }),
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      }),
+    );
+    render(
+      <SessionProvider>
+        <ResultsPage />
+      </SessionProvider>,
+    );
+    await screen.findAllByText("Marta Demopatient");
+    await userEvent.selectOptions(
+      screen.getByLabelText("Criticality"),
+      "critical",
+    );
+    // The previous unfiltered rows must not be shown under the new filter.
+    await waitFor(() =>
+      expect(screen.queryByText("Marta Demopatient")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Loading");
+    // Filter controls stay available while the replacement page loads.
+    expect(
+      screen.getByRole("button", { name: "Reset filters" }),
+    ).toBeInTheDocument();
+  });
+
   it("hides the result link when the server denies detail access", async () => {
     setup([
       { ...ITEMS[0], can_open_detail: false },

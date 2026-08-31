@@ -48,11 +48,16 @@ function DashboardContent() {
     setError(null);
     Promise.all([
       apiFetch<Summary>("/api/v1/worklist/summary"),
+      apiFetch<{ items: WorklistItem[] }>("/api/v1/worklist?critical=true"),
       apiFetch<{ items: WorklistItem[] }>("/api/v1/worklist"),
     ])
-      .then(([s, w]) => {
+      .then(([s, critical, recent]) => {
         setSummary(s);
-        setItems(w.items);
+        const seen = new Set(critical.items.map((i) => i.id));
+        setItems([
+          ...critical.items,
+          ...recent.items.filter((i) => !seen.has(i.id)),
+        ]);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);

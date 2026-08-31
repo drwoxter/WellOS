@@ -1764,6 +1764,23 @@ async fn worklist_filters_apply_before_row_cap() {
     .execute(&state.pool)
     .await
     .unwrap();
+    // A routine row destined for later pages that will turn critical
+    // between page fetches.
+    let promoted_sr = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO service_requests (id, tenant_id, encounter_id, patient_id, requester_id,
+                                       code_loinc, display, loop_state, version, created_at)
+         VALUES ($1,$2,$3,$4,$5,'2823-3','Potassium [Moles/volume] in Serum','received',2,
+                 now() - interval '1 hour')",
+    )
+    .bind(promoted_sr)
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .bind(patient_id)
+    .bind(requester_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
     // More routine, newer rows than the API's row cap.
     for _ in 0..210 {
         sqlx::query(
@@ -1802,6 +1819,35 @@ async fn worklist_filters_apply_before_row_cap() {
             .any(|i| i["id"] == json!(old_sr)),
         "old row should be beyond the first page"
     );
+    // After the first page is fetched, the unseen routine row becomes
+    // critical (e.g. an amendment). The immutable keyset ordering must
+    // still surface it exactly once on a later page.
+    let obs_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO observations (id, tenant_id, service_request_id, patient_id, code_loinc,
+                                   value_num, unit, status, source_system, idempotency_key,
+                                   effective_at, received_at)
+         VALUES ($1,$2,$3,$4,'2823-3',7.2,'mmol/L','final','fake-lab',$5, now(), now())",
+    )
+    .bind(obs_id)
+    .bind(tenant_id)
+    .bind(promoted_sr)
+    .bind(patient_id)
+    .bind(uniq("promoted-key"))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO alerts (id, tenant_id, patient_id, observation_id, severity, message, status)
+         VALUES ($1,$2,$3,$4,'critical','Critical potassium 7.2 mmol/L','open')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(patient_id)
+    .bind(obs_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
     // Cursor paging reaches the old row even without filters, with no row
     // skipped or repeated across pages.
     let mut cursor = unfiltered["next_cursor"].as_str().unwrap().to_string();
@@ -1812,6 +1858,7 @@ async fn worklist_filters_apply_before_row_cap() {
         .map(|i| i["id"].as_str().unwrap().to_string())
         .collect();
     let mut found_via_paging = false;
+    let mut found_promoted = false;
     loop {
         let (st, page) = call(
             &state,
@@ -1829,6 +1876,10 @@ async fn worklist_filters_apply_before_row_cap() {
             if item["id"] == json!(old_sr) {
                 found_via_paging = true;
             }
+            if item["id"] == json!(promoted_sr) {
+                found_promoted = true;
+                assert_eq!(item["has_open_alert"], json!(true), "{item}");
+            }
         }
         // A row closing between page fetches must not shift later pages:
         // close one first-page row after fetching each page.
@@ -1836,10 +1887,11 @@ async fn worklist_filters_apply_before_row_cap() {
             sqlx::query(
                 "UPDATE service_requests SET loop_state = 'closed'
                  WHERE id = $1 AND loop_state <> 'closed'
-                   AND id <> $2",
+                   AND id <> $2 AND id <> $3",
             )
             .bind(open_id.parse::<uuid::Uuid>().unwrap())
             .bind(old_sr)
+            .bind(promoted_sr)
             .execute(&state.pool)
             .await
             .unwrap();
@@ -1852,6 +1904,10 @@ async fn worklist_filters_apply_before_row_cap() {
     assert!(
         found_via_paging,
         "cursor paging must reach every open result even when rows close between fetches"
+    );
+    assert!(
+        found_promoted,
+        "a row turning critical between page fetches must still appear on a later page"
     );
     let (st, _) = call(
         &state,

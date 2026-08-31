@@ -257,45 +257,29 @@ pub struct WorklistQuery {
 /// `cursor` parameter rather than being cut off by a fixed cap.
 pub const WORKLIST_PAGE_SIZE: i64 = 200;
 
-/// Keyset cursor over the worklist ordering tuple
-/// `(has_open_alert DESC, created_at DESC, id DESC)`. Unlike an offset,
-/// rows entering or leaving the list between page fetches cannot shift
-/// later pages, so paging never skips or repeats unchanged rows. A row
-/// whose alert priority changes between fetches is re-ranked relative to
-/// the cursor tuple: it may move ahead of (already-passed) or behind the
-/// cursor, which is the expected behavior for a live worklist.
+/// Keyset cursor over the immutable worklist ordering tuple
+/// `(created_at DESC, id DESC)`. Both columns never change for a row, so a
+/// row's position relative to the cursor is fixed: alert priority changing
+/// between page fetches (e.g. an amendment turning a routine result
+/// critical) can never skip or repeat rows. Criticality is returned per row
+/// (`has_open_alert`) for display and available as a server-side filter.
 struct WorklistCursor {
-    has_open_alert: bool,
     created_at: chrono::DateTime<chrono::Utc>,
     id: Uuid,
 }
 
 impl WorklistCursor {
-    /// URL-safe encoding: `{alert}.{epoch_micros}.{uuid}`.
+    /// URL-safe encoding: `{epoch_micros}.{uuid}`.
     fn encode(&self) -> String {
-        format!(
-            "{}.{}.{}",
-            i32::from(self.has_open_alert),
-            self.created_at.timestamp_micros(),
-            self.id
-        )
+        format!("{}.{}", self.created_at.timestamp_micros(), self.id)
     }
 
     fn decode(raw: &str) -> Option<Self> {
-        let mut parts = raw.splitn(3, '.');
-        let alert = match parts.next()? {
-            "0" => false,
-            "1" => true,
-            _ => return None,
-        };
+        let mut parts = raw.splitn(2, '.');
         let micros: i64 = parts.next()?.parse().ok()?;
         let created_at = chrono::DateTime::from_timestamp_micros(micros)?;
         let id = Uuid::parse_str(parts.next()?).ok()?;
-        Some(Self {
-            has_open_alert: alert,
-            created_at,
-            id,
-        })
+        Some(Self { created_at, id })
     }
 }
 
@@ -395,20 +379,18 @@ pub async fn worklist(
     }
     if cursor.is_some() {
         // Keyset predicate: strictly after the cursor tuple in the DESC
-        // ordering below (row-value comparison, all columns descending).
+        // ordering below (row-value comparison, both columns descending).
         sql.push_str(&format!(
-            " AND (EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
-                           WHERE o.service_request_id = sr.id AND a.status = 'open'),
-                   sr.created_at, sr.id) < (${}, ${}, ${})",
+            " AND (sr.created_at, sr.id) < (${}, ${})",
             arg + 1,
-            arg + 2,
-            arg + 3
+            arg + 2
         ));
     }
-    // Deterministic ordering (id tie-breaker) so pages never skip or repeat
-    // rows; one extra row is fetched to detect whether more pages exist.
+    // Deterministic ordering over immutable columns (id tie-breaker) so
+    // pages never skip or repeat rows even when alert priority changes
+    // between fetches; one extra row detects whether more pages exist.
     sql.push_str(&format!(
-        " ORDER BY has_open_alert DESC, sr.created_at DESC, sr.id DESC LIMIT {}",
+        " ORDER BY sr.created_at DESC, sr.id DESC LIMIT {}",
         WORKLIST_PAGE_SIZE + 1
     ));
     let mut q = sqlx::query(&sql).bind(ctx.tenant_id).bind(ctx.user_id);
@@ -422,7 +404,7 @@ pub async fn worklist(
         q = q.bind(pat);
     }
     if let Some(c) = &cursor {
-        q = q.bind(c.has_open_alert).bind(c.created_at).bind(c.id);
+        q = q.bind(c.created_at).bind(c.id);
     }
     let mut rows = q.fetch_all(&state.pool).await?;
     let has_more = rows.len() as i64 > WORKLIST_PAGE_SIZE;
@@ -430,7 +412,6 @@ pub async fn worklist(
     let next_cursor = if has_more {
         rows.last().map(|r| {
             WorklistCursor {
-                has_open_alert: r.get::<bool, _>("has_open_alert"),
                 created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
                 id: r.get::<Uuid, _>("id"),
             }

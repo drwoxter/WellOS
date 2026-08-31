@@ -37,7 +37,18 @@ function detail(
         identifier: "SYN-0001",
       },
     },
-    observations: [],
+    observations: [
+      {
+        id: "o1",
+        value: "6.9",
+        unit: "mmol/L",
+        reference_range: "3.5-5.1",
+        status: "final",
+        amends: null,
+        effective_at: "2026-08-01T09:30:00Z",
+        received_at: "2026-08-01T10:15:00Z",
+      },
+    ],
     rule_evaluations: [],
     ai_artifacts: [],
     follow_up_tasks: [],
@@ -134,6 +145,20 @@ describe("result detail critical banner", () => {
     setup("received");
     await screen.findByText(/Critical result — requires clinician review/);
     expect(await screen.findByText("Next action")).toBeInTheDocument();
+  });
+
+  it("labels observation collection and receipt times separately", async () => {
+    setup("received");
+    await screen.findByText(/Critical result — requires clinician review/);
+    expect(
+      screen.getByRole("columnheader", { name: "Collected" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "Received" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Recorded" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the follow-up wording after patient notification", async () => {
