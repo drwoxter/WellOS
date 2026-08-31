@@ -550,7 +550,7 @@ async fn seed_demo_states(
             patient_id: marta,
             code_loinc: "2345-7",
             display: "Glucose [Mass/volume] in Serum",
-            value: Decimal::new(42, 0), // 42 mg/dL (critical low)
+            value: Decimal::new(38, 0), // 38 mg/dL (critical low)
             unit: "mg/dL",
             reference_range: "70-99 mg/dL",
             stage: DemoStage::Reviewed,
