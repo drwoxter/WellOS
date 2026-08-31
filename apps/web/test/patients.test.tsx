@@ -26,7 +26,11 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function setup(options: { clinician: boolean; register: boolean }) {
+function setup(options: {
+  clinician: boolean;
+  register: boolean;
+  canOpenChart?: boolean;
+}) {
   const encounterCalls: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -35,7 +39,13 @@ function setup(options: { clinician: boolean; register: boolean }) {
       if (url === "/api/session")
         return Promise.resolve(jsonResponse({ authenticated: true }));
       if (url.startsWith("/api/v1/patients?query="))
-        return Promise.resolve(jsonResponse({ patients: [PATIENT] }));
+        return Promise.resolve(
+          jsonResponse({
+            patients: [
+              { ...PATIENT, can_open_chart: options.canOpenChart ?? true },
+            ],
+          }),
+        );
       if (url === "/api/v1/encounters" && init?.method === "POST") {
         encounterCalls.push(init.body as string);
         return Promise.resolve(jsonResponse({ id: "enc-1" }));
@@ -99,6 +109,25 @@ describe("patient directory", () => {
     expect(
       screen.queryByText("Register a new patient"),
     ).not.toBeInTheDocument();
+  });
+
+  it("hides the chart link for a physician without a care relationship", async () => {
+    setup({ clinician: true, register: false, canOpenChart: false });
+    await searchFor("Fresh");
+    await screen.findByText("Encounterless Fresh");
+    // A newly registered, encounterless patient is not readable by the
+    // physician yet: only the start-encounter route is offered.
+    expect(screen.queryByText("Open chart")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Start encounter" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the chart link for roles that can read within facility scope", async () => {
+    setup({ clinician: false, register: true, canOpenChart: true });
+    await searchFor("Fresh");
+    await screen.findByText("Encounterless Fresh");
+    expect(screen.getByText("Open chart")).toBeInTheDocument();
   });
 
   it("shows registration but no encounter action for registration staff", async () => {

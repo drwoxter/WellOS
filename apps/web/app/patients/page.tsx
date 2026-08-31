@@ -21,6 +21,7 @@ type PatientHit = {
   birth_date: string;
   sex: string;
   identifier: string;
+  can_open_chart: boolean;
 };
 
 function sexLabel(lang: "en" | "es", sex: string): string {
@@ -147,9 +148,11 @@ function SearchSection() {
                     : t(lang, "startEncounter")}
                 </button>
               ) : null}
-              <Link className="navlink" href={`/patients/${p.id}`}>
-                {t(lang, "openChart")}
-              </Link>
+              {p.can_open_chart !== false ? (
+                <Link className="navlink" href={`/patients/${p.id}`}>
+                  {t(lang, "openChart")}
+                </Link>
+              ) : null}
             </li>
           ))}
         </ul>

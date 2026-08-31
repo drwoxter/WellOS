@@ -1,7 +1,7 @@
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
-use crate::policy::{actions, facility_scope, ResourceCtx};
+use crate::policy::{actions, facility_scope, roles, ResourceCtx};
 use crate::ratelimit;
 use crate::routes::guard;
 use crate::state::AppState;
@@ -155,7 +155,11 @@ pub async fn search(
     let rows = match &scope {
         None => {
             sqlx::query(
-                "SELECT id, family_name, given_name, birth_date, sex, identifier
+                "SELECT id, family_name, given_name, birth_date, sex, identifier,
+                        EXISTS (SELECT 1 FROM encounters e
+                                WHERE e.tenant_id = patients.tenant_id
+                                  AND e.patient_id = patients.id
+                                  AND e.practitioner_id = $3) AS has_relationship
                  FROM patients
                  WHERE tenant_id = $1
                    AND (family_name ILIKE $2 OR given_name ILIKE $2 OR identifier ILIKE $2)
@@ -163,13 +167,18 @@ pub async fn search(
             )
             .bind(ctx.tenant_id)
             .bind(&like)
+            .bind(ctx.user_id)
             .fetch_all(&state.pool)
             .await?
         }
         Some(ids) if ids.is_empty() => Vec::new(),
         Some(ids) => {
             sqlx::query(
-                "SELECT id, family_name, given_name, birth_date, sex, identifier
+                "SELECT id, family_name, given_name, birth_date, sex, identifier,
+                        EXISTS (SELECT 1 FROM encounters e
+                                WHERE e.tenant_id = patients.tenant_id
+                                  AND e.patient_id = patients.id
+                                  AND e.practitioner_id = $4) AS has_relationship
                  FROM patients
                  WHERE tenant_id = $1 AND facility_id = ANY($3)
                    AND (family_name ILIKE $2 OR given_name ILIKE $2 OR identifier ILIKE $2)
@@ -178,10 +187,16 @@ pub async fn search(
             .bind(ctx.tenant_id)
             .bind(&like)
             .bind(ids)
+            .bind(ctx.user_id)
             .fetch_all(&state.pool)
             .await?
         }
     };
+    // Display-only hint mirroring the central chart-read policy: physicians
+    // (without a tenant-wide administrative role) need an established care
+    // relationship to open a chart. The backend guard stays authoritative.
+    let chart_needs_relationship =
+        ctx.has_role(roles::PHYSICIAN) && !ctx.has_role(roles::CLINICAL_ADMIN);
     let patients: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -192,6 +207,8 @@ pub async fn search(
                 "birth_date": r.get::<NaiveDate, _>("birth_date"),
                 "sex": r.get::<String, _>("sex"),
                 "identifier": r.get::<String, _>("identifier"),
+                "can_open_chart": !chart_needs_relationship
+                    || r.get::<bool, _>("has_relationship"),
             })
         })
         .collect();
@@ -298,7 +315,8 @@ pub async fn chart(
     .collect::<Vec<_>>();
 
     let encounters = sqlx::query(
-        "SELECT e.id, e.status, e.started_at, u.display_name AS practitioner
+        "SELECT e.id, e.status, e.started_at, e.practitioner_id,
+                u.display_name AS practitioner
          FROM encounters e JOIN users u ON u.id = e.practitioner_id
          WHERE e.tenant_id=$1 AND e.patient_id=$2 ORDER BY e.started_at DESC",
     )
@@ -313,6 +331,7 @@ pub async fn chart(
             "status": r.get::<String,_>("status"),
             "started_at": r.get::<chrono::DateTime<chrono::Utc>,_>("started_at"),
             "practitioner": r.get::<String,_>("practitioner"),
+            "own": r.get::<Uuid,_>("practitioner_id") == ctx.user_id,
         })
     })
     .collect::<Vec<_>>();

@@ -2132,6 +2132,43 @@ async fn physician_can_open_chart_after_starting_encounter_from_search() {
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
 
+    // Search reflects that: the display-only capability is false for the
+    // physician, but true for registration staff (facility-scoped reads).
+    let (st, hits) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients?query={identifier}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{hits}");
+    let hit = hits["patients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(patient_id))
+        .expect("registered patient in physician search results");
+    assert_eq!(hit["can_open_chart"], json!(false), "{hit}");
+    let (st, hits) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients?query={identifier}"),
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{hits}");
+    let hit = hits["patients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(patient_id))
+        .expect("registered patient in registration search results");
+    assert_eq!(hit["can_open_chart"], json!(true), "{hit}");
+
     // Starting an encounter (the search-result action) establishes it.
     let (st, enc) = call(
         &state,
@@ -2153,4 +2190,170 @@ async fn physician_can_open_chart_after_starting_encounter_from_search() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{chart}");
+
+    // With the relationship established the search capability flips to true.
+    let (st, hits) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients?query={identifier}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{hits}");
+    let hit = hits["patients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(patient_id))
+        .expect("patient in physician search results after encounter");
+    assert_eq!(hit["can_open_chart"], json!(true), "{hit}");
+}
+
+#[tokio::test]
+async fn service_request_requires_own_active_encounter() {
+    let (state, _) = test_state().await;
+    let (st, meta) = call(
+        &state,
+        "GET",
+        "/api/v1/meta/tenant",
+        "dev-reg.rivera",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let facility = meta["facilities"][0]["id"].as_str().unwrap().to_string();
+    let (st, patient) = call(
+        &state,
+        "POST",
+        "/api/v1/patients",
+        "dev-reg.rivera",
+        Some(json!({
+            "facility_id": facility,
+            "family_name": "Ordering",
+            "given_name": "Guard",
+            "birth_date": "1970-01-15",
+            "sex": "female",
+            "identifier": uniq("MRN-ORD"),
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{patient}");
+    let patient_id = patient["id"].as_str().unwrap().to_string();
+
+    // A completed encounter is not a valid ordering context.
+    let (st, enc) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        "dev-dr.garcia",
+        Some(json!({ "patient_id": patient_id })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{enc}");
+    let completed_enc = enc["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE encounters SET status = 'completed' WHERE id = $1::uuid")
+        .bind(&completed_enc)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/v1/service-requests",
+        "dev-dr.garcia",
+        Some(json!({
+            "encounter_id": completed_enc,
+            "code_loinc": "2823-3",
+            "display": "Potassium",
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"]["code"],
+        json!("encounter_not_active"),
+        "{body}"
+    );
+
+    // Another practitioner's active encounter is not a valid ordering
+    // context either, even for a physician assigned to the same facility.
+    let (st, enc) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        "dev-dr.garcia",
+        Some(json!({ "patient_id": patient_id })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{enc}");
+    let garcia_enc = enc["id"].as_str().unwrap().to_string();
+    let other = create_same_facility_physician(&state, &facility).await;
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/v1/service-requests",
+        &format!("dev-{other}"),
+        Some(json!({
+            "encounter_id": garcia_enc,
+            "code_loinc": "2823-3",
+            "display": "Potassium",
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+
+    // The encounter's own practitioner can still order on it.
+    let (st, sr) = call(
+        &state,
+        "POST",
+        "/api/v1/service-requests",
+        "dev-dr.garcia",
+        Some(json!({
+            "encounter_id": garcia_enc,
+            "code_loinc": "2823-3",
+            "display": "Potassium",
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{sr}");
+}
+
+/// Create a fresh physician assigned to the given facility.
+async fn create_same_facility_physician(state: &AppState, facility_id: &str) -> String {
+    let username = uniq("dr.other");
+    let (tenant_id,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT tenant_id FROM users WHERE username = 'dr.garcia'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let uid = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, username, display_name) VALUES ($1,$2,$3,'Other Test Physician')",
+    )
+    .bind(uid)
+    .bind(tenant_id)
+    .bind(&username)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (id, tenant_id, user_id, role, facility_id) VALUES ($1,$2,$3,'physician',$4::uuid)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(uid)
+    .bind(facility_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    username
 }

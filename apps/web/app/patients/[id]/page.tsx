@@ -48,6 +48,7 @@ type Chart = {
     status: string;
     started_at: string;
     practitioner: string;
+    own: boolean;
   }[];
   consents: { purpose: string; status: string }[];
   alerts: { severity: string; message: string; created_at: string }[];
@@ -262,11 +263,13 @@ function Actions({
             onChange={(e) => setEncounterId(e.target.value)}
           >
             <option value="new">{t(lang, "newEncounter")}</option>
-            {chart.encounters.map((enc) => (
-              <option key={enc.id} value={enc.id}>
-                {formatDateTime(lang, enc.started_at)} — {enc.practitioner}
-              </option>
-            ))}
+            {chart.encounters
+              .filter((enc) => enc.status === "in_progress" && enc.own)
+              .map((enc) => (
+                <option key={enc.id} value={enc.id}>
+                  {formatDateTime(lang, enc.started_at)} — {enc.practitioner}
+                </option>
+              ))}
           </select>
           <p>
             <button className="primary" type="submit" disabled={busy}>

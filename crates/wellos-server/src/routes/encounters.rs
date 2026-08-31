@@ -89,7 +89,7 @@ pub async fn create_service_request(
         ));
     }
     let enc = sqlx::query(
-        "SELECT e.tenant_id, e.patient_id, e.facility_id
+        "SELECT e.tenant_id, e.patient_id, e.facility_id, e.status, e.practitioner_id
          FROM encounters e WHERE e.id = $1",
     )
     .bind(body.encounter_id)
@@ -99,6 +99,8 @@ pub async fn create_service_request(
     let tenant_id: Uuid = enc.get("tenant_id");
     let patient_id: Uuid = enc.get("patient_id");
     let facility_id: Uuid = enc.get("facility_id");
+    let enc_status: String = enc.get("status");
+    let practitioner_id: Uuid = enc.get("practitioner_id");
 
     let allowed = guard(
         &state,
@@ -112,6 +114,21 @@ pub async fn create_service_request(
         }),
     )
     .await?;
+
+    // Orders attach only to the requester's own active encounter; a closed
+    // encounter or one owned by another practitioner is not a valid order
+    // context.
+    if enc_status != "in_progress" {
+        return Err(ApiError::conflict(
+            "encounter_not_active",
+            "orders require an active (in progress) encounter",
+        ));
+    }
+    if practitioner_id != ctx.user_id {
+        return Err(ApiError::forbidden(
+            "orders require the requester's own encounter",
+        ));
+    }
 
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
