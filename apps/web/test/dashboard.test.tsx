@@ -232,6 +232,16 @@ describe("dashboard cockpit", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("gives laboratory professionals the results-first cockpit", async () => {
+    setup(["laboratory_professional"]);
+    await screen.findByText("Pending tasks");
+    const widgets = screen
+      .getAllByRole("region")
+      .filter((s) => s.classList.contains("widget"))
+      .map((s) => s.getAttribute("aria-labelledby"));
+    expect(widgets).toEqual(["w-results", "w-tasks", "w-attention", "w-ai"]);
+  });
+
   it("renders the role-default widgets with record data", async () => {
     setup(["physician"]);
     expect(await screen.findByText("Draft consultations")).toBeInTheDocument();

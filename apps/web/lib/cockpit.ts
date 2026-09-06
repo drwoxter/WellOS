@@ -30,7 +30,7 @@ export function defaultConfig(roles: string[]): CockpitConfig {
       density: "expanded",
     };
   }
-  if (roles.includes("lab_professional") || roles.includes("nurse")) {
+  if (roles.includes("laboratory_professional") || roles.includes("nurse")) {
     return {
       order: ["results", "tasks", "attention", "ai", "drafts"],
       hidden: ["drafts"],

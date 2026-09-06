@@ -793,6 +793,127 @@ async fn closed_encounters_reject_transcription_and_application() {
     assert_eq!(status, "superseded");
 }
 
+/// Two tabs: draft A is partially applied (status `approved`, remaining
+/// sections still insertable), then a new recording produces draft B. A's
+/// remaining suggestions must no longer be applicable, and closing the
+/// encounter must retire a partially applied draft just like an awaiting one.
+#[tokio::test]
+async fn a_new_recording_retires_a_partially_applied_draft() {
+    let (state, _) = test_state().await;
+    let (_, enc) = start_consultation(&state).await;
+    grant_consent(&state, &enc).await;
+    let artifact_status = |id: String| {
+        let pool = state.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM ai_artifacts WHERE id = $1::uuid")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+
+    // Tab 1: record, apply one section of draft A.
+    let (st, draft_a) = transcribe(&state, &enc, "dev-dr.garcia").await;
+    assert_eq!(st, StatusCode::OK, "{draft_a}");
+    let a = draft_a["id"].as_str().unwrap().to_string();
+    let review_a = format!("/api/v1/encounters/{enc}/scribe/{a}/review");
+    let (st, applied) = call(
+        &state,
+        "POST",
+        &review_a,
+        "dev-dr.garcia",
+        Some(json!({
+            "decision": "apply",
+            "sections": [{ "section": "history_present_illness", "mode": "fill" }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{applied}");
+    assert_eq!(applied["status"], json!("approved"));
+    let version = applied["note"]["version"].as_i64().unwrap();
+    assert_eq!(artifact_status(a.clone()).await, "approved");
+
+    // Tab 2: a new recording replaces the current draft.
+    let (st, draft_b) = transcribe(&state, &enc, "dev-dr.garcia").await;
+    assert_eq!(st, StatusCode::OK, "{draft_b}");
+    let b = draft_b["id"].as_str().unwrap().to_string();
+    assert_ne!(a, b);
+    assert_eq!(artifact_status(a.clone()).await, "superseded");
+    assert_eq!(artifact_status(b.clone()).await, "awaiting_review");
+
+    // Tab 1 tries to insert another section from the stale draft A.
+    let hpi = draft_a["output"]["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["section"] == json!("history_present_illness"))
+        .and_then(|s| s["text"].as_str())
+        .unwrap();
+    let (st, err) = call(
+        &state,
+        "POST",
+        &review_a,
+        "dev-dr.garcia",
+        Some(json!({
+            "decision": "apply",
+            "version": version,
+            "history_present_illness": hpi,
+            "sections": [{ "section": "plan", "mode": "fill" }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("artifact_not_reviewable"));
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        ws["note"]["version"],
+        json!(version),
+        "no text was inserted"
+    );
+    assert!(ws["note"]["plan"].as_str().unwrap_or("").is_empty());
+    assert_eq!(ws["scribe_draft"]["id"], json!(b), "workspace shows B");
+
+    // Partially apply B, then sign: a partially applied draft is retired by
+    // closure too.
+    let (st, applied) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/scribe/{b}/review"),
+        "dev-dr.garcia",
+        Some(json!({
+            "decision": "apply",
+            "version": version,
+            "history_present_illness": hpi,
+            "sections": [
+                { "section": "reason_for_encounter", "mode": "fill" },
+                { "section": "plan", "mode": "fill" },
+            ],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{applied}");
+    assert_eq!(artifact_status(b.clone()).await, "approved");
+    let (st, signed) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/sign"),
+        "dev-dr.garcia",
+        Some(json!({ "version": applied["note"]["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{signed}");
+    assert_eq!(artifact_status(b).await, "superseded");
+}
+
 // ---------------------------------------------------------------------------
 // Application: safe merge, per-section, version binding
 // ---------------------------------------------------------------------------

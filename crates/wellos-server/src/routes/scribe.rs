@@ -54,9 +54,12 @@ pub const ALLOWED_MIME_TYPES: &[&str] = &[
 
 const SCRIBE_TEMPLATE: &str = "consultation-scribe@1.0.0";
 
-/// Retire unreviewed scribe drafts when the encounter closes (sign/cancel):
-/// a closed record can never receive them.
-pub(crate) async fn supersede_awaiting_scribe_drafts(
+/// Retire every scribe draft that could still be applied: those awaiting
+/// review and those partially applied (`approved`, whose remaining sections
+/// stay insertable). Called when a new recording replaces the current draft
+/// and when the encounter closes (sign/cancel), since a closed record can
+/// never receive them.
+pub(crate) async fn supersede_applicable_scribe_drafts(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
     encounter_id: Uuid,
@@ -64,12 +67,13 @@ pub(crate) async fn supersede_awaiting_scribe_drafts(
     sqlx::query(
         "UPDATE ai_artifacts SET status = $1
          WHERE tenant_id = $2 AND encounter_id = $3 AND artifact_type = 'scribe_draft'
-           AND status = $4",
+           AND status IN ($4, $5)",
     )
     .bind(ArtifactStatus::Superseded.as_str())
     .bind(tenant_id)
     .bind(encounter_id)
     .bind(ArtifactStatus::AwaitingReview.as_str())
+    .bind(ArtifactStatus::Approved.as_str())
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -370,9 +374,9 @@ pub async fn transcribe(
         ));
     }
 
-    // One reviewable scribe draft per encounter; the encounter lock
+    // One applicable scribe draft per encounter; the encounter lock
     // serializes concurrent recordings.
-    supersede_awaiting_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
+    supersede_applicable_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
     let citations: Vec<String> = vec![
         format!("recording:sha256:{audio_sha256}"),
         match note_version {

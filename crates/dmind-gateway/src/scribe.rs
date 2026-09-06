@@ -492,6 +492,7 @@ struct Lexicon {
     r_medication: &'static str,
     f_contradiction: &'static str,
     f_uncertain: &'static str,
+    f_unattributed: &'static str,
 }
 
 const EN: Lexicon = Lexicon {
@@ -514,6 +515,7 @@ const EN: Lexicon = Lexicon {
     r_medication: "Mentions a medication; dMind does not prescribe — confirm dose and appropriateness.",
     f_contradiction: "The patient first denied fever and later reported a temperature of 38.",
     f_uncertain: "An unresolved passage was excluded from the draft.",
+    f_unattributed: "A statement resembling an examination, assessment, plan or follow-up could not be attributed to the clinician and was left out of the draft.",
 };
 
 const ES: Lexicon = Lexicon {
@@ -536,6 +538,7 @@ const ES: Lexicon = Lexicon {
     r_medication: "Menciona un medicamento; dMind no prescribe — confirmar dosis e idoneidad.",
     f_contradiction: "El paciente primero negó fiebre y después refirió una temperatura de 38.",
     f_uncertain: "Un pasaje no resuelto se excluyó del borrador.",
+    f_unattributed: "Una declaración que parece exploración, valoración, plan o seguimiento no pudo atribuirse al profesional y se excluyó del borrador.",
 };
 
 fn contains_any(hay: &str, needles: &[&str]) -> bool {
@@ -579,6 +582,11 @@ impl Bucket {
 /// Map transcript segments onto note sections. Deterministic: identical
 /// input yields identical output. Unresolved passages are excluded and
 /// flagged rather than guessed.
+///
+/// Speaker provenance is authoritative: examination, assessment, plan and
+/// follow-up are only ever filled from segments attributed to the clinician.
+/// Providers that do not label speakers (`speaker: None`) therefore never
+/// populate those sections; matching statements are flagged instead.
 pub fn extract_sections(
     segments: &[TranscriptSegment],
     language: &str,
@@ -617,8 +625,21 @@ pub fn extract_sections(
             expect_reason = true;
             continue;
         }
-        // Clinician questions carry no facts of their own.
-        if clinician && lower.ends_with('?') {
+        // Questions carry no facts of their own.
+        if !patient && lower.ends_with('?') {
+            continue;
+        }
+        let clinician_only = contains_any(&lower, lx.exam)
+            || contains_any(&lower, lx.follow_up)
+            || contains_any(&lower, lx.impression)
+            || contains_any(&lower, lx.plan);
+        if clinician_only && seg.speaker.is_none() {
+            flags.push(ScribeFlag {
+                kind: ScribeFlagKind::Uncertain,
+                message: lx.f_unattributed.into(),
+                segments: vec![seg.index],
+                sections: Vec::new(),
+            });
             continue;
         }
 
@@ -628,21 +649,21 @@ pub fn extract_sections(
             expect_reason = false;
             continue;
         }
-        if contains_any(&lower, lx.exam) && !patient {
+        if contains_any(&lower, lx.exam) && clinician {
             buckets[idx("physical_exam")].push(seg);
             continue;
         }
-        if contains_any(&lower, lx.follow_up) && !patient {
+        if contains_any(&lower, lx.follow_up) && clinician {
             buckets[idx("follow_up")].push(seg);
             continue;
         }
-        if contains_any(&lower, lx.impression) && !patient {
+        if contains_any(&lower, lx.impression) && clinician {
             let b = &mut buckets[idx("assessment")];
             b.push(seg);
             b.reason(lx.r_impression);
             continue;
         }
-        if contains_any(&lower, lx.plan) && !patient {
+        if contains_any(&lower, lx.plan) && clinician {
             let b = &mut buckets[idx("plan")];
             b.push(seg);
             if contains_any(&lower, lx.medication) {
@@ -815,6 +836,101 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].section, "reason_for_encounter");
         assert_eq!(sections[0].text, "I have a headache since yesterday.");
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn unlabelled_speakers_never_fill_clinician_only_sections() {
+        // What an OpenAI-compatible provider returns: no speaker labels.
+        let lines: &[(&str, &str)] = &[
+            (
+                "en",
+                "On examination the throat is red and the lungs are clear.",
+            ),
+            ("en", "This looks like a viral upper respiratory infection."),
+            (
+                "en",
+                "Rest, fluids, and paracetamol as needed for discomfort.",
+            ),
+            ("en", "Come back if symptoms persist beyond a week."),
+            (
+                "es",
+                "A la exploración la garganta está roja y los pulmones limpios.",
+            ),
+            ("es", "Esto parece una infección respiratoria viral."),
+            ("es", "Reposo, líquidos y paracetamol si hay molestias."),
+            ("es", "Vuelva si los síntomas persisten más de una semana."),
+        ];
+        for lang in ["en", "es"] {
+            let segs: Vec<TranscriptSegment> = lines
+                .iter()
+                .filter(|(l, _)| *l == lang)
+                .enumerate()
+                .map(|(i, (_, text))| TranscriptSegment {
+                    index: i as u32,
+                    start_ms: i as u64 * 1000,
+                    end_ms: i as u64 * 1000 + 1000,
+                    speaker: None,
+                    text: (*text).into(),
+                    confidence: Confidence::High,
+                })
+                .collect();
+            let (sections, flags) = extract_sections(&segs, lang);
+            for s in &sections {
+                assert!(
+                    !matches!(
+                        s.section.as_str(),
+                        "physical_exam" | "assessment" | "plan" | "follow_up"
+                    ),
+                    "lang {lang}: unattributed statement filled {}",
+                    s.section
+                );
+            }
+            // Each statement is surfaced to the clinician rather than dropped.
+            assert_eq!(flags.len(), segs.len(), "lang {lang}: {flags:?}");
+            assert!(flags.iter().all(|f| f.kind == ScribeFlagKind::Uncertain));
+            let flagged: Vec<u32> = flags.iter().flat_map(|f| f.segments.clone()).collect();
+            assert_eq!(flagged, (0..segs.len() as u32).collect::<Vec<_>>());
+        }
+
+        // The same words from the labelled clinician still map to the sections.
+        let seg = TranscriptSegment {
+            index: 0,
+            start_ms: 0,
+            end_ms: 1000,
+            speaker: Some(SPEAKER_CLINICIAN.into()),
+            text: "Rest, fluids, and paracetamol as needed for discomfort.".into(),
+            confidence: Confidence::High,
+        };
+        let (sections, flags) = extract_sections(&[seg], "en");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].section, "plan");
+        assert!(flags.is_empty());
+
+        // Unlabelled patient-style facts still reach the patient-authored
+        // sections and unlabelled questions are ignored.
+        let segs = vec![
+            TranscriptSegment {
+                index: 0,
+                start_ms: 0,
+                end_ms: 1000,
+                speaker: None,
+                text: "Any fever?".into(),
+                confidence: Confidence::High,
+            },
+            TranscriptSegment {
+                index: 1,
+                start_ms: 1000,
+                end_ms: 2000,
+                speaker: None,
+                text: "I take medication for high blood pressure.".into(),
+                confidence: Confidence::High,
+            },
+        ];
+        let (sections, flags) = extract_sections(&segs, "en");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].section, "medical_history");
+        assert_eq!(sections[0].segments, vec![1]);
         assert!(flags.is_empty());
     }
 

@@ -28,13 +28,39 @@ pub(crate) fn task_order(alias: &str) -> String {
 }
 
 /// Parse a reference range rendered as `low-high` optionally followed by a
-/// unit (e.g. `70-99 mg/dL`). Anything else is treated as not parseable.
+/// unit (e.g. `70-99 mg/dL`, `-2-2 SD`). Both bounds may be signed, so the
+/// separator is located after the first complete number rather than at the
+/// first `-`. Anything else is treated as not parseable.
 pub(crate) fn parse_reference_range(range: &str) -> Option<(Decimal, Decimal)> {
-    let numeric = range.split_whitespace().next()?;
-    let (low, high) = numeric.split_once('-')?;
-    let low: Decimal = low.trim().parse().ok()?;
-    let high: Decimal = high.trim().parse().ok()?;
+    let (low, rest) = take_signed_number(range.trim_start())?;
+    let rest = rest.trim_start();
+    let rest = rest
+        .strip_prefix('-')
+        .or_else(|| rest.strip_prefix('\u{2013}'))?;
+    let (high, rest) = take_signed_number(rest.trim_start())?;
+    // Only a unit (separated by whitespace) may follow the upper bound.
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
     (low <= high).then_some((low, high))
+}
+
+/// Split one plain decimal number (`[+-]digits[.digits]`) off the front of
+/// `s`, returning it together with the unconsumed remainder.
+fn take_signed_number(s: &str) -> Option<(Decimal, &str)> {
+    let body = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let digits = body.trim_start_matches(|c: char| c.is_ascii_digit());
+    let after = match digits.strip_prefix('.') {
+        Some(frac) if frac.starts_with(|c: char| c.is_ascii_digit()) => {
+            frac.trim_start_matches(|c: char| c.is_ascii_digit())
+        }
+        _ => digits,
+    };
+    let numeric = &s[..s.len() - after.len()];
+    if !numeric.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((numeric.parse().ok()?, after))
 }
 
 pub(crate) fn abnormal_flag(value: Decimal, range: Option<&str>) -> Option<&'static str> {
@@ -430,6 +456,64 @@ mod tests {
         );
         assert_eq!(parse_reference_range("<5"), None);
         assert_eq!(parse_reference_range("99-70"), None);
+    }
+
+    #[test]
+    fn parses_signed_reference_ranges() {
+        // Negative lower bound (e.g. base excess, z-scores).
+        assert_eq!(parse_reference_range("-2-2"), Some((d("-2"), d("2"))));
+        assert_eq!(
+            parse_reference_range("-2-2 mmol/L"),
+            Some((d("-2"), d("2")))
+        );
+        assert_eq!(
+            parse_reference_range("-2 - 2 mmol/L"),
+            Some((d("-2"), d("2")))
+        );
+        assert_eq!(
+            parse_reference_range("-2\u{2013}2 SD"),
+            Some((d("-2"), d("2")))
+        );
+        // Both bounds negative.
+        assert_eq!(parse_reference_range("-5--2"), Some((d("-5"), d("-2"))));
+        assert_eq!(
+            parse_reference_range("-5 - -2 mEq/L"),
+            Some((d("-5"), d("-2")))
+        );
+        // Signed decimals and an explicit plus.
+        assert_eq!(
+            parse_reference_range("-2.5-2.5 SD"),
+            Some((d("-2.5"), d("2.5")))
+        );
+        assert_eq!(
+            parse_reference_range("-0.5-+1.25"),
+            Some((d("-0.5"), d("1.25")))
+        );
+        // Abnormal flags follow the signed bounds.
+        assert_eq!(abnormal_flag(d("-3"), Some("-2-2 mmol/L")), Some("low"));
+        assert_eq!(abnormal_flag(d("2.5"), Some("-2-2 mmol/L")), Some("high"));
+        assert_eq!(abnormal_flag(d("0"), Some("-2-2 mmol/L")), None);
+        assert_eq!(abnormal_flag(d("-1"), Some("-5--2")), Some("high"));
+        // Malformed.
+        for bad in [
+            "",
+            "-",
+            "--",
+            "-2",
+            "-2-",
+            "2--",
+            "-2-2-2",
+            "-2.-2",
+            "-.-2",
+            "a-b",
+            "-2-b",
+            "2-1",
+            "-2--5",
+            "70-99mg/dL",
+            "1e2-2e2",
+        ] {
+            assert_eq!(parse_reference_range(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

@@ -274,10 +274,22 @@ describe("dashboard cockpit configuration", () => {
       "tasks",
       "ai",
     ]);
-    expect(visibleWidgets(defaultConfig(["lab_professional"]))).not.toContain(
-      "drafts",
-    );
-    expect(defaultConfig(["lab_professional"]).density).toBe("compact");
+    // Laboratory professionals and nurses share the results-first layout,
+    // matched on the server's role name.
+    for (const role of ["laboratory_professional", "nurse"]) {
+      expect(visibleWidgets(defaultConfig([role]))).toEqual([
+        "results",
+        "tasks",
+        "attention",
+        "ai",
+      ]);
+      expect(defaultConfig([role]).density).toBe("compact");
+    }
+    // Any other role gets the minimal generic cockpit.
+    expect(visibleWidgets(defaultConfig(["registration_staff"]))).toEqual([
+      "results",
+      "tasks",
+    ]);
   });
 
   it("hides, shows, reorders and changes density", () => {

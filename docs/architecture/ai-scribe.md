@@ -130,9 +130,14 @@ fails validation is never stored (`502 scribe_invalid_output`).
 
 Section extraction is deterministic keyword/speaker mapping in the gateway
 (no model call); `review_needed` and `reasons` are set for low-confidence
-segments, patient-only sources and contradictions. The UI shows confidence,
-reasons and a **Check these** list of flags with timecode links into the
-transcript.
+segments, patient-only sources and contradictions. Speaker attribution is
+authoritative for the clinician-authored sections (examination, assessment,
+plan, follow-up): only segments labelled as the clinician can fill them.
+Providers that do not label speakers never populate those sections — a
+matching statement is surfaced as an uncertainty flag instead, so nothing
+spoken by an unknown party can be mistaken for the clinician's findings or
+plan. The UI shows confidence, reasons and a **Check these** list of flags
+with timecode links into the transcript.
 
 ## Note-version binding and application
 

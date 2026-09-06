@@ -863,10 +863,11 @@ pub async fn sign(
             "this encounter is no longer in progress",
         ));
     }
-    // The signed record is immutable, so a draft still awaiting review could
-    // never be applied to it; it is retired with the transition.
+    // The signed record is immutable, so a draft still awaiting review (or
+    // only partially applied) could never be applied to it; it is retired
+    // with the transition.
     supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
-    crate::routes::scribe::supersede_awaiting_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
+    crate::routes::scribe::supersede_applicable_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,
@@ -1309,7 +1310,7 @@ pub async fn cancel(
         ));
     }
     supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
-    crate::routes::scribe::supersede_awaiting_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
+    crate::routes::scribe::supersede_applicable_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,
