@@ -112,6 +112,29 @@ fn require_consultation(enc: &EncounterCtx) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Unreviewed dMind drafts are bound to the encounter facts they were
+/// generated from (note version, vitals, diagnoses). Any mutation of those
+/// source facts supersedes them in the same transaction rather than leaving
+/// them awaiting review against a record that no longer matches.
+async fn supersede_awaiting_drafts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    encounter_id: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE ai_artifacts SET status = $1
+         WHERE tenant_id = $2 AND encounter_id = $3 AND artifact_type = 'encounter_summary'
+           AND status = $4",
+    )
+    .bind(ArtifactStatus::Superseded.as_str())
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .bind(ArtifactStatus::AwaitingReview.as_str())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 const NOTE_SECTIONS: &[&str] = &[
     "reason_for_encounter",
     "history_present_illness",
@@ -358,8 +381,9 @@ pub async fn workspace(
 
     // Latest dMind documentation draft for this encounter (assistive only).
     // A draft is stale once the note version it cited is no longer the
-    // recorded version; saving the note supersedes unreviewed drafts, so this
-    // is a defensive display flag rather than the integrity boundary.
+    // recorded version; every source-fact mutation (note, vitals, diagnoses)
+    // supersedes unreviewed drafts transactionally, so this is a defensive
+    // display flag rather than the integrity boundary.
     let current_note_version = note.as_ref().map(|n| n.get::<i64, _>("version"));
     let ai_draft = sqlx::query(
         "SELECT id, status, output, limitations, citations, model, model_version,
@@ -583,20 +607,7 @@ pub async fn save_note(
             (note_id, current + 1)
         }
     };
-    // Unreviewed dMind drafts cite the note version they were generated from;
-    // once that version moves on they are superseded rather than left
-    // awaiting review against facts that no longer match the record.
-    sqlx::query(
-        "UPDATE ai_artifacts SET status = $1
-         WHERE tenant_id = $2 AND encounter_id = $3 AND artifact_type = 'encounter_summary'
-           AND status = $4",
-    )
-    .bind(ArtifactStatus::Superseded.as_str())
-    .bind(enc.tenant_id)
-    .bind(id)
-    .bind(ArtifactStatus::AwaitingReview.as_str())
-    .execute(&mut *tx)
-    .await?;
+    supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,
@@ -976,6 +987,7 @@ pub async fn record_vitals(
     .bind(bmi)
     .execute(&mut *tx)
     .await?;
+    supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,
@@ -1060,6 +1072,7 @@ pub async fn add_diagnosis(
     .bind(ctx.user_id)
     .execute(&mut *tx)
     .await?;
+    supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,
@@ -1358,17 +1371,7 @@ pub async fn ai_draft(
     // The held encounter lock also serializes concurrent draft generation, so
     // the supersede-then-insert below leaves exactly one awaiting_review
     // draft per encounter.
-    sqlx::query(
-        "UPDATE ai_artifacts SET status = $1
-         WHERE tenant_id = $2 AND encounter_id = $3 AND artifact_type = 'encounter_summary'
-           AND status = $4",
-    )
-    .bind(ArtifactStatus::Superseded.as_str())
-    .bind(enc.tenant_id)
-    .bind(id)
-    .bind(ArtifactStatus::AwaitingReview.as_str())
-    .execute(&mut *tx)
-    .await?;
+    supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
     sqlx::query(
         "INSERT INTO ai_artifacts
          (id, tenant_id, patient_id, encounter_id, artifact_type, autonomy_level, status,

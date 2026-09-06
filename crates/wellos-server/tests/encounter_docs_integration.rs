@@ -1001,6 +1001,106 @@ async fn ai_draft_binds_to_note_version_written_before_its_lock() {
     assert_eq!(awaiting, 0);
 }
 
+/// Vital signs and diagnoses feed the encounter summary just like the note,
+/// so recording either must supersede an unreviewed draft: it can no longer be
+/// accepted, and the workspace reports it as stale.
+#[tokio::test]
+async fn recording_vitals_or_diagnoses_supersedes_awaiting_ai_draft() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Dyspnoea", "assessment": "Under evaluation" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let mutations: [(&str, Value); 2] = [
+        (
+            "vitals",
+            json!({ "heart_rate_bpm": 96, "spo2_percent": 94 }),
+        ),
+        (
+            "diagnoses",
+            json!({ "display": "Community-acquired pneumonia", "code": "J18.9" }),
+        ),
+    ];
+    for (path, body) in mutations {
+        let (st, draft) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/ai-draft"),
+            "dev-dr.garcia",
+            Some(json!({ "language": "en" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{draft}");
+        assert_eq!(draft["status"], json!("awaiting_review"));
+        let artifact = draft["id"].as_str().unwrap().to_string();
+
+        let (st, res) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/{path}"),
+            "dev-dr.garcia",
+            Some(body),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{path}: {res}");
+
+        let (st, ws) = call(
+            &state,
+            "GET",
+            &format!("/api/v1/encounters/{enc}"),
+            "dev-dr.garcia",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{ws}");
+        assert_eq!(ws["ai_draft"]["id"], json!(artifact), "{path}");
+        assert_eq!(ws["ai_draft"]["status"], json!("superseded"), "{path}");
+
+        let (st, rev) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/ai-artifacts/{artifact}/review"),
+            "dev-dr.garcia",
+            Some(json!({ "decision": "approved" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{path}: {rev}");
+        assert_eq!(rev["error"]["code"], json!("invalid_artifact_state"));
+    }
+
+    // A draft generated after the new facts are recorded cites them and is
+    // reviewable again.
+    let (st, draft) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/ai-draft"),
+        "dev-dr.garcia",
+        Some(json!({ "language": "en" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    let cited = draft["citations"].to_string();
+    assert!(cited.contains("vital_signs"), "{cited}");
+    assert!(cited.contains("condition"), "{cited}");
+    let artifact = draft["id"].as_str().unwrap().to_string();
+    let (st, rev) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/ai-artifacts/{artifact}/review"),
+        "dev-dr.garcia",
+        Some(json!({ "decision": "approved" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{rev}");
+}
+
 #[tokio::test]
 async fn order_only_encounters_are_not_documentable_consultations() {
     let state = test_state().await;
