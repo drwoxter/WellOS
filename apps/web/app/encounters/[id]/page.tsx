@@ -1113,6 +1113,13 @@ function EncounterWorkspace({ id }: { id: string }) {
         savedRevision: snapshot.revision,
       };
       setSavedRevision(snapshot.revision);
+      // The server retires any unreviewed dMind draft whose cited note
+      // version this save just replaced.
+      setWs((prev) =>
+        prev?.ai_draft?.status === "awaiting_review"
+          ? { ...prev, ai_draft: { ...prev.ai_draft, stale: true } }
+          : prev,
+      );
       setSaveMessage(
         local.current.revision === snapshot.revision
           ? t(lang, "draftSaved")
@@ -1134,12 +1141,14 @@ function EncounterWorkspace({ id }: { id: string }) {
   const save = useCallback(async () => {
     if (mutationRef.current !== "idle") return;
     beginMutation("saving");
+    let saved = null;
     try {
-      await submitDraft();
+      saved = await submitDraft();
     } finally {
       beginMutation("idle");
     }
-  }, [beginMutation, submitDraft]);
+    if (saved) load();
+  }, [beginMutation, load, submitDraft]);
 
   const sign = useCallback(async () => {
     if (mutationRef.current !== "idle") return;

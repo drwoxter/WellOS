@@ -891,13 +891,13 @@ describe("encounter documentation workspace", () => {
     });
     expect(accept).toBeEnabled();
 
-    const plan = screen.getByLabelText(/^Plan/);
-    await user.type(plan, "Rest and fluids");
+    // The draft is already saved, so signing goes straight to the sign
+    // request and the dMind draft stays current while it is in flight.
     await user.click(screen.getByRole("button", { name: "Sign and complete" }));
     await user.click(screen.getByRole("button", { name: "Confirm" }));
     expect(await screen.findAllByText("Signing…")).not.toHaveLength(0);
-    await waitFor(() => expect(signCalls).toEqual([{ version: 2 }]));
-    expect(saveBodies).toHaveLength(1);
+    await waitFor(() => expect(signCalls).toEqual([{ version: 1 }]));
+    expect(saveBodies).toHaveLength(0);
 
     // While the sign is in flight every dMind control is disabled and an
     // acceptance attempt neither records a decision nor reports success.
@@ -919,13 +919,51 @@ describe("encounter documentation workspace", () => {
       }),
     );
     expect(await screen.findByText(/Note signed\./)).toBeInTheDocument();
-    // The signed snapshot is exactly what was visible; no approval exists
-    // for text that never entered the note.
-    expect(saveBodies[0]).toMatchObject({
-      assessment: "Viral illness",
-      plan: "Rest and fluids",
-    });
+    // No approval exists for text that never entered the signed note.
     expect(reviewCalls).toHaveLength(0);
+  });
+
+  it("retires an awaiting dMind draft as soon as the note it cites is saved", async () => {
+    const user = userEvent.setup();
+    const note = { ...DRAFT_NOTE };
+    const draft = { ...AWAITING_DRAFT };
+    const fetchMock = setup(workspace({ note, ai_draft: draft }), {
+      "/api/v1/encounters/e1/note": () => {
+        // The server supersedes the draft in the same transaction.
+        Object.assign(note, { version: 2, plan: "Rest" });
+        Object.assign(draft, { status: "superseded", stale: true });
+        return jsonResponse({ id: "n1", status: "draft", version: 2 });
+      },
+    });
+    const accept = await screen.findByRole("button", {
+      name: "Accept and copy into assessment",
+    });
+    expect(accept).toBeEnabled();
+    const workspaceReads = () =>
+      fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          String(input) === "/api/v1/encounters/e1" && init?.method !== "POST",
+      ).length;
+    const readsBefore = workspaceReads();
+
+    await user.type(screen.getByLabelText(/^Plan/), "Rest");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+
+    // Review controls go away with the save and the workspace is refreshed
+    // so the superseded state comes from the server, not a guess.
+    expect(
+      screen.queryByRole("button", { name: "Accept and copy into assessment" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reject draft" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/The note changed after this draft was generated/),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(workspaceReads()).toBe(readsBefore + 1));
+    expect(screen.getByLabelText(/^Plan/)).toHaveValue("Rest");
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
   });
 
   it("shows an unauthorized state for out-of-scope encounters", async () => {
