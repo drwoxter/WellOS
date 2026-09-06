@@ -635,6 +635,7 @@ pub async fn review(
 
     let mut review_detail: Value = artifact.get("review_detail");
     let mut note_result: Option<(Uuid, i64)> = None;
+    let mut merged_sections: Option<Value> = None;
     let next_status;
     let event;
     if apply {
@@ -709,6 +710,16 @@ pub async fn review(
             *slot = Some(text);
         }
         let written = write_draft_note(&mut tx, &state, &ctx, &enc, id, &merged).await?;
+        merged_sections = Some(json!({
+            "reason_for_encounter": merged.reason_for_encounter,
+            "history_present_illness": merged.history_present_illness,
+            "medical_history": merged.medical_history,
+            "review_of_systems": merged.review_of_systems,
+            "physical_exam": merged.physical_exam,
+            "assessment": merged.assessment,
+            "plan": merged.plan,
+            "follow_up": merged.follow_up,
+        }));
         let now = Utc::now();
         let applied = review_detail
             .as_object_mut()
@@ -779,8 +790,13 @@ pub async fn review(
     .map_err(ApiError::internal)?;
     tx.commit().await?;
 
-    let note = note_result
-        .map(|(note_id, version)| json!({ "id": note_id, "status": "draft", "version": version }));
+    let note = note_result.map(|(note_id, version)| {
+        let mut n = json!({ "id": note_id, "status": "draft", "version": version });
+        if let (Some(obj), Some(Value::Object(sections))) = (n.as_object_mut(), merged_sections) {
+            obj.extend(sections);
+        }
+        n
+    });
     Ok(Json(json!({
         "id": artifact_id,
         "status": next_status.as_str(),

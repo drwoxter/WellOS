@@ -12,7 +12,10 @@ test("clinician completes the closed-loop workflow on a critical result", async 
   await signInAs(page, "dr.garcia");
 
   // Dashboard → critical result in the priority list (≤ 3 interactions).
-  const critical = page.locator(".result-card.critical").first();
+  const critical = page
+    .getByRole("region", { name: "Critical and pending results" })
+    .locator(".result-card.critical")
+    .first();
   await expect(critical).toBeVisible();
   await critical.getByRole("link", { name: "Open result" }).click();
 

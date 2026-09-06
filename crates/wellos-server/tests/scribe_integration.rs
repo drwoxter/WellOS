@@ -583,6 +583,115 @@ async fn provider_failure_is_safe_bounded_and_retryable() {
     assert_eq!(st, StatusCode::OK, "{draft}");
 }
 
+#[derive(Clone, Default)]
+struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[tokio::test]
+async fn logs_never_contain_audio_transcript_note_text_or_credentials() {
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(sink.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let (state, fake) = test_state().await;
+    let (_, enc) = start_consultation(&state).await;
+    grant_consent(&state, &enc).await;
+    let audio = synthetic_audio(3_000);
+    let body = transcribe_body(&audio, 30_000);
+    let token = "dev-dr.garcia";
+
+    // Failure, validation rejection and success paths all emit whatever
+    // logging they have; none of it may carry payload content.
+    fake.set_unavailable(true);
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/scribe"),
+        token,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+    fake.set_unavailable(false);
+    let mut bad = body.clone();
+    bad["mime_type"] = json!("video/mp4");
+    let (st, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/scribe"),
+        token,
+        Some(bad),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, draft) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/scribe"),
+        token,
+        Some(body),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    let clinician_text = "Clinician typed this sensitive-looking sentence.";
+    let (st, applied) = call(
+        &state,
+        "POST",
+        &format!(
+            "/api/v1/encounters/{enc}/scribe/{}/review",
+            draft["id"].as_str().unwrap()
+        ),
+        token,
+        Some(json!({
+            "decision": "apply",
+            "version": draft["note_version"],
+            "assessment": clinician_text,
+            "sections": [{ "section": "reason_for_encounter", "mode": "fill" }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{applied}");
+
+    let logs = String::from_utf8_lossy(&sink.0.lock().unwrap()).to_string();
+    let marker = String::from_utf8_lossy(SYNTHETIC_AUDIO_MARKER).to_string();
+    let encoded_prefix: String = b64(&audio).chars().take(32).collect();
+    assert!(!logs.contains(&marker), "raw audio in logs");
+    assert!(!logs.contains(&encoded_prefix), "encoded audio in logs");
+    assert!(!logs.contains(token), "credential in logs");
+    assert!(
+        !logs.contains(clinician_text),
+        "clinician note text in logs"
+    );
+    for seg in draft["output"]["transcript"].as_array().unwrap() {
+        let text = seg["text"].as_str().unwrap();
+        assert!(!logs.contains(text), "transcript text in logs: {text}");
+    }
+    for sec in draft["output"]["sections"].as_array().unwrap() {
+        let text = sec["text"].as_str().unwrap();
+        assert!(!logs.contains(text), "generated note text in logs");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Authorization boundaries
 // ---------------------------------------------------------------------------

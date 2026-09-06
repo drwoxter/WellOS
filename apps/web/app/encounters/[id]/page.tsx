@@ -7,6 +7,12 @@ import { t } from "@/lib/i18n";
 import type { Lang, TKey } from "@/lib/i18n";
 import { ApiRequestError, apiFetch, useSession } from "@/lib/session";
 import { useUnsavedChangesGuard } from "@/lib/unsaved-guard";
+import { NOTE_SECTION_ORDER, mergeSection } from "@/lib/scribe";
+import type { ApplyMode, NoteSectionKey, ScribeArtifact } from "@/lib/scribe";
+import { RecordingDock, ScribeReview } from "./scribe";
+import type { ApplyOutcome } from "./scribe";
+import { DiagnosticHistory, PatientBrief } from "./brief";
+import type { Brief, Diagnostics } from "./brief";
 import {
   LAB_TESTS,
   ageYears,
@@ -108,6 +114,10 @@ type Workspace = {
     created_at: string;
   }[];
   ai_draft: AiDraft | null;
+  scribe_draft: ScribeArtifact | null;
+  recording_consent: { granted: boolean; recorded_at: string } | null;
+  brief: Brief | null;
+  diagnostics: Diagnostics | null;
   capabilities: {
     can_document: boolean;
     can_sign: boolean;
@@ -1410,6 +1420,181 @@ function EncounterWorkspace({ id }: { id: string }) {
     [beginMutation, id, lang],
   );
 
+  // A finished recording yields a structured draft bound to the note version
+  // it was proposed against; it is shown for review but nothing is written.
+  const onScribeDraft = useCallback((artifact: ScribeArtifact) => {
+    setWs((prev) => (prev ? { ...prev, scribe_draft: artifact } : prev));
+  }, []);
+
+  const onConsentRecorded = useCallback(() => {
+    setWs((prev) =>
+      prev
+        ? {
+            ...prev,
+            recording_consent: {
+              granted: true,
+              recorded_at: new Date().toISOString(),
+            },
+          }
+        : prev,
+    );
+  }, []);
+
+  // Applying scribe sections is one server transaction: the current draft is
+  // submitted with the selection, the server fills empty sections or appends
+  // below clinician text, bumps the note version and records the approval.
+  // Local state is hydrated from the response; text typed while the request
+  // was in flight is kept — the proposal is merged beneath it — and stays
+  // marked unsaved.
+  const applyScribe = useCallback(
+    async (
+      artifact: ScribeArtifact,
+      selection: { section: NoteSectionKey; mode: ApplyMode }[],
+    ): Promise<ApplyOutcome> => {
+      if (mutationRef.current !== "idle") return "error";
+      beginMutation("accepting");
+      setSaveError(null);
+      setSaveMessage(null);
+      try {
+        const snapshot = local.current;
+        const body: Record<string, unknown> = {
+          ...snapshot.sections,
+          decision: "apply",
+          sections: selection,
+        };
+        if (snapshot.version !== null) body.version = snapshot.version;
+        const res = await apiFetch<{
+          id: string;
+          status: string;
+          review_decision: string | null;
+          review_detail: ScribeArtifact["review_detail"];
+          note:
+            | ({ version: number } & Partial<
+                Record<NoteSectionKey, string | null>
+              >)
+            | null;
+          note_version: number | null;
+        }>(`/api/v1/encounters/${id}/scribe/${artifact.id}/review`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const current = local.current;
+        const untouched = current.revision === snapshot.revision;
+        const nextSections: NoteSections = { ...current.sections };
+        if (res.note) {
+          for (const key of NOTE_SECTION_ORDER) {
+            const server = res.note[key];
+            if (server === undefined) continue;
+            if (current.sections[key] === snapshot.sections[key]) {
+              nextSections[key] = server ?? "";
+              continue;
+            }
+            const chosen = selection.find((s) => s.section === key);
+            const proposal = artifact.output?.sections.find(
+              (s) => s.section === key,
+            );
+            if (chosen && proposal) {
+              nextSections[key] =
+                mergeSection(current.sections[key], proposal.text, "append") ??
+                current.sections[key];
+            }
+          }
+        }
+        const next: LocalDraft = {
+          sections: nextSections,
+          version: res.note?.version ?? current.version,
+          revision: current.revision + 1,
+          savedRevision: untouched ? current.revision + 1 : snapshot.revision,
+        };
+        local.current = next;
+        setSections(next.sections);
+        setRevision(next.revision);
+        setSavedRevision(next.savedRevision);
+        setCollapsed((c) => {
+          const opened = { ...c };
+          for (const s of selection) opened[s.section] = false;
+          return opened;
+        });
+        setWs((prev) =>
+          prev && prev.scribe_draft?.id === artifact.id
+            ? {
+                ...prev,
+                scribe_draft: {
+                  ...prev.scribe_draft,
+                  status: res.status,
+                  review_decision: res.review_decision,
+                  review_detail: res.review_detail,
+                  stale: false,
+                },
+                ai_draft:
+                  prev.ai_draft?.status === "awaiting_review"
+                    ? { ...prev.ai_draft, stale: true }
+                    : prev.ai_draft,
+              }
+            : prev,
+        );
+        setSaveMessage(
+          t(lang, untouched ? "draftSaved" : "draftSavedNewerEdits"),
+        );
+        return "applied";
+      } catch (err) {
+        if (err instanceof ApiRequestError) {
+          switch (err.code) {
+            case "version_conflict":
+            case "version_required":
+              setSaveError(t(lang, "versionConflict"));
+              return "stale";
+            case "section_not_empty":
+            case "section_already_applied":
+              return "conflict";
+            case "artifact_not_reviewable":
+            case "review_conflict":
+              load();
+              return "stale";
+            case "encounter_not_active":
+            case "note_signed":
+              return "closed";
+          }
+        }
+        setSaveError(errMessage(err));
+        return "error";
+      } finally {
+        beginMutation("idle");
+      }
+    },
+    [beginMutation, id, lang, load],
+  );
+
+  const dismissScribe = useCallback(
+    async (artifact: ScribeArtifact): Promise<boolean> => {
+      try {
+        const res = await apiFetch<{
+          status: string;
+          review_decision: string | null;
+        }>(`/api/v1/encounters/${id}/scribe/${artifact.id}/review`, {
+          method: "POST",
+          body: JSON.stringify({ decision: "dismiss" }),
+        });
+        setWs((prev) =>
+          prev && prev.scribe_draft?.id === artifact.id
+            ? {
+                ...prev,
+                scribe_draft: {
+                  ...prev.scribe_draft,
+                  status: res.status,
+                  review_decision: res.review_decision,
+                },
+              }
+            : prev,
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [id],
+  );
+
   const currentVitals = useMemo(() => ws?.vitals ?? [], [ws]);
   const orderOnly =
     ws !== null && ws.encounter.encounter_type !== "consultation";
@@ -1454,6 +1639,47 @@ function EncounterWorkspace({ id }: { id: string }) {
 
       <div className="encounter-layout">
         <div className="encounter-main">
+          {!orderOnly && editable ? (
+            <RecordingDock
+              encounterId={id}
+              lang={lang}
+              consented={ws.recording_consent?.granted === true}
+              enabled={!signed}
+              onConsentRecorded={onConsentRecorded}
+              onDraft={onScribeDraft}
+            />
+          ) : null}
+          {!orderOnly && ws.brief ? (
+            <PatientBrief
+              lang={lang}
+              brief={ws.brief}
+              problems={ws.diagnoses}
+              allergies={ws.allergies}
+              alerts={ws.alerts}
+              medications={ws.medications}
+              vitals={ws.previous_vitals}
+              defaultOpen={!signed && !ws.scribe_draft}
+            />
+          ) : null}
+          {!signed && editable && ws.scribe_draft ? (
+            <ScribeReview
+              key={ws.scribe_draft.id}
+              lang={lang}
+              artifact={ws.scribe_draft}
+              current={sections}
+              locked={busy}
+              onApply={(selection) =>
+                ws.scribe_draft
+                  ? applyScribe(ws.scribe_draft, selection)
+                  : Promise.resolve("error" as const)
+              }
+              onDismiss={() =>
+                ws.scribe_draft
+                  ? dismissScribe(ws.scribe_draft)
+                  : Promise.resolve(false)
+              }
+            />
+          ) : null}
           {orderOnly ? (
             <div className="card">
               <h2>{t(lang, "orderOnlyEncounter")}</h2>
@@ -1650,6 +1876,10 @@ function EncounterWorkspace({ id }: { id: string }) {
               onAccepted={acceptAiDraft}
               onChanged={load}
             />
+          ) : null}
+
+          {!orderOnly && ws.diagnostics ? (
+            <DiagnosticHistory lang={lang} diagnostics={ws.diagnostics} />
           ) : null}
         </div>
 
