@@ -48,6 +48,8 @@ pub mod actions {
     pub const PATIENT_READ: &str = "patient.read";
     pub const PATIENT_SEARCH: &str = "patient.search";
     pub const ENCOUNTER_START: &str = "encounter.start";
+    pub const ENCOUNTER_DOCUMENT: &str = "encounter.document";
+    pub const ENCOUNTER_SIGN: &str = "encounter.sign";
     pub const SERVICE_REQUEST_CREATE: &str = "service_request.create";
     pub const RESULT_INGEST: &str = "result.ingest";
     pub const RESULT_REVIEW: &str = "result.review";
@@ -68,6 +70,8 @@ pub mod actions {
         PATIENT_READ,
         PATIENT_SEARCH,
         ENCOUNTER_START,
+        ENCOUNTER_DOCUMENT,
+        ENCOUNTER_SIGN,
         SERVICE_REQUEST_CREATE,
         RESULT_INGEST,
         RESULT_REVIEW,
@@ -101,6 +105,8 @@ pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
         PATIENT_READ => &[Purpose::Treatment, Purpose::Emergency],
         PATIENT_SEARCH => &[Purpose::Treatment, Purpose::Operations, Purpose::Emergency],
         ENCOUNTER_START
+        | ENCOUNTER_DOCUMENT
+        | ENCOUNTER_SIGN
         | SERVICE_REQUEST_CREATE
         | RESULT_REVIEW
         | PATIENT_NOTIFY
@@ -173,6 +179,8 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             PATIENT_SEARCH,
             PATIENT_READ,
             ENCOUNTER_START,
+            ENCOUNTER_DOCUMENT,
+            ENCOUNTER_SIGN,
             SERVICE_REQUEST_CREATE,
             RESULT_REVIEW,
             PATIENT_NOTIFY,
@@ -428,7 +436,9 @@ pub async fn authorize_with_limit(
         actions::RESULT_REVIEW
         | actions::PATIENT_NOTIFY
         | actions::LOOP_CLOSE
-        | actions::AI_REVIEW => true,
+        | actions::AI_REVIEW
+        | actions::ENCOUNTER_DOCUMENT
+        | actions::ENCOUNTER_SIGN => true,
         // Chart reads require a relationship for physicians; other clinical
         // roles read within their facility scope (enforced above), and
         // tenant-wide administrative reads remain explicit and audited.

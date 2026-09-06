@@ -53,6 +53,21 @@ result detail (workflow stepper, critical banner, advisory dMind section,
 confirmed transitions), richer synthetic demo states, component + Playwright
 browser/accessibility/responsive tests.
 
+Clinical Encounter and Documentation MVP: `/encounters/[id]` consultation
+workspace (persistent patient safety header, encounter status, reason for
+consultation, structured clinical note with collapsible optional sections,
+draft save with optimistic concurrency, sign-and-complete with confirmation,
+cancellation); structured vital signs with hard/usual range validation,
+explicit confirmation of unusual values, server-side BMI and previous-vitals
+display; diagnoses by human-readable label with optional code and bounded
+status, linked to the encounter and patient chart; immutable signed notes
+with dated append-only addenda and full audit; a review-gated deterministic
+dMind documentation aid (facts used, limitations, explicit accept/reject with
+provenance, assistive-only); patient workspace integration (start/resume
+consultation, timeline links to encounter summaries, addenda counts, recent
+vital trends); seeded draft/signed/addendum demo encounters; backend
+integration, component, Playwright journey, accessibility and 390px coverage.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket

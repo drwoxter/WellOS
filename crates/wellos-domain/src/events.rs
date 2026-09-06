@@ -33,6 +33,12 @@ pub struct EventEnvelope {
 pub const EVENT_TYPES: &[&str] = &[
     "patient.registered",
     "encounter.started",
+    "encounter.cancelled",
+    "encounter.note.saved",
+    "encounter.note.signed",
+    "encounter.note.addendum",
+    "encounter.vitals.recorded",
+    "encounter.diagnosis.added",
     "service_request.created",
     "result.received",
     "result.amended",

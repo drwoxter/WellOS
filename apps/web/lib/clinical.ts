@@ -135,6 +135,26 @@ export function canActClinicallyAt(
   return facilities.some((f) => f.id === facilityId && f.can_act_clinically);
 }
 
+/** Whole years elapsed since a YYYY-MM-DD birth date. */
+export function ageYears(birthDate: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(birthDate);
+  if (!m) return NaN;
+  const now = new Date();
+  let age = now.getFullYear() - Number(m[1]);
+  const monthDay = (now.getMonth() + 1) * 100 + now.getDate();
+  if (monthDay < Number(m[2]) * 100 + Number(m[3])) age -= 1;
+  return age;
+}
+
+/** "120/80", or "120/—" when only one component was recorded. */
+export function formatBloodPressure(
+  systolic: string | null,
+  diastolic: string | null,
+): string | null {
+  if (systolic === null && diastolic === null) return null;
+  return `${systolic ?? "—"}/${diastolic ?? "—"}`;
+}
+
 /** Common orderable laboratory tests covered by the deterministic rules. */
 export const LAB_TESTS: { code_loinc: string; display: string }[] = [
   { code_loinc: "2823-3", display: "Potassium [Moles/volume] in Serum" },
