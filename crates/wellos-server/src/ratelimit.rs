@@ -28,6 +28,9 @@ pub enum Family {
     CredentialAdmin,
     /// General authenticated API traffic.
     Api,
+    /// Audio transcription (expensive; bounded independently of ordinary
+    /// reads so a recording loop cannot exhaust the general budget).
+    Scribe,
 }
 
 impl Family {
@@ -37,6 +40,7 @@ impl Family {
             Self::PatientSearch => "patient_search",
             Self::CredentialAdmin => "credential_admin",
             Self::Api => "api",
+            Self::Scribe => "scribe",
         }
     }
 }
@@ -48,6 +52,7 @@ pub struct RateConfig {
     pub search_per_min: i64,
     pub cred_admin_per_min: i64,
     pub api_per_min: i64,
+    pub scribe_per_min: i64,
     /// Peers allowed to assert the end-client address for the anonymous
     /// login key (the BFF and/or reverse proxies). Empty means no peer is
     /// trusted and only the socket peer address is used.
@@ -61,6 +66,7 @@ impl RateConfig {
             Family::PatientSearch => self.search_per_min,
             Family::CredentialAdmin => self.cred_admin_per_min,
             Family::Api => self.api_per_min,
+            Family::Scribe => self.scribe_per_min,
         }
     }
 }

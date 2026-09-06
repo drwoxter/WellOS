@@ -1,6 +1,9 @@
 use crate::error::ApiError;
 use crate::oidc::{JwksKeys, RemoteJwks};
 use crate::ratelimit::RateConfig;
+use dmind_gateway::scribe::{
+    FakeTranscription, OpenAiCompatibleConfig, OpenAiCompatibleTranscription, TranscriptionProvider,
+};
 use dmind_gateway::ModelGateway;
 use jsonwebtoken::jwk::JwkSet;
 use sqlx::PgPool;
@@ -233,6 +236,7 @@ impl AuthConfig {
                 search_per_min: 10_000,
                 cred_admin_per_min: 10_000,
                 api_per_min: 100_000,
+                scribe_per_min: 1_000,
                 trusted_proxies: Vec::new(),
             },
         }
@@ -282,6 +286,7 @@ impl AuthConfig {
             search_per_min: parse_positive_i64("WELLOS_RATE_SEARCH_PER_MIN", 30)?,
             cred_admin_per_min: parse_positive_i64("WELLOS_RATE_CRED_ADMIN_PER_MIN", 30)?,
             api_per_min: parse_positive_i64("WELLOS_RATE_API_PER_MIN", 600)?,
+            scribe_per_min: parse_positive_i64("WELLOS_RATE_SCRIBE_PER_MIN", 6)?,
             trusted_proxies: parse_trusted_proxies("WELLOS_TRUSTED_PROXIES")?,
         };
         Ok(Self {
@@ -352,10 +357,63 @@ pub fn identity_provider_not_configured() -> ApiError {
     )
 }
 
+/// Resolve the speech-to-text provider from the environment. The default is
+/// the deterministic offline fake; an OpenAI-compatible endpoint is used only
+/// when `WELLOS_SCRIBE_PROVIDER=openai_compatible` is set explicitly, and
+/// then all of endpoint, model and credential are mandatory (fail closed).
+/// Credentials stay in server memory; nothing here is ever logged.
+pub fn scribe_provider_from_env(
+    is_development: bool,
+) -> anyhow::Result<Arc<dyn TranscriptionProvider>> {
+    match std::env::var("WELLOS_SCRIBE_PROVIDER")
+        .unwrap_or_else(|_| "fake".to_string())
+        .as_str()
+    {
+        "fake" => Ok(Arc::new(FakeTranscription::new())),
+        "openai_compatible" => {
+            let endpoint = std::env::var("WELLOS_SCRIBE_ENDPOINT")
+                .map_err(|_| anyhow::anyhow!("WELLOS_SCRIBE_ENDPOINT is required"))?;
+            if !(endpoint.starts_with("https://")
+                || (is_development && endpoint.starts_with("http://")))
+            {
+                anyhow::bail!("WELLOS_SCRIBE_ENDPOINT must be an https:// URL outside development");
+            }
+            let model = std::env::var("WELLOS_SCRIBE_MODEL")
+                .map_err(|_| anyhow::anyhow!("WELLOS_SCRIBE_MODEL is required"))?;
+            let api_key = std::env::var("WELLOS_SCRIBE_API_KEY")
+                .map_err(|_| anyhow::anyhow!("WELLOS_SCRIBE_API_KEY is required"))?;
+            if api_key.trim().is_empty() {
+                anyhow::bail!("WELLOS_SCRIBE_API_KEY must not be empty");
+            }
+            let timeout_secs = parse_positive_i64("WELLOS_SCRIBE_TIMEOUT_SECS", 60)?;
+            let max_retries = parse_secs("WELLOS_SCRIBE_MAX_RETRIES", 2)?;
+            if max_retries > 5 {
+                anyhow::bail!("WELLOS_SCRIBE_MAX_RETRIES must be at most 5");
+            }
+            let provider = OpenAiCompatibleTranscription::new(OpenAiCompatibleConfig {
+                endpoint,
+                model,
+                api_key,
+                timeout: std::time::Duration::from_secs(timeout_secs as u64),
+                max_retries: max_retries as u32,
+                retry_backoff: std::time::Duration::from_millis(500),
+            })
+            .map_err(|e| anyhow::anyhow!("scribe provider: {e}"))?;
+            Ok(Arc::new(provider))
+        }
+        other => anyhow::bail!(
+            "WELLOS_SCRIBE_PROVIDER must be 'fake' or 'openai_compatible' (got '{other}')"
+        ),
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub gateway: Arc<dyn ModelGateway>,
+    /// Speech-to-text provider behind the consultation scribe. Audio is
+    /// processed in memory and never persisted.
+    pub scribe: Arc<dyn TranscriptionProvider>,
     /// Whether routing patient data to external (off-cell) AI providers is
     /// permitted by deployment configuration. Development default: false.
     pub allow_external_ai: bool,
@@ -376,6 +434,7 @@ impl AppState {
         Self {
             pool,
             gateway,
+            scribe: Arc::new(FakeTranscription::new()),
             allow_external_ai: false,
             cell: "cell-dev-1".to_string(),
             auth: Arc::new(auth),

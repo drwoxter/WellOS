@@ -1,6 +1,6 @@
 use dmind_gateway::fake::FakeProvider;
 use std::sync::Arc;
-use wellos_server::state::{AppState, AuthConfig};
+use wellos_server::state::{scribe_provider_from_env, AppState, AuthConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -44,7 +44,11 @@ async fn main() -> anyhow::Result<()> {
     // baseline; external providers require explicit configuration, consent,
     // and policy routes (see ADR-0007).
     let gateway = Arc::new(FakeProvider::new());
-    let state = AppState::with_auth(pool, gateway, auth);
+    // Speech-to-text defaults to the deterministic offline fake; an external
+    // OpenAI-compatible endpoint is opt-in via WELLOS_SCRIBE_PROVIDER.
+    let scribe = scribe_provider_from_env(env == "development")?;
+    let mut state = AppState::with_auth(pool, gateway, auth);
+    state.scribe = scribe;
 
     let app = wellos_server::app(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;

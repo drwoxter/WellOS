@@ -7,6 +7,8 @@
 //! clinical workflow.
 
 pub mod fake;
+pub mod scribe;
+pub mod trends;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

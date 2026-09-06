@@ -1,7 +1,9 @@
 pub mod admin;
 pub mod ai;
+pub mod brief;
 pub mod consent;
 pub mod creds;
+pub mod dashboard;
 pub mod encounter_docs;
 pub mod encounters;
 pub mod fhir;
@@ -9,6 +11,7 @@ pub mod lab;
 pub mod loops;
 pub mod oidc_login;
 pub mod patients;
+pub mod scribe;
 pub mod session;
 
 use crate::audit;
@@ -17,6 +20,7 @@ use crate::error::ApiError;
 use crate::policy::{self, Decision, ResourceCtx};
 use crate::ratelimit;
 use crate::state::AppState;
+use axum::extract::DefaultBodyLimit;
 use axum::http::header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::Method;
 use axum::routing::{get, post};
@@ -87,6 +91,20 @@ pub fn router(state: AppState) -> Router {
             post(encounter_docs::accept_ai_draft),
         )
         .route(
+            "/api/v1/encounters/:id/recording-consent",
+            post(scribe::record_consent),
+        )
+        .route(
+            "/api/v1/encounters/:id/scribe",
+            // Audio uploads are the only bodies allowed above the default
+            // limit, and only up to the scribe ceiling.
+            post(scribe::transcribe).layer(DefaultBodyLimit::max(scribe::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/encounters/:id/scribe/:artifact_id/review",
+            post(scribe::review),
+        )
+        .route(
             "/api/v1/service-requests",
             post(encounters::create_service_request),
         )
@@ -96,6 +114,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/service-requests/:id/close", post(loops::close))
         .route("/api/v1/worklist", get(loops::worklist))
         .route("/api/v1/worklist/summary", get(loops::worklist_summary))
+        .route("/api/v1/dashboard/cockpit", get(dashboard::cockpit))
         .route("/api/v1/lab/results", post(lab::ingest_result))
         .route("/api/v1/ai-artifacts/:id/review", post(ai::review_artifact))
         .route("/api/v1/consents", post(consent::set_consent))
