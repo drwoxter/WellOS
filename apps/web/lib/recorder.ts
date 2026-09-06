@@ -116,7 +116,15 @@ class MediaStreamRecorder implements AudioRecorder {
     this.recorder.ondataavailable = (e: BlobEvent) => {
       if (e.data && e.data.size > 0) this.chunks.push(e.data);
     };
-    this.recorder.start(1000);
+    try {
+      this.recorder.start(1000);
+    } catch (err) {
+      this.release();
+      throw new RecorderError(
+        "failed",
+        err instanceof Error ? err.name : undefined,
+      );
+    }
     this.clock.start();
   }
 

@@ -361,6 +361,10 @@ export type DiagnosticResult = {
   service_request_id: string;
   value: string;
   unit: string;
+  /** `value` expressed in the series unit, or null when no exact
+   *  conversion is known. */
+  normalized_value: string | null;
+  comparable: boolean;
   reference_range: string | null;
   abnormal: "high" | "low" | null;
   critical: boolean;
@@ -386,8 +390,9 @@ export type DiagnosticTest = {
   pending_count: number;
   latest_value: string | null;
   latest_abnormal: "high" | "low" | null;
-  direction: "rising" | "falling" | "stable" | "insufficient";
+  direction: "rising" | "falling" | "stable" | "insufficient" | "mixed_units";
   result_count: number;
+  incomparable_count: number;
 };
 
 export type TrendAnalysis = {
@@ -412,9 +417,20 @@ function directionKey(d: DiagnosticTest["direction"]): TKey {
       return "trendFalling";
     case "stable":
       return "trendStable";
+    case "mixed_units":
+      return "trendMixedUnits";
     default:
       return "trendInsufficient";
   }
+}
+
+/** Results arrive oldest-first from the server; the table reads newest-first
+ *  so the collapsed preview is always the most recent results. */
+export function visibleResults(
+  results: DiagnosticResult[],
+  open: boolean,
+): DiagnosticResult[] {
+  return [...(open ? results : results.slice(-PREVIEW))].reverse();
 }
 
 function directionGlyph(d: DiagnosticTest["direction"]): string {
@@ -453,7 +469,7 @@ export function DiagnosticHistory({
         <ul className="diag-groups" aria-label={t(lang, "measurements")}>
           {tests.map((test) => {
             const open = expanded[test.code] ?? false;
-            const visible = open ? test.results : test.results.slice(0, 3);
+            const visible = visibleResults(test.results, open);
             return (
               <li key={test.code} className="diag-group objective">
                 <div className="diag-head">
@@ -504,6 +520,21 @@ export function DiagnosticHistory({
                       </tr>
                     </thead>
                     <tbody>
+                      {test.pending.map((p) => (
+                        <tr key={p.id} className="pending-row">
+                          <td>{formatDate(lang, p.created_at)}</td>
+                          <td className="muted">
+                            <Link
+                              className="navlink"
+                              href={`/requests/${p.id}`}
+                            >
+                              {t(lang, "pendingResults")}
+                            </Link>
+                          </td>
+                          <td>—</td>
+                          <td>{loopStateShortLabel(lang, p.loop_state)}</td>
+                        </tr>
+                      ))}
                       {visible.map((r) => (
                         <tr
                           key={r.id}
@@ -519,6 +550,16 @@ export function DiagnosticHistory({
                             >
                               {r.value} {r.unit}
                             </Link>
+                            {r.unit !== test.unit ? (
+                              <span
+                                className="muted"
+                                style={{ marginLeft: "0.4rem" }}
+                              >
+                                {r.comparable && r.normalized_value !== null
+                                  ? `≈ ${r.normalized_value} ${test.unit}`
+                                  : t(lang, "unitNotComparable")}
+                              </span>
+                            ) : null}
                             {r.abnormal ? (
                               <span
                                 className={`badge ${r.critical ? "critical" : "warn"}`}
@@ -539,25 +580,10 @@ export function DiagnosticHistory({
                           </td>
                         </tr>
                       ))}
-                      {test.pending.map((p) => (
-                        <tr key={p.id} className="pending-row">
-                          <td>{formatDate(lang, p.created_at)}</td>
-                          <td className="muted">
-                            <Link
-                              className="navlink"
-                              href={`/requests/${p.id}`}
-                            >
-                              {t(lang, "pendingResults")}
-                            </Link>
-                          </td>
-                          <td>—</td>
-                          <td>{loopStateShortLabel(lang, p.loop_state)}</td>
-                        </tr>
-                      ))}
                     </tbody>
                   </table>
                 </div>
-                {test.results.length > 3 ? (
+                {test.results.length > PREVIEW ? (
                   <button
                     type="button"
                     className="linklike"
@@ -568,7 +594,7 @@ export function DiagnosticHistory({
                   >
                     {open
                       ? t(lang, "showLess")
-                      : `${t(lang, "showMore")} (${test.results.length - 3})`}
+                      : `${t(lang, "showMore")} (${test.results.length - PREVIEW})`}
                   </button>
                 ) : null}
               </li>

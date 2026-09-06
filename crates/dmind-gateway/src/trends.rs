@@ -18,6 +18,9 @@ pub enum Direction {
     Falling,
     Stable,
     Insufficient,
+    /// Results were recorded in units that cannot be converted to the
+    /// series unit; no direction is computed over incomparable numbers.
+    MixedUnits,
 }
 
 /// Objective facts for one analyte series.
@@ -37,6 +40,10 @@ pub struct SeriesFacts {
     pub direction: Direction,
     /// Results in the series (excluding superseded rows).
     pub result_count: usize,
+    /// Non-superseded results whose unit could not be converted to `unit`
+    /// and were therefore left out of the direction calculation.
+    #[serde(default)]
+    pub incomparable_count: usize,
     /// Requests ordered but without a result yet.
     pub pending_count: usize,
 }
@@ -114,10 +121,28 @@ pub fn analyze(series: &[SeriesFacts], language: &str) -> TrendAnalysis {
             ("es", Direction::Falling) => "en descenso en los resultados recientes",
             ("es", Direction::Stable) => "estable en los resultados recientes",
             ("es", Direction::Insufficient) => "un único resultado; sin tendencia calculable",
+            ("es", Direction::MixedUnits) => {
+                "tendencia no calculada: resultados en unidades no convertibles"
+            }
             (_, Direction::Rising) => "rising across recent results",
             (_, Direction::Falling) => "falling across recent results",
             (_, Direction::Stable) => "stable across recent results",
             (_, Direction::Insufficient) => "single result; no trend can be calculated",
+            (_, Direction::MixedUnits) => "trend not calculated: results in non-convertible units",
+        };
+        let incomparable = if s.incomparable_count > 0 {
+            match l {
+                "es" => format!(
+                    " {} resultado(s) en otra unidad no comparable con {}.",
+                    s.incomparable_count, s.unit
+                ),
+                _ => format!(
+                    " {} result(s) in another unit not comparable with {}.",
+                    s.incomparable_count, s.unit
+                ),
+            }
+        } else {
+            String::new()
         };
         let pending = if s.pending_count > 0 {
             match l {
@@ -129,12 +154,26 @@ pub fn analyze(series: &[SeriesFacts], language: &str) -> TrendAnalysis {
         };
         let text = match l {
             "es" => format!(
-                "{}: último valor {} {}{}; {} ({} resultado(s)).{}",
-                s.display, s.latest_value, s.unit, abnormal, direction, s.result_count, pending
+                "{}: último valor {} {}{}; {} ({} resultado(s)).{}{}",
+                s.display,
+                s.latest_value,
+                s.unit,
+                abnormal,
+                direction,
+                s.result_count,
+                incomparable,
+                pending
             ),
             _ => format!(
-                "{}: latest {} {}{}; {} ({} result(s)).{}",
-                s.display, s.latest_value, s.unit, abnormal, direction, s.result_count, pending
+                "{}: latest {} {}{}; {} ({} result(s)).{}{}",
+                s.display,
+                s.latest_value,
+                s.unit,
+                abnormal,
+                direction,
+                s.result_count,
+                incomparable,
+                pending
             ),
         };
         statements.push(TrendStatement {
@@ -178,8 +217,24 @@ mod tests {
             latest_abnormal: abnormal.map(str::to_string),
             direction,
             result_count: 2,
+            incomparable_count: 0,
             pending_count: 1,
         }
+    }
+
+    #[test]
+    fn mixed_units_are_stated_instead_of_a_direction() {
+        let mut s = glucose(Direction::MixedUnits, None);
+        s.incomparable_count = 1;
+        let a = analyze(&[s.clone()], "en");
+        let text = &a.statements[0].text;
+        assert!(text.contains("trend not calculated"), "{text}");
+        assert!(text.contains("1 result(s) in another unit not comparable with mg/dL"));
+        for banned in ["rising", "falling", "stable"] {
+            assert!(!text.contains(banned), "{text}");
+        }
+        let es = analyze(&[s], "es");
+        assert!(es.statements[0].text.contains("unidades no convertibles"));
     }
 
     #[test]

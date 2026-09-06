@@ -11,6 +11,21 @@ use serde_json::{json, Value};
 use sqlx::{PgConnection, Row};
 use std::collections::BTreeMap;
 use uuid::Uuid;
+use wellos_domain::units::{convert, Quantity};
+
+/// Follow-up task statuses that still require action. `completed` and
+/// `superseded` tasks are history, never outstanding work. Shared by the
+/// Patient Brief and the dashboard cockpit so both agree on what is pending.
+pub(crate) const ACTIONABLE_TASK_STATUSES: &str = "('open','overdue')";
+
+/// Ordering for outstanding tasks: overdue first, then urgent/high priority,
+/// then soonest due. `alias` prefixes column names (e.g. `"t."`).
+pub(crate) fn task_order(alias: &str) -> String {
+    format!(
+        "({alias}status = 'overdue') DESC, ({alias}priority IN ('urgent','high')) DESC, \
+         {alias}due_at ASC NULLS LAST, {alias}created_at ASC"
+    )
+}
 
 /// Parse a reference range rendered as `low-high` optionally followed by a
 /// unit (e.g. `70-99 mg/dL`). Anything else is treated as not parseable.
@@ -33,10 +48,15 @@ pub(crate) fn abnormal_flag(value: Decimal, range: Option<&str>) -> Option<&'sta
     }
 }
 
-/// Direction over the last three non-superseded results. Two consecutive
-/// moves in the same direction are required for rising/falling; otherwise
-/// the series is reported as stable.
-pub(crate) fn direction(values: &[Decimal]) -> Direction {
+/// Direction over the last three comparable, non-superseded results. Two
+/// consecutive moves in the same direction are required for rising/falling;
+/// otherwise the series is reported as stable. Values must already be
+/// expressed in one unit; if any result of the series could not be
+/// converted, no direction is computed at all.
+pub(crate) fn direction(values: &[Decimal], incomparable: usize) -> Direction {
+    if incomparable > 0 {
+        return Direction::MixedUnits;
+    }
     if values.len() < 2 {
         return Direction::Insufficient;
     }
@@ -53,13 +73,54 @@ pub(crate) fn direction(values: &[Decimal]) -> Direction {
 
 struct Series {
     display: String,
+    /// Unit every comparable value is expressed in: the unit of the most
+    /// recent non-superseded result, so the latest value and its reference
+    /// range are always shown exactly as reported.
     unit: String,
     results: Vec<Value>,
     values: Vec<Decimal>,
     refs: Vec<String>,
+    incomparable: usize,
     latest_value: Option<Decimal>,
     latest_range: Option<String>,
     pending: Vec<Value>,
+}
+
+impl Series {
+    fn new(display: String, unit: String) -> Self {
+        Series {
+            display,
+            unit,
+            results: Vec::new(),
+            values: Vec::new(),
+            refs: Vec::new(),
+            incomparable: 0,
+            latest_value: None,
+            latest_range: None,
+            pending: Vec::new(),
+        }
+    }
+}
+
+/// Express `value unit` in the series unit for `code`. `None` when no exact
+/// conversion is known: such a result is shown as reported but excluded from
+/// the trend instead of being compared as a raw number.
+pub(crate) fn normalize(
+    value: Decimal,
+    unit: &str,
+    series_unit: &str,
+    code: &str,
+) -> Option<Decimal> {
+    convert(
+        &Quantity {
+            value,
+            unit: unit.to_string(),
+        },
+        series_unit,
+        code,
+    )
+    .ok()
+    .map(|q| q.value.round_dp(2).normalize())
 }
 
 /// Grouped diagnostic history for one patient with deterministic dMind
@@ -98,6 +159,22 @@ pub(crate) async fn diagnostic_history(
     .fetch_all(&mut *tx)
     .await?;
 
+    // Series unit per analyte: the unit of the newest non-superseded result
+    // (falling back to the newest row of any kind). Rows are oldest-first, so
+    // a later row overrides an earlier one.
+    let mut series_units: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    for r in &rows {
+        let code: String = r.get("code_loinc");
+        let unit: String = r.get("unit");
+        let superseded: bool = r.get("superseded");
+        match series_units.get(&code) {
+            Some((_, true)) if superseded => {}
+            _ => {
+                series_units.insert(code, (unit, !superseded));
+            }
+        }
+    }
+
     let mut groups: BTreeMap<String, Series> = BTreeMap::new();
     for r in &rows {
         let code: String = r.get("code_loinc");
@@ -107,21 +184,21 @@ pub(crate) async fn diagnostic_history(
         let superseded: bool = r.get("superseded");
         let id: Uuid = r.get("id");
         let flag = abnormal_flag(value, range.as_deref());
-        let entry = groups.entry(code).or_insert_with(|| Series {
-            display: r.get("display"),
-            unit: unit.clone(),
-            results: Vec::new(),
-            values: Vec::new(),
-            refs: Vec::new(),
-            latest_value: None,
-            latest_range: None,
-            pending: Vec::new(),
-        });
+        let series_unit = series_units
+            .get(&code)
+            .map(|(u, _)| u.clone())
+            .unwrap_or_else(|| unit.clone());
+        let normalized = normalize(value, &unit, &series_unit, &code);
+        let entry = groups
+            .entry(code)
+            .or_insert_with(|| Series::new(r.get("display"), series_unit.clone()));
         entry.results.push(json!({
             "id": id,
             "service_request_id": r.get::<Uuid,_>("service_request_id"),
             "value": value,
             "unit": unit,
+            "normalized_value": normalized,
+            "comparable": normalized.is_some(),
             "reference_range": range,
             "abnormal": flag,
             "critical": r.get::<bool,_>("critical"),
@@ -132,24 +209,22 @@ pub(crate) async fn diagnostic_history(
             "received_at": r.get::<chrono::DateTime<chrono::Utc>,_>("received_at"),
         }));
         if !superseded {
-            entry.values.push(value);
-            entry.refs.push(format!("observation:{id}"));
-            entry.latest_value = Some(value);
-            entry.latest_range = range;
+            match normalized {
+                Some(v) => {
+                    entry.values.push(v);
+                    entry.refs.push(format!("observation:{id}"));
+                    entry.latest_value = Some(v);
+                    entry.latest_range = range;
+                }
+                None => entry.incomparable += 1,
+            }
         }
     }
     for r in &pending_rows {
         let code: String = r.get("code_loinc");
-        let entry = groups.entry(code).or_insert_with(|| Series {
-            display: r.get("display"),
-            unit: String::new(),
-            results: Vec::new(),
-            values: Vec::new(),
-            refs: Vec::new(),
-            latest_value: None,
-            latest_range: None,
-            pending: Vec::new(),
-        });
+        let entry = groups
+            .entry(code)
+            .or_insert_with(|| Series::new(r.get("display"), String::new()));
         entry.pending.push(json!({
             "id": r.get::<Uuid,_>("id"),
             "display": r.get::<String,_>("display"),
@@ -161,7 +236,7 @@ pub(crate) async fn diagnostic_history(
     let mut facts = Vec::new();
     let mut tests = Vec::new();
     for (code, s) in &groups {
-        let dir = direction(&s.values);
+        let dir = direction(&s.values, s.incomparable);
         let latest_abnormal = s
             .latest_value
             .and_then(|v| abnormal_flag(v, s.latest_range.as_deref()));
@@ -176,7 +251,8 @@ pub(crate) async fn diagnostic_history(
                 .unwrap_or_default(),
             latest_abnormal: latest_abnormal.map(str::to_string),
             direction: dir,
-            result_count: s.values.len(),
+            result_count: s.values.len() + s.incomparable,
+            incomparable_count: s.incomparable,
             pending_count: s.pending.len(),
         });
         tests.push(json!({
@@ -190,7 +266,8 @@ pub(crate) async fn diagnostic_history(
             "latest_value": s.latest_value,
             "latest_abnormal": latest_abnormal,
             "direction": dir,
-            "result_count": s.values.len(),
+            "result_count": s.values.len() + s.incomparable,
+            "incomparable_count": s.incomparable,
         }));
     }
     let analysis = trends::analyze(&facts, language);
@@ -240,12 +317,13 @@ pub(crate) async fn patient_brief(
     })
     .collect::<Vec<_>>();
 
-    let open_tasks = sqlx::query(
+    let open_tasks = sqlx::query(&format!(
         "SELECT id, description, priority, status, due_at, service_request_id
          FROM follow_up_tasks
-         WHERE tenant_id = $1 AND patient_id = $2 AND status <> 'completed'
-         ORDER BY (priority = 'high') DESC, due_at ASC NULLS LAST LIMIT 10",
-    )
+         WHERE tenant_id = $1 AND patient_id = $2 AND status IN {ACTIONABLE_TASK_STATUSES}
+         ORDER BY {} LIMIT 10",
+        task_order("")
+    ))
     .bind(tenant_id)
     .bind(patient_id)
     .fetch_all(&mut *tx)
@@ -364,17 +442,48 @@ mod tests {
 
     #[test]
     fn direction_uses_last_three_results() {
-        assert_eq!(direction(&[d("118")]), Direction::Insufficient);
+        assert_eq!(direction(&[d("118")], 0), Direction::Insufficient);
         assert_eq!(
-            direction(&[d("118"), d("126"), d("134")]),
+            direction(&[d("118"), d("126"), d("134")], 0),
             Direction::Rising
         );
-        assert_eq!(direction(&[d("5"), d("4.5"), d("4.1")]), Direction::Falling);
-        assert_eq!(direction(&[d("5"), d("4.5"), d("4.7")]), Direction::Stable);
+        assert_eq!(
+            direction(&[d("5"), d("4.5"), d("4.1")], 0),
+            Direction::Falling
+        );
+        assert_eq!(
+            direction(&[d("5"), d("4.5"), d("4.7")], 0),
+            Direction::Stable
+        );
         // Older history does not mask the recent direction.
         assert_eq!(
-            direction(&[d("200"), d("118"), d("126"), d("134")]),
+            direction(&[d("200"), d("118"), d("126"), d("134")], 0),
             Direction::Rising
         );
+        // One incomparable result suppresses the trend entirely.
+        assert_eq!(
+            direction(&[d("118"), d("126"), d("134")], 1),
+            Direction::MixedUnits
+        );
+    }
+
+    #[test]
+    fn normalizes_known_conversions_and_refuses_unknown_ones() {
+        // Glucose 6.1 mmol/L expressed in the series unit mg/dL.
+        let mgdl = normalize(d("6.1"), "mmol/L", "mg/dL", "2345-7").unwrap();
+        assert!(mgdl > d("109") && mgdl < d("110.5"), "{mgdl}");
+        // Identity conversion keeps the value.
+        assert_eq!(
+            normalize(d("134"), "mg/dL", "mg/dL", "2345-7"),
+            Some(d("134"))
+        );
+        // Potassium mmol/L <-> meq/L is 1:1.
+        assert_eq!(
+            normalize(d("5.9"), "meq/L", "mmol/L", "2823-3"),
+            Some(d("5.9"))
+        );
+        // Unknown units are never compared as raw numbers.
+        assert_eq!(normalize(d("7.7"), "furlongs", "mmol/L", "2823-3"), None);
+        assert_eq!(normalize(d("100"), "mg/dL", "mmol/L", "2823-3"), None);
     }
 }

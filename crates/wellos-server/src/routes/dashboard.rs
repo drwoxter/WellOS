@@ -6,6 +6,7 @@
 use crate::auth::AuthContext;
 use crate::error::ApiError;
 use crate::policy::{actions, facility_scope, roles, ResourceCtx};
+use crate::routes::brief::{task_order, ACTIONABLE_TASK_STATUSES};
 use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::State;
@@ -83,19 +84,21 @@ pub async fn cockpit(
     })
     .collect::<Vec<_>>();
 
-    // Patients with open critical alerts or open follow-up tasks.
-    let attention = sqlx::query(
+    // Patients with open critical alerts or actionable (open/overdue) tasks.
+    let attention = sqlx::query(&format!(
         "SELECT p.id, p.family_name, p.given_name, p.identifier, p.facility_id,
                 (SELECT count(*) FROM alerts a
                  WHERE a.tenant_id = p.tenant_id AND a.patient_id = p.id AND a.status = 'open') AS open_alerts,
                 (SELECT count(*) FROM follow_up_tasks t
-                 WHERE t.tenant_id = p.tenant_id AND t.patient_id = p.id AND t.status = 'open') AS open_tasks,
+                 WHERE t.tenant_id = p.tenant_id AND t.patient_id = p.id
+                   AND t.status IN {ACTIONABLE_TASK_STATUSES}) AS open_tasks,
                 (SELECT max(x.at) FROM (
                     SELECT a.created_at AS at FROM alerts a
                     WHERE a.tenant_id = p.tenant_id AND a.patient_id = p.id AND a.status = 'open'
                     UNION ALL
                     SELECT t.created_at FROM follow_up_tasks t
-                    WHERE t.tenant_id = p.tenant_id AND t.patient_id = p.id AND t.status = 'open'
+                    WHERE t.tenant_id = p.tenant_id AND t.patient_id = p.id
+                      AND t.status IN {ACTIONABLE_TASK_STATUSES}
                  ) x) AS latest_at,
                 EXISTS (SELECT 1 FROM encounters e
                         WHERE e.tenant_id = p.tenant_id AND e.patient_id = p.id
@@ -110,9 +113,9 @@ pub async fn cockpit(
            AND (EXISTS (SELECT 1 FROM alerts a WHERE a.tenant_id = p.tenant_id
                         AND a.patient_id = p.id AND a.status = 'open')
              OR EXISTS (SELECT 1 FROM follow_up_tasks t WHERE t.tenant_id = p.tenant_id
-                        AND t.patient_id = p.id AND t.status = 'open'))
-         ORDER BY open_alerts DESC, latest_at DESC LIMIT 10",
-    )
+                        AND t.patient_id = p.id AND t.status IN {ACTIONABLE_TASK_STATUSES}))
+         ORDER BY open_alerts DESC, latest_at DESC LIMIT 10"
+    ))
     .bind(ctx.tenant_id)
     .bind(ctx.user_id)
     .bind(scope_all)
@@ -140,18 +143,19 @@ pub async fn cockpit(
     })
     .collect::<Vec<_>>();
 
-    // Open follow-up tasks, most urgent first.
-    let tasks = sqlx::query(
+    // Actionable follow-up tasks: overdue first, then urgent/high priority.
+    let tasks = sqlx::query(&format!(
         "SELECT t.id, t.description, t.priority, t.status, t.due_at, t.created_at,
                 t.service_request_id, p.family_name, p.given_name, p.identifier, p.facility_id,
                 EXISTS (SELECT 1 FROM encounters e
                         WHERE e.tenant_id = p.tenant_id AND e.patient_id = p.id
                           AND e.practitioner_id = $2) AS has_relationship
          FROM follow_up_tasks t JOIN patients p ON p.id = t.patient_id
-         WHERE t.tenant_id = $1 AND t.status = 'open' AND ($3 OR p.facility_id = ANY($4))
-         ORDER BY (t.priority = 'high') DESC, t.due_at ASC NULLS LAST, t.created_at ASC
-         LIMIT 10",
-    )
+         WHERE t.tenant_id = $1 AND t.status IN {ACTIONABLE_TASK_STATUSES}
+           AND ($3 OR p.facility_id = ANY($4))
+         ORDER BY {} LIMIT 10",
+        task_order("t.")
+    ))
     .bind(ctx.tenant_id)
     .bind(ctx.user_id)
     .bind(scope_all)

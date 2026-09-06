@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import DashboardPage from "@/app/dashboard/page";
 import { SessionProvider } from "@/lib/session";
-import { COCKPIT_STORAGE_KEY } from "@/lib/cockpit";
+import { COCKPIT_STORAGE_ITEM } from "@/lib/cockpit";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -289,7 +289,7 @@ describe("dashboard cockpit", () => {
     ]);
     await user.click(screen.getByRole("radio", { name: "Compact" }));
     const stored = JSON.parse(
-      window.localStorage.getItem(COCKPIT_STORAGE_KEY) ?? "null",
+      window.localStorage.getItem(COCKPIT_STORAGE_ITEM) ?? "null",
     );
     expect(Object.keys(stored).sort()).toEqual(["density", "hidden", "order"]);
     expect(stored.order).toEqual([
@@ -307,12 +307,12 @@ describe("dashboard cockpit", () => {
     );
     expect(await screen.findByText(/Follow-up of cough/)).toBeInTheDocument();
     expect(
-      JSON.parse(window.localStorage.getItem(COCKPIT_STORAGE_KEY) ?? "{}"),
+      JSON.parse(window.localStorage.getItem(COCKPIT_STORAGE_ITEM) ?? "{}"),
     ).toMatchObject({ hidden: [], density: "expanded" });
   });
 
   it("starts from a stored layout and ignores malformed storage", async () => {
-    window.localStorage.setItem(COCKPIT_STORAGE_KEY, "{not json");
+    window.localStorage.setItem(COCKPIT_STORAGE_ITEM, "{not json");
     setup(["physician"]);
     expect(await screen.findByText("Draft consultations")).toBeInTheDocument();
   });

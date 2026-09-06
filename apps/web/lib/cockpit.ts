@@ -19,7 +19,7 @@ export type CockpitConfig = {
   density: Density;
 };
 
-export const COCKPIT_STORAGE_KEY = "wellos.cockpit.v1";
+export const COCKPIT_STORAGE_ITEM = "wellos.cockpit.v1";
 
 export function defaultConfig(roles: string[]): CockpitConfig {
   const physician = roles.includes("physician");
@@ -87,7 +87,7 @@ export function loadConfig(
   const fallback = defaultConfig(roles);
   if (!storage) return fallback;
   try {
-    return parseConfig(storage.getItem(COCKPIT_STORAGE_KEY), fallback);
+    return parseConfig(storage.getItem(COCKPIT_STORAGE_ITEM), fallback);
   } catch {
     return fallback;
   }
@@ -98,7 +98,7 @@ export function saveConfig(
   config: CockpitConfig,
 ): void {
   try {
-    storage?.setItem(COCKPIT_STORAGE_KEY, JSON.stringify(config));
+    storage?.setItem(COCKPIT_STORAGE_ITEM, JSON.stringify(config));
   } catch {
     // Storage may be unavailable (private mode, quota); the layout simply
     // does not persist.

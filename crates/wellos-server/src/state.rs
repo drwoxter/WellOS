@@ -357,6 +357,81 @@ pub fn identity_provider_not_configured() -> ApiError {
     )
 }
 
+/// Destination policy for the external transcription endpoint. Recordings
+/// and the bearer credential are only ever sent to a host the operator
+/// named twice: once in `WELLOS_SCRIBE_ENDPOINT` and once in the exact-match
+/// allowlist `WELLOS_SCRIBE_ALLOWED_HOSTS`. Outside development the
+/// allowlist is mandatory, the scheme must be `https`, and IP-literal or
+/// loopback hosts are refused; in development a loopback `http://` mock is
+/// allowed for local adapters. The URL may not embed credentials.
+pub fn validate_scribe_endpoint(
+    endpoint: &str,
+    allowed_hosts: Option<&str>,
+    is_development: bool,
+) -> anyhow::Result<()> {
+    let url = url::Url::parse(endpoint)
+        .map_err(|_| anyhow::anyhow!("WELLOS_SCRIBE_ENDPOINT is not a valid absolute URL"))?;
+    let host = match url.host() {
+        Some(url::Host::Domain(d)) => d.to_ascii_lowercase(),
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) if is_development => {
+            url.host_str().unwrap_or_default().to_ascii_lowercase()
+        }
+        Some(_) => {
+            anyhow::bail!("WELLOS_SCRIBE_ENDPOINT must name a DNS host, not an IP literal")
+        }
+        None => anyhow::bail!("WELLOS_SCRIBE_ENDPOINT must include a host"),
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        anyhow::bail!("WELLOS_SCRIBE_ENDPOINT must not embed credentials");
+    }
+    let loopback = host == "localhost"
+        || host.ends_with(".localhost")
+        || matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback())
+        || matches!(url.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback());
+    match url.scheme() {
+        "https" => {}
+        "http" if is_development && loopback => {}
+        "http" => anyhow::bail!(
+            "WELLOS_SCRIBE_ENDPOINT must be an https:// URL (http:// is only allowed for a loopback host in development)"
+        ),
+        _ => anyhow::bail!("WELLOS_SCRIBE_ENDPOINT must be an https:// URL"),
+    }
+    if loopback && !is_development {
+        anyhow::bail!(
+            "WELLOS_SCRIBE_ENDPOINT must not point at a loopback host outside development"
+        );
+    }
+    let allowed: Vec<String> = allowed_hosts
+        .unwrap_or_default()
+        .split(',')
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    if allowed.is_empty() {
+        if is_development {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "WELLOS_SCRIBE_ALLOWED_HOSTS is required outside development when WELLOS_SCRIBE_PROVIDER=openai_compatible"
+        );
+    }
+    if allowed.iter().any(|h| h.contains('*') || h.contains('/')) {
+        anyhow::bail!(
+            "WELLOS_SCRIBE_ALLOWED_HOSTS entries must be exact host names (no wildcards or paths)"
+        );
+    }
+    // A bare entry matches only the scheme's default port; a non-default
+    // port must be named explicitly as `host:port`.
+    let host_port = match url.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    };
+    if !allowed.contains(&host_port) {
+        anyhow::bail!("WELLOS_SCRIBE_ENDPOINT host is not in WELLOS_SCRIBE_ALLOWED_HOSTS");
+    }
+    Ok(())
+}
+
 /// Resolve the speech-to-text provider from the environment. The default is
 /// the deterministic offline fake; an OpenAI-compatible endpoint is used only
 /// when `WELLOS_SCRIBE_PROVIDER=openai_compatible` is set explicitly, and
@@ -373,11 +448,8 @@ pub fn scribe_provider_from_env(
         "openai_compatible" => {
             let endpoint = std::env::var("WELLOS_SCRIBE_ENDPOINT")
                 .map_err(|_| anyhow::anyhow!("WELLOS_SCRIBE_ENDPOINT is required"))?;
-            if !(endpoint.starts_with("https://")
-                || (is_development && endpoint.starts_with("http://")))
-            {
-                anyhow::bail!("WELLOS_SCRIBE_ENDPOINT must be an https:// URL outside development");
-            }
+            let allowed_hosts = std::env::var("WELLOS_SCRIBE_ALLOWED_HOSTS").ok();
+            validate_scribe_endpoint(&endpoint, allowed_hosts.as_deref(), is_development)?;
             let model = std::env::var("WELLOS_SCRIBE_MODEL")
                 .map_err(|_| anyhow::anyhow!("WELLOS_SCRIBE_MODEL is required"))?;
             let api_key = std::env::var("WELLOS_SCRIBE_API_KEY")
@@ -439,5 +511,93 @@ impl AppState {
             cell: "cell-dev-1".to_string(),
             auth: Arc::new(auth),
         }
+    }
+}
+
+#[cfg(test)]
+mod scribe_endpoint_tests {
+    use super::validate_scribe_endpoint;
+
+    const EP: &str = "https://stt.example.org/v1/audio/transcriptions";
+
+    #[test]
+    fn production_requires_an_exact_host_allowlist() {
+        let err = validate_scribe_endpoint(EP, None, false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("WELLOS_SCRIBE_ALLOWED_HOSTS is required"));
+        let err = validate_scribe_endpoint(EP, Some(" , "), false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("WELLOS_SCRIBE_ALLOWED_HOSTS is required"));
+        validate_scribe_endpoint(EP, Some("stt.example.org"), false).unwrap();
+        validate_scribe_endpoint(EP, Some("other.example.org, STT.Example.ORG"), false).unwrap();
+    }
+
+    #[test]
+    fn hosts_outside_the_allowlist_are_refused() {
+        for ep in [
+            "https://evil.example.net/v1/audio/transcriptions",
+            "https://stt.example.org.evil.example.net/x",
+            "https://sub.stt.example.org/x",
+            "https://stt.example.org:8443/x",
+        ] {
+            let err = validate_scribe_endpoint(ep, Some("stt.example.org"), false).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("not in WELLOS_SCRIBE_ALLOWED_HOSTS"),
+                "{ep}: {err}"
+            );
+        }
+        validate_scribe_endpoint(
+            "https://stt.example.org:8443/x",
+            Some("stt.example.org:8443"),
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn allowlist_entries_are_exact_names_only() {
+        let err = validate_scribe_endpoint(EP, Some("*.example.org"), false).unwrap_err();
+        assert!(err.to_string().contains("exact host names"));
+        let err = validate_scribe_endpoint(EP, Some("stt.example.org/v1"), false).unwrap_err();
+        assert!(err.to_string().contains("exact host names"));
+    }
+
+    #[test]
+    fn plain_http_ip_literals_loopback_and_embedded_credentials_are_refused_in_production() {
+        let allow = Some("stt.example.org,localhost,10.0.0.5,127.0.0.1");
+        for (ep, needle) in [
+            ("http://stt.example.org/x", "https://"),
+            ("ftp://stt.example.org/x", "https://"),
+            ("https://10.0.0.5/x", "IP literal"),
+            ("https://[::1]/x", "IP literal"),
+            ("https://127.0.0.1/x", "IP literal"),
+            ("https://localhost/x", "loopback"),
+            ("https://stt.localhost/x", "loopback"),
+            ("https://user:pw@stt.example.org/x", "embed credentials"),
+            ("https:///x", "host"),
+            ("not a url", "valid absolute URL"),
+        ] {
+            let err = validate_scribe_endpoint(ep, allow, false).unwrap_err();
+            assert!(err.to_string().contains(needle), "{ep}: {err}");
+        }
+    }
+
+    #[test]
+    fn development_allows_a_loopback_http_mock_but_still_honours_an_allowlist() {
+        validate_scribe_endpoint("http://127.0.0.1:9000/v1", None, true).unwrap();
+        validate_scribe_endpoint("http://localhost:9000/v1", None, true).unwrap();
+        validate_scribe_endpoint(EP, None, true).unwrap();
+        let err = validate_scribe_endpoint("http://stt.example.org/x", None, true).unwrap_err();
+        assert!(err.to_string().contains("loopback host in development"));
+        let err = validate_scribe_endpoint(EP, Some("other.example.org"), true).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("not in WELLOS_SCRIBE_ALLOWED_HOSTS"));
+        let err =
+            validate_scribe_endpoint("https://user:pw@stt.example.org/x", None, true).unwrap_err();
+        assert!(err.to_string().contains("embed credentials"));
     }
 }

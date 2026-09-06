@@ -301,8 +301,11 @@ struct VerboseSegment {
 
 impl OpenAiCompatibleTranscription {
     pub fn new(cfg: OpenAiCompatibleConfig) -> Result<Self, ScribeError> {
+        // The destination is pinned by configuration; a redirect would let a
+        // compromised endpoint forward the audio and credential elsewhere.
         let client = reqwest::Client::builder()
             .timeout(cfg.timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ScribeError::Unavailable(format!("http client: {e}")))?;
         Ok(Self { cfg, client })

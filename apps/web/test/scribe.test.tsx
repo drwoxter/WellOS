@@ -3,7 +3,12 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import EncounterPage from "@/app/encounters/[id]/page";
 import { RecordingDock } from "@/app/encounters/[id]/scribe";
-import { SessionProvider } from "@/lib/session";
+import {
+  DiagnosticHistory,
+  type DiagnosticResult,
+  type Diagnostics,
+} from "@/app/encounters/[id]/brief";
+import { SessionProvider, useSession } from "@/lib/session";
 import type { AudioRecorder, Recording } from "@/lib/recorder";
 import { RecorderError } from "@/lib/recorder";
 import type { ScribeArtifact, TranscriptSegment } from "@/lib/scribe";
@@ -61,20 +66,25 @@ class FakeRecorder implements AudioRecorder {
   durationMs: number;
   bytes: number;
   failStart: RecorderError | null;
+  /** When set, `start()` (the permission prompt) waits for this promise. */
+  startGate: Promise<void> | null;
 
   constructor(
     opts: {
       durationMs?: number;
       bytes?: number;
       failStart?: RecorderError | null;
+      startGate?: Promise<void>;
     } = {},
   ) {
     this.durationMs = opts.durationMs ?? 5_000;
     this.bytes = opts.bytes ?? 1_000;
     this.failStart = opts.failStart ?? null;
+    this.startGate = opts.startGate ?? null;
     FakeRecorder.instances.push(this);
   }
   async start(): Promise<void> {
+    if (this.startGate) await this.startGate;
     if (this.failStart) throw this.failStart;
     this.started = true;
   }
@@ -297,27 +307,16 @@ function workspace(overrides: Record<string, unknown> = {}) {
           latest_abnormal: "high",
           direction: "rising",
           result_count: 2,
+          incomparable_count: 0,
           pending_count: 0,
           results: [
-            {
-              id: "o1",
-              service_request_id: "sr1",
-              value: "6.8",
-              unit: "mmol/L",
-              reference_range: "3.5-5.1 mmol/L",
-              abnormal: "high",
-              critical: true,
-              status: "final",
-              superseded: false,
-              loop_state: "awaiting_review",
-              effective_at: "2026-08-28T09:00:00Z",
-              received_at: "2026-08-28T10:00:00Z",
-            },
             {
               id: "o0",
               service_request_id: "sr0",
               value: "4.9",
               unit: "mmol/L",
+              normalized_value: "4.9",
+              comparable: true,
               reference_range: "3.5-5.1 mmol/L",
               abnormal: null,
               critical: false,
@@ -326,6 +325,22 @@ function workspace(overrides: Record<string, unknown> = {}) {
               loop_state: "closed",
               effective_at: "2026-08-01T09:00:00Z",
               received_at: "2026-08-01T10:00:00Z",
+            },
+            {
+              id: "o1",
+              service_request_id: "sr1",
+              value: "6.8",
+              unit: "mmol/L",
+              normalized_value: "6.8",
+              comparable: true,
+              reference_range: "3.5-5.1 mmol/L",
+              abnormal: "high",
+              critical: true,
+              status: "final",
+              superseded: false,
+              loop_state: "awaiting_review",
+              effective_at: "2026-08-28T09:00:00Z",
+              received_at: "2026-08-28T10:00:00Z",
             },
           ],
           pending: [],
@@ -377,8 +392,12 @@ function setupPage(
       }
       return Promise.resolve(jsonResponse({}));
     }
-    if (url === "/api/v1/encounters/e1")
-      return Promise.resolve(jsonResponse(ws));
+    if (url.startsWith("/api/v1/encounters/e1?"))
+      return Promise.resolve(
+        jsonResponse(
+          typeof ws === "function" ? (ws as (url: string) => unknown)(url) : ws,
+        ),
+      );
     return Promise.resolve(jsonResponse({}));
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -640,6 +659,73 @@ describe("recording dock", () => {
     await screen.findByRole("button", { name: "Pause" });
     view.unmount();
     expect(FakeRecorder.instances[0].discarded).toBe(true);
+  });
+
+  it("discards a recorder whose start failed so no track or chunk is kept", async () => {
+    const user = userEvent.setup();
+    setupDock({
+      recorder: () =>
+        new FakeRecorder({ failStart: new RecorderError("failed", "boom") }),
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Record consultation" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Recording failed/,
+    );
+    expect(FakeRecorder.instances).toHaveLength(1);
+    expect(FakeRecorder.instances[0].discarded).toBe(true);
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
+  });
+
+  it("drops a recorder whose permission prompt resolves after unmount", async () => {
+    const user = userEvent.setup();
+    const gate = deferred<void>();
+    const { view } = setupDock({
+      recorder: () => new FakeRecorder({ startGate: gate.promise }),
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Record consultation" }),
+    );
+    const rec = FakeRecorder.instances[0];
+    expect(rec.started).toBe(false);
+    view.unmount();
+    // Nothing to stop yet: the stream has not been granted.
+    expect(rec.discarded).toBe(true);
+    rec.discarded = false;
+    await act(async () => {
+      gate.resolve();
+      await gate.promise;
+    });
+    // The late grant is released immediately, not left running invisibly.
+    expect(rec.started).toBe(true);
+    expect(rec.discarded).toBe(true);
+  });
+
+  it("a permission failure that lands after unmount is discarded silently", async () => {
+    const user = userEvent.setup();
+    const gate = deferred<void>();
+    const { view } = setupDock({
+      recorder: () =>
+        new FakeRecorder({
+          startGate: gate.promise,
+          failStart: new RecorderError("permission_denied", "denied"),
+        }),
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Record consultation" }),
+    );
+    const rec = FakeRecorder.instances[0];
+    view.unmount();
+    rec.discarded = false;
+    await act(async () => {
+      gate.resolve();
+      await gate.promise;
+    });
+    expect(rec.discarded).toBe(true);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("renders the Spanish controls", async () => {
@@ -1007,5 +1093,183 @@ describe("patient brief and diagnostic history", () => {
     expect(
       screen.getByText("dMind trend commentary (assistive)"),
     ).toBeInTheDocument();
+  });
+});
+
+function result(
+  index: number,
+  overrides: Partial<DiagnosticResult> = {},
+): DiagnosticResult {
+  const day = String(index + 1).padStart(2, "0");
+  return {
+    id: `o${index}`,
+    service_request_id: `sr${index}`,
+    value: `${100 + index}`,
+    unit: "mg/dL",
+    normalized_value: `${100 + index}`,
+    comparable: true,
+    reference_range: "70-99 mg/dL",
+    abnormal: "high",
+    critical: false,
+    status: "final",
+    superseded: false,
+    loop_state: "closed",
+    effective_at: `2026-08-${day}T09:00:00Z`,
+    received_at: `2026-08-${day}T10:00:00Z`,
+    ...overrides,
+  };
+}
+
+function glucoseDiagnostics(results: DiagnosticResult[]): Diagnostics {
+  return {
+    generated_at: "2026-08-29T09:00:00Z",
+    tests: [
+      {
+        code: "2345-7",
+        display: "Glucose [Mass/volume] in Serum",
+        unit: "mg/dL",
+        reference_range: "70-99 mg/dL",
+        results,
+        pending: [],
+        pending_count: 0,
+        latest_value: results.at(-1)?.normalized_value ?? null,
+        latest_abnormal: "high",
+        direction: "rising",
+        result_count: results.length,
+        incomparable_count: results.filter((r) => !r.comparable).length,
+      },
+    ],
+    analysis: null,
+  };
+}
+
+function shownValues(): string[] {
+  return screen
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => row.querySelector("td:nth-child(2) a")?.textContent ?? "");
+}
+
+describe("diagnostic history ordering", () => {
+  it("previews the three newest results, newest first, and expands coherently", async () => {
+    const user = userEvent.setup();
+    // Server order: oldest first (o0 … o4).
+    const results = [0, 1, 2, 3, 4].map((i) => result(i));
+    render(
+      <DiagnosticHistory
+        lang="en"
+        diagnostics={glucoseDiagnostics(results)}
+        defaultOpen
+      />,
+    );
+    expect(shownValues()).toEqual(["104 mg/dL", "103 mg/dL", "102 mg/dL"]);
+    expect(screen.queryByText("100 mg/dL")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Show more \(2\)/ }));
+    expect(shownValues()).toEqual([
+      "104 mg/dL",
+      "103 mg/dL",
+      "102 mg/dL",
+      "101 mg/dL",
+      "100 mg/dL",
+    ]);
+    await user.click(screen.getByRole("button", { name: "Show less" }));
+    expect(shownValues()).toEqual(["104 mg/dL", "103 mg/dL", "102 mg/dL"]);
+  });
+
+  it("shows converted and non-comparable units next to the reported value", () => {
+    const results = [
+      result(0, { value: "5.6", unit: "mmol/L", normalized_value: "100.89" }),
+      result(1, {
+        value: "1",
+        unit: "g/L",
+        normalized_value: null,
+        comparable: false,
+      }),
+      result(2),
+    ];
+    const diagnostics = glucoseDiagnostics(results);
+    diagnostics.tests[0].direction = "mixed_units";
+    render(
+      <DiagnosticHistory lang="en" diagnostics={diagnostics} defaultOpen />,
+    );
+    expect(screen.getByText("≈ 100.89 mg/dL")).toBeInTheDocument();
+    expect(screen.getByText("not comparable")).toBeInTheDocument();
+    expect(screen.getByText("Units not comparable")).toBeInTheDocument();
+    // The reported value and unit are never rewritten.
+    expect(screen.getByText("5.6 mmol/L")).toBeInTheDocument();
+    expect(screen.getByText("1 g/L")).toBeInTheDocument();
+  });
+});
+
+function LangSwitch() {
+  const { setLang } = useSession();
+  return (
+    <button type="button" onClick={() => setLang("es")}>
+      switch-to-es
+    </button>
+  );
+}
+
+describe("workspace language", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  it("requests commentary in the interface language and re-reads it on change without losing unsaved text", async () => {
+    const user = userEvent.setup();
+    const ws = workspace({ scribe_draft: null }) as {
+      diagnostics: Diagnostics;
+    };
+    const es = structuredClone(ws);
+    es.diagnostics.analysis!.language = "es";
+    es.diagnostics.analysis!.statements[0].text =
+      "El potasio está en ascenso; el último valor supera el rango de referencia.";
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/session")
+        return Promise.resolve(jsonResponse({ authenticated: true }));
+      if (url === "/api/v1/meta/tenant")
+        return Promise.resolve(jsonResponse(META));
+      if (init?.method === "POST") return Promise.resolve(jsonResponse({}));
+      if (url.startsWith("/api/v1/encounters/e1?")) {
+        const lang = new URL(url, "http://localhost").searchParams.get("lang");
+        return Promise.resolve(jsonResponse(lang === "es" ? es : ws));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <SessionProvider>
+        <LangSwitch />
+        <EncounterPage params={{ id: "e1" }} />
+      </SessionProvider>,
+    );
+    await user.click(await screen.findByText("Diagnostic history"));
+    expect(
+      screen.getByText(/Potassium is rising; the latest value is above/),
+    ).toBeInTheDocument();
+    const reads = () =>
+      fetchMock.mock.calls
+        .map(([input]) => String(input))
+        .filter((u) => u.startsWith("/api/v1/encounters/e1?"));
+    expect(reads()).toEqual(["/api/v1/encounters/e1?lang=en"]);
+
+    await user.type(screen.getByLabelText(/^Plan/), "Rest and fluids");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "switch-to-es" }));
+    await waitFor(() =>
+      expect(reads()).toEqual([
+        "/api/v1/encounters/e1?lang=en",
+        "/api/v1/encounters/e1?lang=es",
+      ]),
+    );
+    expect(
+      await screen.findByText(/El potasio está en ascenso/),
+    ).toBeInTheDocument();
+    // The unsaved local draft survives the language reload.
+    expect(screen.getByLabelText(/^Plan/)).toHaveValue("Rest and fluids");
+    expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
   });
 });

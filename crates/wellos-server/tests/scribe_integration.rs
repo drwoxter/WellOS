@@ -14,6 +14,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
+use uuid::Uuid;
 use wellos_server::state::{AppState, AuthConfig};
 
 fn database_url() -> String {
@@ -1272,6 +1273,314 @@ async fn workspace_carries_patient_brief_and_grouped_diagnostic_history() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+}
+
+/// Order `code` in `enc` and ingest one result for it; returns the
+/// observation id.
+async fn ingest_result(
+    state: &AppState,
+    enc: &str,
+    (code, display): (&str, &str),
+    (value, unit, range): (f64, &str, Option<&str>),
+    effective_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let (st, sr) = call(
+        state,
+        "POST",
+        "/api/v1/service-requests",
+        "dev-dr.garcia",
+        Some(json!({ "encounter_id": enc, "code_loinc": code, "display": display })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{sr}");
+    let (st, res) = call(
+        state,
+        "POST",
+        "/api/v1/lab/results",
+        "dev-lab.chen",
+        Some(json!({
+            "service_request_id": sr["id"],
+            "code_loinc": code,
+            "value": value,
+            "unit": unit,
+            "reference_range": range,
+            "source_system": "fake-lab",
+            "idempotency_key": uniq("dx-key"),
+            "effective_at": effective_at,
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    res["observation_id"].as_str().unwrap().to_string()
+}
+
+async fn workspace_tests(state: &AppState, enc: &str) -> Vec<Value> {
+    let (st, ws) = call(
+        state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ws}");
+    ws["diagnostics"]["tests"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn diagnostic_history_normalizes_units_and_never_compares_incomparable_values() {
+    let (state, _) = test_state().await;
+    let (_, enc) = start_consultation(&state).await;
+    let t0 = chrono::Utc::now() - chrono::Duration::days(3);
+
+    // Glucose reported first in mg/dL, then twice in mmol/L: the series is
+    // expressed in the newest unit and the older value converted into it.
+    let first = ingest_result(
+        &state,
+        &enc,
+        ("2345-7", "Glucose"),
+        (118.0, "mg/dL", Some("70-99 mg/dL")),
+        t0,
+    )
+    .await;
+    ingest_result(
+        &state,
+        &enc,
+        ("2345-7", "Glucose"),
+        (7.5, "mmol/L", Some("3.9-5.5 mmol/L")),
+        t0 + chrono::Duration::days(1),
+    )
+    .await;
+    ingest_result(
+        &state,
+        &enc,
+        ("2345-7", "Glucose"),
+        (8.0, "mmol/L", Some("3.9-5.5 mmol/L")),
+        t0 + chrono::Duration::days(2),
+    )
+    .await;
+
+    // Potassium reported in mmol/L and then in a unit with no known
+    // conversion: shown as reported, but never trended against each other.
+    ingest_result(
+        &state,
+        &enc,
+        ("2823-3", "Potassium"),
+        (5.0, "mmol/L", Some("3.5-5.1 mmol/L")),
+        t0,
+    )
+    .await;
+    ingest_result(
+        &state,
+        &enc,
+        ("2823-3", "Potassium"),
+        (21.5, "mg/dL", Some("13.7-20 mg/dL")),
+        t0 + chrono::Duration::days(1),
+    )
+    .await;
+
+    let tests = workspace_tests(&state, &enc).await;
+    let glucose = tests.iter().find(|t| t["code"] == json!("2345-7")).unwrap();
+    assert_eq!(glucose["unit"], json!("mmol/L"), "{glucose}");
+    assert_eq!(glucose["reference_range"], json!("3.9-5.5 mmol/L"));
+    assert_eq!(glucose["latest_value"], json!("8"), "{glucose}");
+    assert_eq!(glucose["latest_abnormal"], json!("high"));
+    // 118 mg/dL -> 6.55 mmol/L, 7.5, 8: rising. Raw comparison (118, 7.5,
+    // 8) would have reported a fall.
+    assert_eq!(glucose["direction"], json!("rising"), "{glucose}");
+    assert_eq!(glucose["incomparable_count"], json!(0));
+    assert_eq!(glucose["result_count"], json!(3));
+    let converted = glucose["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(first))
+        .unwrap();
+    assert!(
+        converted["value"].as_str().unwrap().starts_with("118"),
+        "{converted}"
+    );
+    assert_eq!(converted["unit"], json!("mg/dL"));
+    assert_eq!(converted["normalized_value"], json!("6.55"), "{converted}");
+    assert_eq!(converted["comparable"], json!(true));
+    // Each row is flagged against its own reference range.
+    assert_eq!(converted["abnormal"], json!("high"));
+
+    let potassium = tests.iter().find(|t| t["code"] == json!("2823-3")).unwrap();
+    assert_eq!(potassium["unit"], json!("mg/dL"), "{potassium}");
+    assert_eq!(potassium["latest_value"], json!("21.5"));
+    assert_eq!(potassium["direction"], json!("mixed_units"), "{potassium}");
+    assert_eq!(potassium["incomparable_count"], json!(1));
+    assert_eq!(potassium["result_count"], json!(2));
+    let rows = potassium["results"].as_array().unwrap();
+    let older = rows.iter().find(|r| r["unit"] == json!("mmol/L")).unwrap();
+    assert_eq!(older["comparable"], json!(false), "{older}");
+    assert!(older["normalized_value"].is_null());
+    let newer = rows.iter().find(|r| r["unit"] == json!("mg/dL")).unwrap();
+    assert_eq!(newer["comparable"], json!(true));
+    assert_eq!(newer["normalized_value"], json!("21.5"));
+
+    // Commentary states the limitation instead of inventing a direction, and
+    // only cites the comparable results.
+    let (_, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    let statements = ws["diagnostics"]["analysis"]["statements"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let k = statements
+        .iter()
+        .find(|s| s["code"] == json!("2823-3"))
+        .unwrap();
+    let text = k["text"].as_str().unwrap();
+    assert!(text.contains("trend not calculated"), "{text}");
+    assert!(text.contains("latest 21.5 mg/dL"), "{text}");
+    assert!(
+        !text.contains("rising") && !text.contains("falling"),
+        "{text}"
+    );
+    assert_eq!(k["facts"].as_array().unwrap().len(), 1, "{k}");
+    let g = statements
+        .iter()
+        .find(|s| s["code"] == json!("2345-7"))
+        .unwrap();
+    assert!(
+        g["text"].as_str().unwrap().contains("latest 8 mmol/L"),
+        "{g}"
+    );
+    assert!(g["text"].as_str().unwrap().contains("rising"), "{g}");
+}
+
+#[tokio::test]
+async fn overdue_tasks_stay_outstanding_and_superseded_tasks_drop_out_everywhere() {
+    let (state, _) = test_state().await;
+    let (patient_id, enc) = start_consultation(&state).await;
+    // A critical potassium creates a high-priority follow-up task.
+    ingest_result(
+        &state,
+        &enc,
+        ("2823-3", "Potassium"),
+        (7.1, "mmol/L", Some("3.5-5.1 mmol/L")),
+        chrono::Utc::now(),
+    )
+    .await;
+    let patient = Uuid::parse_str(&patient_id).unwrap();
+    let task_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM follow_up_tasks WHERE patient_id = $1 AND status = 'open'",
+    )
+    .bind(patient)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    async fn listed(
+        state: &AppState,
+        enc: &str,
+        task_id: Uuid,
+    ) -> (Option<Value>, Option<Value>, Option<Value>) {
+        let (st, ws) = call(
+            state,
+            "GET",
+            &format!("/api/v1/encounters/{enc}"),
+            "dev-dr.garcia",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{ws}");
+        let brief_task = ws["brief"]["open_tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == json!(task_id))
+            .cloned();
+        let (st, cockpit) = call(
+            state,
+            "GET",
+            "/api/v1/dashboard/cockpit",
+            "dev-dr.garcia",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{cockpit}");
+        let dashboard_task = cockpit["pending_tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == json!(task_id))
+            .cloned();
+        let patient_id = ws["patient"]["id"].clone();
+        let attention = cockpit["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["patient"]["id"] == patient_id)
+            .cloned();
+        (brief_task, dashboard_task, attention)
+    }
+
+    // Open: visible in the brief, on the dashboard and counted for attention.
+    let (brief, dash, attention) = listed(&state, &enc, task_id).await;
+    assert_eq!(brief.unwrap()["status"], json!("open"));
+    assert_eq!(dash.unwrap()["status"], json!("open"));
+    assert_eq!(attention.unwrap()["open_tasks"], json!(1));
+
+    // Overdue (as the sweep marks it): still outstanding, and sorted first.
+    sqlx::query("UPDATE follow_up_tasks SET status = 'overdue', priority = 'urgent' WHERE id = $1")
+        .bind(task_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (brief, dash, attention) = listed(&state, &enc, task_id).await;
+    assert_eq!(brief.unwrap()["status"], json!("overdue"));
+    let dash = dash.expect("overdue task must stay on the dashboard");
+    assert_eq!(dash["status"], json!("overdue"));
+    assert_eq!(attention.unwrap()["open_tasks"], json!(1));
+    let (_, cockpit) = call(
+        &state,
+        "GET",
+        "/api/v1/dashboard/cockpit",
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    let pending = cockpit["pending_tasks"].as_array().unwrap();
+    let position = pending
+        .iter()
+        .position(|t| t["id"] == json!(task_id))
+        .unwrap();
+    assert!(
+        pending[..position]
+            .iter()
+            .all(|t| t["status"] == json!("overdue")),
+        "overdue tasks sort before open ones: {cockpit}"
+    );
+
+    // Superseded (result amended): no longer outstanding anywhere.
+    sqlx::query("UPDATE follow_up_tasks SET status = 'superseded' WHERE id = $1")
+        .bind(task_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (brief, dash, attention) = listed(&state, &enc, task_id).await;
+    assert!(brief.is_none(), "superseded task listed in the brief");
+    assert!(dash.is_none(), "superseded task listed on the dashboard");
+    // The critical alert still draws attention, but the task is not counted.
+    assert_eq!(attention.unwrap()["open_tasks"], json!(0));
+
+    // Completed tasks are history as well.
+    sqlx::query("UPDATE follow_up_tasks SET status = 'completed' WHERE id = $1")
+        .bind(task_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (brief, dash, _) = listed(&state, &enc, task_id).await;
+    assert!(brief.is_none() && dash.is_none());
 }
 
 #[tokio::test]

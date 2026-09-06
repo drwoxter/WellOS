@@ -85,7 +85,9 @@ knows. Selection is by environment and fails closed:
 | `WELLOS_SCRIBE_PROVIDER` | Behaviour |
 | --- | --- |
 | `fake` (default) | Deterministic offline transcript scripted from a fixed EN/ES consultation; timecodes are proportional to `duration_ms`. Same input → same output. Used by CI, tests and the demo. Never touches the network. |
-| `openai_compatible` | Multipart POST to `WELLOS_SCRIBE_ENDPOINT` (full URL, `https://` outside development) with `WELLOS_SCRIBE_MODEL` and bearer `WELLOS_SCRIBE_API_KEY`; `verbose_json` response mapped to segments. Bounded by `WELLOS_SCRIBE_TIMEOUT_SECS` (default 60) and `WELLOS_SCRIBE_MAX_RETRIES` (0–5, default 2, fixed back-off) on 5xx/429/timeouts only. Missing endpoint/model/key aborts startup. Covered by a mocked in-process HTTP server; CI makes no external calls. |
+| `openai_compatible` | Multipart POST to `WELLOS_SCRIBE_ENDPOINT` (full URL) with `WELLOS_SCRIBE_MODEL` and bearer `WELLOS_SCRIBE_API_KEY`; `verbose_json` response mapped to segments. Bounded by `WELLOS_SCRIBE_TIMEOUT_SECS` (default 60) and `WELLOS_SCRIBE_MAX_RETRIES` (0–5, default 2, fixed back-off) on 5xx/429/timeouts only. Missing endpoint/model/key aborts startup. Covered by a mocked in-process HTTP server; CI makes no external calls. |
+
+Destination policy (`validate_scribe_endpoint`, evaluated once at startup, fail closed): outside development the endpoint must be `https://`, name a DNS host (IP literals, `localhost`/`*.localhost` and embedded `user:pw@` are refused) and that host must appear verbatim in `WELLOS_SCRIBE_ALLOWED_HOSTS` (comma-separated exact `host` or `host:port` entries; no wildcards or paths; a bare entry matches only the default port). In development a loopback `http://` mock is accepted and the allowlist is optional but still enforced when set. The HTTP client never follows redirects, so a compromised or misconfigured endpoint cannot bounce the recording and credential to another host; a 3xx is reported as a provider outage.
 
 Provider errors are classified, never forwarded verbatim:
 

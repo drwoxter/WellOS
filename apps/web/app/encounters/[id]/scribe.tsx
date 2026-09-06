@@ -115,6 +115,11 @@ export function RecordingDock({
   const [elapsed, setElapsed] = useState(0);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const recorder = useRef<AudioRecorder | null>(null);
+  // Lifecycle shared by the unmount cleanup and `beginCapture`: a capture
+  // attempt only owns its recorder while the dock is mounted and no newer
+  // attempt (or a discard) has superseded it.
+  const mounted = useRef(true);
+  const captureAttempt = useRef(0);
   const transcribing = useRef(false);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -132,9 +137,17 @@ export function RecordingDock({
     return () => clearInterval(handle);
   }, [state.phase]);
 
-  // Release the microphone if the workspace unmounts mid-recording.
+  // Release the microphone if the workspace unmounts mid-recording. A
+  // permission prompt still pending at this point is cancelled: when its
+  // `start()` settles, `beginCapture` sees the dock is gone and discards.
   useEffect(() => {
-    return () => recorder.current?.discard();
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      captureAttempt.current += 1;
+      recorder.current?.discard();
+      recorder.current = null;
+    };
   }, []);
 
   const transcribe = useCallback(async () => {
@@ -166,18 +179,36 @@ export function RecordingDock({
   }, [encounterId, lang, onDraft]);
 
   const beginCapture = useCallback(async () => {
+    const attempt = ++captureAttempt.current;
     const r = recorderFactory();
     recorder.current = r;
+    const owned = () =>
+      mounted.current &&
+      captureAttempt.current === attempt &&
+      recorder.current === r;
     try {
       await r.start();
-      dispatch({ type: "permission_granted" });
     } catch (err) {
-      recorder.current = null;
+      // A failed start may still hold a stream (e.g. MediaRecorder refused
+      // after the microphone was granted): release it before reporting.
+      const current = owned();
+      r.discard();
+      if (recorder.current === r) recorder.current = null;
+      if (!current) return;
       dispatch({
         type: "permission_failed",
         kind: err instanceof RecorderError ? err.kind : "failed",
       });
+      return;
     }
+    if (!owned()) {
+      // Permission resolved after unmount or after this attempt was
+      // superseded: nobody can stop this recorder, so drop it now.
+      r.discard();
+      if (recorder.current === r) recorder.current = null;
+      return;
+    }
+    dispatch({ type: "permission_granted" });
   }, [recorderFactory]);
 
   // Side effects of the state machine: request the microphone when entering
@@ -237,6 +268,7 @@ export function RecordingDock({
     }
   };
   const discard = () => {
+    captureAttempt.current += 1;
     recorder.current?.discard();
     recorder.current = null;
     setConfirmingDiscard(false);

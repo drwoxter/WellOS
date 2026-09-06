@@ -13,7 +13,7 @@ import {
   type ScribeState,
 } from "@/lib/scribe";
 import {
-  COCKPIT_STORAGE_KEY,
+  COCKPIT_STORAGE_ITEM,
   defaultConfig,
   loadConfig,
   move,
@@ -331,7 +331,7 @@ describe("dashboard cockpit configuration", () => {
     saveConfig(storage, cfg);
     expect(loadConfig(storage, ["physician"])).toEqual(cfg);
     expect(
-      Object.keys(JSON.parse(store.get(COCKPIT_STORAGE_KEY)!)).sort(),
+      Object.keys(JSON.parse(store.get(COCKPIT_STORAGE_ITEM)!)).sort(),
     ).toEqual(["density", "hidden", "order"]);
     expect(loadConfig(null, ["physician"])).toEqual(
       defaultConfig(["physician"]),

@@ -1091,7 +1091,11 @@ function EncounterWorkspace({ id }: { id: string }) {
     const gen = ++loadGen.current;
     setLoadError(null);
     setRefreshError(null);
-    apiFetch<Workspace>(`/api/v1/encounters/${id}`)
+    // dMind commentary in the payload is rendered in the interface language;
+    // `lang` in the deps makes a language switch re-read the workspace.
+    apiFetch<Workspace>(
+      `/api/v1/encounters/${id}?lang=${encodeURIComponent(lang)}`,
+    )
       .then((data) => {
         if (gen !== loadGen.current) return;
         setWs(data);
