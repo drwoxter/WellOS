@@ -504,20 +504,30 @@ fn exceeds_chars(text: &str, max: usize) -> bool {
     text.chars().nth(max).is_some()
 }
 
+const NOTE_SECTION_MAX_CHARS: usize = 20_000;
+
+fn validate_sections(body: &SaveNote) -> Result<(), ApiError> {
+    for (name, value) in NOTE_SECTIONS.iter().zip(body.sections()) {
+        if value
+            .as_deref()
+            .is_some_and(|v| exceeds_chars(v, NOTE_SECTION_MAX_CHARS))
+        {
+            return Err(ApiError::bad_request(
+                "validation_failed",
+                format!("{name} exceeds {NOTE_SECTION_MAX_CHARS} characters"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn save_note(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
     Json(body): Json<SaveNote>,
 ) -> Result<Json<Value>, ApiError> {
-    for (name, value) in NOTE_SECTIONS.iter().zip(body.sections()) {
-        if value.as_deref().is_some_and(|v| exceeds_chars(v, 20_000)) {
-            return Err(ApiError::bad_request(
-                "validation_failed",
-                format!("{name} exceeds 20000 characters"),
-            ));
-        }
-    }
+    validate_sections(&body)?;
     let enc = load_encounter(&state, id).await?;
     let allowed = guard(
         &state,
@@ -533,13 +543,31 @@ pub async fn save_note(
     let enc = lock_encounter(&mut tx, id).await?;
     require_own_active(&enc, &ctx)?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let (note_id, new_version) = write_draft_note(&mut tx, &state, &ctx, &enc, id, &body).await?;
+    tx.commit().await?;
+    Ok(Json(
+        json!({ "id": note_id, "status": "draft", "version": new_version }),
+    ))
+}
+
+/// Create or update the draft note inside the caller's transaction (the
+/// encounter row must already be locked), supersede unreviewed dMind drafts
+/// that cited the previous version, and audit the write.
+async fn write_draft_note(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    state: &AppState,
+    ctx: &AuthContext,
+    enc: &EncounterCtx,
+    id: Uuid,
+    body: &SaveNote,
+) -> Result<(Uuid, i64), ApiError> {
     let existing = sqlx::query(
         "SELECT id, status, version FROM encounter_notes
          WHERE tenant_id = $1 AND encounter_id = $2 FOR UPDATE",
     )
     .bind(enc.tenant_id)
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     let (note_id, new_version) = match existing {
@@ -565,7 +593,7 @@ pub async fn save_note(
             .bind(&body.assessment)
             .bind(&body.plan)
             .bind(&body.follow_up)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
             (note_id, 1i64)
         }
@@ -607,15 +635,15 @@ pub async fn save_note(
             .bind(&body.follow_up)
             .bind(note_id)
             .bind(current)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
             (note_id, current + 1)
         }
     };
-    supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
+    supersede_awaiting_drafts(tx, enc.tenant_id, id).await?;
     audit::emit(
-        &mut *tx,
-        &ctx,
+        &mut **tx,
+        ctx,
         "encounter.note.saved",
         &state.cell,
         json!({ "encounter_id": id, "note_id": note_id, "version": new_version }),
@@ -623,10 +651,7 @@ pub async fn save_note(
     )
     .await
     .map_err(ApiError::internal)?;
-    tx.commit().await?;
-    Ok(Json(
-        json!({ "id": note_id, "status": "draft", "version": new_version }),
-    ))
+    Ok((note_id, new_version))
 }
 
 // ---------------------------------------------------------------------------
@@ -719,6 +744,9 @@ pub async fn sign(
             "this encounter is no longer in progress",
         ));
     }
+    // The signed record is immutable, so a draft still awaiting review could
+    // never be applied to it; it is retired with the transition.
+    supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,
@@ -1160,6 +1188,7 @@ pub async fn cancel(
             "this encounter is no longer in progress",
         ));
     }
+    supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,
@@ -1427,5 +1456,164 @@ pub async fn ai_draft(
         "note_version": note_version,
         "model": resp.model,
         "model_version": resp.model_version,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/encounters/:id/ai-draft/accept — accept a summary into the note
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct AcceptAiDraft {
+    pub artifact_id: Uuid,
+    /// The clinician's current draft; the accepted summary is appended to its
+    /// assessment so unsaved edits and the acceptance persist together.
+    #[serde(flatten)]
+    pub note: SaveNote,
+}
+
+/// Acceptance of a dMind encounter summary is one transaction: the artifact
+/// must still await review against the current note version, the summary is
+/// appended (within the section limit) to the assessment of the submitted
+/// draft, the note version advances, and the approval is recorded. Either all
+/// of it persists or none of it does — an approved artifact whose text is
+/// absent from the note cannot exist. Rejection stays decision-only via the
+/// generic review endpoint.
+pub async fn accept_ai_draft(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(body): Json<AcceptAiDraft>,
+) -> Result<Json<Value>, ApiError> {
+    validate_sections(&body.note)?;
+    let enc = load_encounter(&state, id).await?;
+    let document = guard(
+        &state,
+        &ctx,
+        actions::ENCOUNTER_DOCUMENT,
+        "encounter_note",
+        Some(resource_ctx(&enc)),
+    )
+    .await?;
+    let review = guard(
+        &state,
+        &ctx,
+        actions::AI_REVIEW,
+        "ai_artifact",
+        Some(resource_ctx(&enc)),
+    )
+    .await?;
+    require_own_active(&enc, &ctx)?;
+
+    let mut tx = state.pool.begin().await?;
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
+    document.record(&mut tx, &ctx, &state.cell).await?;
+    review.record(&mut tx, &ctx, &state.cell).await?;
+
+    let artifact = sqlx::query(
+        "SELECT status, output, note_version FROM ai_artifacts
+         WHERE id = $1 AND tenant_id = $2 AND encounter_id = $3
+           AND artifact_type = 'encounter_summary' FOR UPDATE",
+    )
+    .bind(body.artifact_id)
+    .bind(enc.tenant_id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    let status = ArtifactStatus::parse(artifact.get::<String, _>("status").as_str())
+        .ok_or_else(|| ApiError::internal("invalid artifact status"))?;
+    if status != ArtifactStatus::AwaitingReview {
+        return Err(ApiError::conflict(
+            "invalid_artifact_state",
+            format!("cannot approve an artifact in state {}", status.as_str()),
+        ));
+    }
+    let current_note_version: Option<i64> = sqlx::query_scalar(
+        "SELECT version FROM encounter_notes WHERE tenant_id = $1 AND encounter_id = $2",
+    )
+    .bind(enc.tenant_id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if artifact.get::<Option<i64>, _>("note_version") != current_note_version {
+        return Err(ApiError::conflict(
+            "artifact_stale",
+            "the draft was generated from an older note version; request a new draft",
+        ));
+    }
+    let summary = artifact
+        .get::<Value, _>("output")
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::internal("artifact has no summary text"))?
+        .to_owned();
+
+    let assessment = match body.note.assessment.as_deref().map(str::trim) {
+        Some(existing) if !existing.is_empty() => format!("{existing}\n\n{summary}"),
+        _ => summary,
+    };
+    if exceeds_chars(&assessment, NOTE_SECTION_MAX_CHARS) {
+        return Err(ApiError::bad_request(
+            "assessment_limit_exceeded",
+            format!(
+                "accepting this draft would push assessment past {NOTE_SECTION_MAX_CHARS} characters"
+            ),
+        ));
+    }
+
+    let approved = sqlx::query(
+        "UPDATE ai_artifacts SET status=$1, reviewer_id=$2, review_decision='approved',
+                reviewed_at=now()
+         WHERE id=$3 AND status=$4",
+    )
+    .bind(ArtifactStatus::Approved.as_str())
+    .bind(ctx.user_id)
+    .bind(body.artifact_id)
+    .bind(ArtifactStatus::AwaitingReview.as_str())
+    .execute(&mut *tx)
+    .await?;
+    if approved.rows_affected() != 1 {
+        return Err(ApiError::conflict(
+            "review_conflict",
+            "artifact was reviewed or superseded concurrently",
+        ));
+    }
+    let note = SaveNote {
+        assessment: Some(assessment.clone()),
+        version: body.note.version,
+        reason_for_encounter: body.note.reason_for_encounter.clone(),
+        history_present_illness: body.note.history_present_illness.clone(),
+        medical_history: body.note.medical_history.clone(),
+        review_of_systems: body.note.review_of_systems.clone(),
+        physical_exam: body.note.physical_exam.clone(),
+        plan: body.note.plan.clone(),
+        follow_up: body.note.follow_up.clone(),
+    };
+    let (note_id, new_version) = write_draft_note(&mut tx, &state, &ctx, &enc, id, &note).await?;
+    audit::emit(
+        &mut *tx,
+        &ctx,
+        "ai.artifact.reviewed",
+        &state.cell,
+        json!({
+            "artifact_id": body.artifact_id,
+            "decision": "approved",
+            "encounter_id": id,
+            "note_id": note_id,
+            "note_version": new_version,
+        }),
+        None,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    tx.commit().await?;
+    Ok(Json(json!({
+        "artifact_id": body.artifact_id,
+        "status": ArtifactStatus::Approved.as_str(),
+        "note": { "id": note_id, "status": "draft", "version": new_version, "assessment": assessment },
     })))
 }

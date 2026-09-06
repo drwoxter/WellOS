@@ -36,7 +36,8 @@ pub async fn review_artifact(
         }
     };
     let row = sqlx::query(
-        "SELECT a.tenant_id, a.patient_id, a.status, p.facility_id
+        "SELECT a.tenant_id, a.patient_id, a.status, a.artifact_type, a.encounter_id,
+                p.facility_id
          FROM ai_artifacts a JOIN patients p ON p.id = a.patient_id
          WHERE a.id = $1",
     )
@@ -47,6 +48,7 @@ pub async fn review_artifact(
     let tenant_id: Uuid = row.get("tenant_id");
     let patient_id: Uuid = row.get("patient_id");
     let facility_id: Uuid = row.get("facility_id");
+    let encounter_id: Option<Uuid> = row.get("encounter_id");
     let status = ArtifactStatus::parse(row.get::<String, _>("status").as_str())
         .ok_or_else(|| ApiError::internal("invalid artifact status"))?;
 
@@ -72,9 +74,55 @@ pub async fn review_artifact(
     let next = status
         .review(decision)
         .map_err(|e| ApiError::conflict("invalid_artifact_state", e.to_string()))?;
+    // Accepting an encounter summary writes its text into the draft note, so
+    // approval must go through the encounter transaction that does both.
+    if decision == ReviewDecision::Approved
+        && row.get::<String, _>("artifact_type") == "encounter_summary"
+    {
+        return Err(ApiError::conflict(
+            "use_encounter_accept",
+            "encounter summaries are accepted via /encounters/:id/ai-draft/accept",
+        ));
+    }
 
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
+    if let Some(encounter_id) = encounter_id {
+        // Encounter-bound artifacts are reviewable only while the encounter
+        // is open and the note is still the version they were generated
+        // from; the lock serializes this with documentation writes.
+        let open: Option<(String,)> = sqlx::query_as(
+            "SELECT status FROM encounters WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+        )
+        .bind(encounter_id)
+        .bind(tenant_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if open.is_none_or(|(s,)| s != "in_progress") {
+            return Err(ApiError::conflict(
+                "encounter_not_active",
+                "this encounter is no longer in progress",
+            ));
+        }
+        let bound: Option<i64> =
+            sqlx::query_scalar("SELECT note_version FROM ai_artifacts WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let current: Option<i64> = sqlx::query_scalar(
+            "SELECT version FROM encounter_notes WHERE tenant_id = $1 AND encounter_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(encounter_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if bound != current {
+            return Err(ApiError::conflict(
+                "artifact_stale",
+                "the draft was generated from an older note version; request a new draft",
+            ));
+        }
+    }
     // Approval is a new provenance event; the AI origin remains recorded.
     // The status predicate makes the review an atomic conditional transition:
     // a concurrent review or supersession loses instead of being overwritten.

@@ -83,6 +83,10 @@ pub fn router(state: AppState) -> Router {
             post(encounter_docs::ai_draft),
         )
         .route(
+            "/api/v1/encounters/:id/ai-draft/accept",
+            post(encounter_docs::accept_ai_draft),
+        )
+        .route(
             "/api/v1/service-requests",
             post(encounters::create_service_request),
         )

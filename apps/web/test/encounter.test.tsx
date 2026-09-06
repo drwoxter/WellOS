@@ -733,14 +733,26 @@ describe("encounter documentation workspace", () => {
     stale: false,
   };
 
-  it("copies accepted dMind text into the note before recording approval, undoing on failure", async () => {
+  it("accepts a dMind draft through the atomic endpoint and hydrates the persisted note", async () => {
     const user = userEvent.setup();
+    const accepts: Record<string, unknown>[] = [];
     const reviews: unknown[] = [];
+    const saves: Record<string, unknown>[] = [];
     const pending = [deferred<Response>(), deferred<Response>()];
-    setup(workspace({ note: DRAFT_NOTE, ai_draft: AWAITING_DRAFT }), {
+    const note = { ...DRAFT_NOTE };
+    const draft = { ...AWAITING_DRAFT };
+    setup(workspace({ note, ai_draft: draft }), {
+      "/api/v1/encounters/e1/ai-draft/accept": (body) => {
+        accepts.push(body as Record<string, unknown>);
+        return pending[accepts.length - 1].promise;
+      },
       "/api/v1/ai-artifacts/a1/review": (body) => {
         reviews.push(body);
-        return pending[reviews.length - 1].promise;
+        return jsonResponse({ id: "a1", status: "approved" });
+      },
+      "/api/v1/encounters/e1/note": (body) => {
+        saves.push(body as Record<string, unknown>);
+        return jsonResponse({ id: "n1", status: "draft", version: 3 });
       },
     });
     const accept = await screen.findByRole("button", {
@@ -748,32 +760,110 @@ describe("encounter documentation workspace", () => {
     });
     const withSummary = "Viral illness\n\nAccepted assistive summary.";
 
-    // The text is already in the note while approval is being recorded, but
-    // success is not claimed until the decision is stored.
+    // The current draft travels with the artifact so the server persists
+    // both in one transaction; nothing is claimed while it is in flight.
     await user.click(accept);
-    await waitFor(() =>
-      expect(screen.getByLabelText(/^Assessment/)).toHaveValue(withSummary),
-    );
-    expect(reviews).toEqual([{ decision: "approved" }]);
-    expect(screen.queryByText(/Draft accepted/)).not.toBeInTheDocument();
-
-    // A failed decision rolls the copy back instead of leaving unrecorded
-    // AI text behind.
-    pending[0].resolve(
-      apiError(503, "unavailable", "Review service unavailable"),
-    );
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Review service unavailable",
-    );
+    await waitFor(() => expect(accepts).toHaveLength(1));
+    expect(accepts[0]).toMatchObject({
+      artifact_id: "a1",
+      version: 1,
+      reason_for_encounter: "Cough",
+      assessment: "Viral illness",
+    });
+    expect(screen.getAllByText("Saving…").length).toBeGreaterThan(0);
     expect(screen.getByLabelText(/^Assessment/)).toHaveValue("Viral illness");
     expect(screen.queryByText(/Draft accepted/)).not.toBeInTheDocument();
 
+    // A failed transaction leaves the local note exactly as it was: no AI
+    // text and no approval.
+    pending[0].resolve(
+      apiError(409, "version_conflict", "the note was updated by someone else"),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /changed by someone else/,
+    );
+    expect(screen.getByLabelText(/^Assessment/)).toHaveValue("Viral illness");
+    expect(screen.queryByText(/Draft accepted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Unsaved changes/)).not.toBeInTheDocument();
+
+    // Success hydrates the persisted assessment and version: the note is
+    // saved, not merely edited locally.
     await user.click(accept);
-    pending[1].resolve(jsonResponse({ id: "a1", status: "approved" }));
+    await waitFor(() => expect(accepts).toHaveLength(2));
+    Object.assign(note, { version: 2, assessment: withSummary });
+    Object.assign(draft, { status: "approved", review_decision: "approved" });
+    pending[1].resolve(
+      jsonResponse({
+        artifact_id: "a1",
+        status: "approved",
+        note: {
+          id: "n1",
+          status: "draft",
+          version: 2,
+          assessment: withSummary,
+        },
+      }),
+    );
     expect(await screen.findByText(/Draft accepted/)).toBeInTheDocument();
-    expect(reviews).toHaveLength(2);
     expect(screen.getByLabelText(/^Assessment/)).toHaveValue(withSummary);
+    expect(screen.getByText(/Draft saved\./)).toBeInTheDocument();
+    expect(screen.queryByText(/Unsaved changes/)).not.toBeInTheDocument();
+    // Approval never goes through the decision-only review endpoint.
+    expect(reviews).toHaveLength(0);
+
+    // The next save builds on the version the acceptance produced.
+    await user.type(screen.getByLabelText(/^Plan/), "Fluids");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    expect(saves[0]).toMatchObject({
+      version: 2,
+      assessment: withSummary,
+      plan: "Fluids",
+    });
+  });
+
+  it("keeps text typed during a delayed dMind acceptance and marks it unsaved", async () => {
+    const user = userEvent.setup();
+    const pendingAccept = deferred<Response>();
+    const note = { ...DRAFT_NOTE };
+    const draft = { ...AWAITING_DRAFT };
+    setup(workspace({ note, ai_draft: draft }), {
+      "/api/v1/encounters/e1/ai-draft/accept": () => pendingAccept.promise,
+    });
+    const accept = await screen.findByRole("button", {
+      name: "Accept and copy into assessment",
+    });
+    await user.click(accept);
+    expect(await screen.findAllByText("Saving…")).not.toHaveLength(0);
+
+    const assessment = screen.getByLabelText(/^Assessment/);
+    await user.type(assessment, " worsening");
+    Object.assign(note, {
+      version: 2,
+      assessment: "Viral illness\n\nAccepted assistive summary.",
+    });
+    Object.assign(draft, { status: "approved", review_decision: "approved" });
+    pendingAccept.resolve(
+      jsonResponse({
+        artifact_id: "a1",
+        status: "approved",
+        note: {
+          id: "n1",
+          status: "draft",
+          version: 2,
+          assessment: "Viral illness\n\nAccepted assistive summary.",
+        },
+      }),
+    );
+    expect(await screen.findByText(/Draft accepted/)).toBeInTheDocument();
+    // The newer local text is neither discarded nor reported as saved.
+    expect(assessment).toHaveValue(
+      "Viral illness worsening\n\nAccepted assistive summary.",
+    );
     expect(screen.getByText(/Unsaved changes/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Edits made while saving are not saved yet/),
+    ).toBeInTheDocument();
   });
 
   it("blocks dMind acceptance during a delayed sign so no approval can omit its text", async () => {
@@ -791,9 +881,9 @@ describe("encounter documentation workspace", () => {
         signCalls.push(body);
         return pendingSign.promise;
       },
-      "/api/v1/ai-artifacts/a1/review": (body) => {
+      "/api/v1/encounters/e1/ai-draft/accept": (body) => {
         reviewCalls.push(body);
-        return jsonResponse({ id: "a1", status: "approved" });
+        return jsonResponse({ artifact_id: "a1", status: "approved" });
       },
     });
     const accept = await screen.findByRole("button", {

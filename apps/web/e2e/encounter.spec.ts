@@ -76,6 +76,28 @@ test("clinician documents and signs a consultation end to end", async ({
   await page.getByRole("button", { name: "Save draft" }).click();
   await expect(page.getByText("Draft saved.")).toBeVisible();
 
+  // dMind assistive draft: acceptance persists the text with the note in one
+  // step, so it survives leaving the page without saving again.
+  await page.getByRole("button", { name: /Generate draft summary/ }).click();
+  await expect(
+    page.getByText(/AI-generated draft, requires review/),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Accept and copy into assessment" })
+    .click();
+  await expect(page.getByText(/Draft accepted and saved/)).toBeVisible();
+  await expect(page.getByLabel(/Assessment/)).toHaveValue(
+    /Mild fatigue, likely benign \(synthetic\)\.\n\nSummary \(AI-generated draft, requires review\)/,
+  );
+  await expect(page.getByText("Unsaved changes")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByLabel(/Assessment/)).toHaveValue(
+    /Summary \(AI-generated draft, requires review\)/,
+  );
+  await expect(
+    page.getByRole("button", { name: "Accept and copy into assessment" }),
+  ).toHaveCount(0);
+
   // Sign with explicit confirmation.
   await page.getByRole("button", { name: "Sign and complete" }).click();
   await expect(page.getByText(/signed note is permanent/i)).toBeVisible();

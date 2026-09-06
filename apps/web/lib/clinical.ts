@@ -146,6 +146,15 @@ export function ageYears(birthDate: string): number {
   return age;
 }
 
+/** "120/80", or "120/—" when only one component was recorded. */
+export function formatBloodPressure(
+  systolic: string | null,
+  diastolic: string | null,
+): string | null {
+  if (systolic === null && diastolic === null) return null;
+  return `${systolic ?? "—"}/${diastolic ?? "—"}`;
+}
+
 /** Common orderable laboratory tests covered by the deterministic rules. */
 export const LAB_TESTS: { code_loinc: string; display: string }[] = [
   { code_loinc: "2823-3", display: "Potassium [Moles/volume] in Serum" },

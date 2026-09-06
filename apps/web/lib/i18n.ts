@@ -342,10 +342,10 @@ const dict = {
     aiAcceptDraft: "Accept and copy into assessment",
     aiRejectDraft: "Reject draft",
     aiDraftAccepted:
-      "Draft accepted. The text was added to the assessment section — review and save.",
+      "Draft accepted and saved into the assessment section of the note.",
     aiDraftRejected: "Draft rejected.",
     aiReviewBlockedSigning:
-      "The note is being signed; the draft was not accepted. Review it again after signing completes.",
+      "The note is being saved or signed; the draft was not accepted. Review it again once that completes.",
     aiModel: "Model",
     generatedAt: "Generated",
     readOnlyRecord: "Read-only signed record",
@@ -698,10 +698,10 @@ const dict = {
     aiAcceptDraft: "Aceptar y copiar en la valoración",
     aiRejectDraft: "Rechazar borrador",
     aiDraftAccepted:
-      "Borrador aceptado. El texto se añadió a la sección de valoración: revíselo y guarde.",
+      "Borrador aceptado y guardado en la sección de valoración de la nota.",
     aiDraftRejected: "Borrador rechazado.",
     aiReviewBlockedSigning:
-      "La nota se está firmando; el borrador no se aceptó. Revíselo de nuevo cuando termine la firma.",
+      "La nota se está guardando o firmando; el borrador no se aceptó. Revíselo de nuevo cuando termine.",
     aiModel: "Modelo",
     generatedAt: "Generado",
     readOnlyRecord: "Registro firmado de solo lectura",

@@ -10,6 +10,7 @@ import { apiFetch, useSession } from "@/lib/session";
 import {
   LAB_TESTS,
   canActClinicallyAt,
+  formatBloodPressure,
   formatDate,
   formatDateTime,
   loopStateShortLabel,
@@ -471,35 +472,36 @@ function PatientWorkspace({ id }: { id: string }) {
                       </tr>
                     </thead>
                     <tbody>
-                      {chart.vitals.slice(0, 5).map((v) => (
-                        <tr key={v.id}>
-                          <td>{formatDateTime(lang, v.recorded_at)}</td>
-                          <td>
-                            {v.systolic_mmhg !== null &&
-                            v.diastolic_mmhg !== null
-                              ? `${v.systolic_mmhg}/${v.diastolic_mmhg} mmHg`
-                              : "—"}
-                          </td>
-                          <td>
-                            {v.heart_rate_bpm !== null
-                              ? `${v.heart_rate_bpm} bpm`
-                              : "—"}
-                          </td>
-                          <td>
-                            {v.temperature_c !== null
-                              ? `${v.temperature_c} °C`
-                              : "—"}
-                          </td>
-                          <td>
-                            {v.spo2_percent !== null
-                              ? `${v.spo2_percent} %`
-                              : "—"}
-                          </td>
-                          <td>
-                            {v.weight_kg !== null ? `${v.weight_kg} kg` : "—"}
-                          </td>
-                        </tr>
-                      ))}
+                      {chart.vitals.slice(0, 5).map((v) => {
+                        const bp = formatBloodPressure(
+                          v.systolic_mmhg,
+                          v.diastolic_mmhg,
+                        );
+                        return (
+                          <tr key={v.id}>
+                            <td>{formatDateTime(lang, v.recorded_at)}</td>
+                            <td>{bp ? `${bp} mmHg` : "—"}</td>
+                            <td>
+                              {v.heart_rate_bpm !== null
+                                ? `${v.heart_rate_bpm} bpm`
+                                : "—"}
+                            </td>
+                            <td>
+                              {v.temperature_c !== null
+                                ? `${v.temperature_c} °C`
+                                : "—"}
+                            </td>
+                            <td>
+                              {v.spo2_percent !== null
+                                ? `${v.spo2_percent} %`
+                                : "—"}
+                            </td>
+                            <td>
+                              {v.weight_kg !== null ? `${v.weight_kg} kg` : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

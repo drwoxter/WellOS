@@ -10,6 +10,7 @@ import { useUnsavedChangesGuard } from "@/lib/unsaved-guard";
 import {
   LAB_TESTS,
   ageYears,
+  formatBloodPressure,
   formatDateTime,
   loopStateShortLabel,
   patientName,
@@ -253,10 +254,7 @@ function VitalValue({
 }
 
 function VitalsTable({ v, lang }: { v: VitalSet; lang: Lang }) {
-  const bp =
-    v.systolic_mmhg !== null && v.diastolic_mmhg !== null
-      ? `${v.systolic_mmhg}/${v.diastolic_mmhg}`
-      : null;
+  const bp = formatBloodPressure(v.systolic_mmhg, v.diastolic_mmhg);
   return (
     <div>
       <p className="muted" style={{ margin: "0 0 0.3rem" }}>
@@ -634,9 +632,9 @@ function AiDocAid({
   canDocument: boolean;
   /** The parent note is being finalised; no review may start or apply. */
   locked: boolean;
-  /** Copies accepted text into the local draft; returns an undo, or null
-   *  when the draft is frozen and nothing was copied. */
-  onAccepted: (text: string) => (() => void) | null;
+  /** Persists the accepted summary into the draft note atomically with the
+   *  approval; resolves false when another mutation is running. */
+  onAccepted: (artifactId: string, summary: string) => Promise<boolean>;
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -668,39 +666,40 @@ function AiDocAid({
     }
   }
 
-  // Acceptance copies the text into the local draft *before* the decision is
-  // recorded, so an approved artifact can never exist without its text in
-  // the note; if the copy is refused (signing in progress) nothing is
-  // recorded, and if recording fails the copy is undone.
   async function review(decision: "approved" | "rejected") {
     if (!draft || locked) return;
     setBusy(true);
     setError(null);
     setMessage(null);
-    let undo: (() => void) | null = null;
-    if (decision === "approved") {
-      undo = draft.output ? onAccepted(draft.output.summary) : null;
-      if (!undo) {
-        setError(t(lang, "aiReviewBlockedSigning"));
-        setBusy(false);
-        return;
-      }
-    }
     try {
-      await apiFetch(`/api/v1/ai-artifacts/${draft.id}/review`, {
-        method: "POST",
-        body: JSON.stringify({ decision }),
-      });
-      setMessage(
-        t(
-          lang,
-          decision === "approved" ? "aiDraftAccepted" : "aiDraftRejected",
-        ),
-      );
+      if (decision === "approved") {
+        const accepted = draft.output
+          ? await onAccepted(draft.id, draft.output.summary)
+          : false;
+        if (!accepted) {
+          setError(t(lang, "aiReviewBlockedSigning"));
+          return;
+        }
+        setMessage(t(lang, "aiDraftAccepted"));
+      } else {
+        await apiFetch(`/api/v1/ai-artifacts/${draft.id}/review`, {
+          method: "POST",
+          body: JSON.stringify({ decision }),
+        });
+        setMessage(t(lang, "aiDraftRejected"));
+      }
       onChanged();
     } catch (err) {
-      undo?.();
-      setError(errMessage(err));
+      if (err instanceof ApiRequestError && err.code === "version_conflict") {
+        setError(t(lang, "versionConflict"));
+      } else if (
+        err instanceof ApiRequestError &&
+        err.code === "artifact_stale"
+      ) {
+        setError(t(lang, "aiDraftStale"));
+      } else {
+        setError(errMessage(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -981,7 +980,7 @@ function SignedNoteView({
   );
 }
 
-type Mutation = "idle" | "saving" | "signing" | "cancelling";
+type Mutation = "idle" | "saving" | "signing" | "cancelling" | "accepting";
 
 // The clinician's local draft. `revision` advances on every keystroke and
 // `savedRevision` is the last revision the server confirmed, so the note is
@@ -1220,19 +1219,56 @@ function EncounterWorkspace({ id }: { id: string }) {
     }
   }, [beginMutation, id, lang, load]);
 
+  // Acceptance is one server transaction: the current draft is submitted
+  // together with the artifact, the server appends the summary to the
+  // assessment, advances the note version and records the approval — so an
+  // approved draft can never exist without its text in the persisted note.
+  // Local state is hydrated from the response; text typed while the request
+  // was in flight is kept and stays marked unsaved.
   const acceptAiDraft = useCallback(
-    (text: string): (() => void) | null => {
-      if (mutationRef.current === "signing") return null;
-      const previous = local.current.sections.assessment;
-      const appended = previous ? `${previous}\n\n${text}` : text;
-      setSection("assessment", appended);
-      return () => {
-        if (local.current.sections.assessment === appended) {
-          setSection("assessment", previous);
-        }
-      };
+    async (artifactId: string, summary: string): Promise<boolean> => {
+      if (mutationRef.current !== "idle") return false;
+      beginMutation("accepting");
+      setSaveError(null);
+      setSaveMessage(null);
+      try {
+        const snapshot = local.current;
+        const body: Record<string, unknown> = {
+          ...snapshot.sections,
+          artifact_id: artifactId,
+        };
+        if (snapshot.version !== null) body.version = snapshot.version;
+        const res = await apiFetch<{
+          note: { version: number; assessment: string };
+        }>(`/api/v1/encounters/${id}/ai-draft/accept`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const current = local.current;
+        const untouched = current.revision === snapshot.revision;
+        const assessment =
+          current.sections.assessment === snapshot.sections.assessment
+            ? res.note.assessment
+            : `${current.sections.assessment}\n\n${summary}`;
+        const next: LocalDraft = {
+          sections: { ...current.sections, assessment },
+          version: res.note.version,
+          revision: current.revision + 1,
+          savedRevision: untouched ? current.revision + 1 : snapshot.revision,
+        };
+        local.current = next;
+        setSections(next.sections);
+        setRevision(next.revision);
+        setSavedRevision(next.savedRevision);
+        setSaveMessage(
+          t(lang, untouched ? "draftSaved" : "draftSavedNewerEdits"),
+        );
+        return true;
+      } finally {
+        beginMutation("idle");
+      }
     },
-    [setSection],
+    [beginMutation, id, lang],
   );
 
   const currentVitals = useMemo(() => ws?.vitals ?? [], [ws]);
@@ -1281,7 +1317,7 @@ function EncounterWorkspace({ id }: { id: string }) {
               <h2>{t(lang, "clinicalNote")}</h2>
               <p>
                 <span className="badge neutral">{t(lang, "draftBadge")}</span>{" "}
-                {mutation === "saving" ? (
+                {mutation === "saving" || mutation === "accepting" ? (
                   <span className="badge neutral" role="status">
                     {t(lang, "savingDraft")}
                   </span>
@@ -1459,7 +1495,7 @@ function EncounterWorkspace({ id }: { id: string }) {
               lang={lang}
               draft={ws.ai_draft}
               canDocument={ws.capabilities.can_document}
-              locked={frozen}
+              locked={busy}
               onAccepted={acceptAiDraft}
               onChanged={load}
             />

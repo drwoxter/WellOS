@@ -5,6 +5,7 @@ import {
   canReadWorklist,
   canRegisterPatients,
   canSearchPatients,
+  formatBloodPressure,
   formatDate,
   isLoopState,
   loopStateLabel,
@@ -14,6 +15,13 @@ import {
 } from "@/lib/clinical";
 
 describe("clinical helpers", () => {
+  it("shows partial blood-pressure readings instead of dropping them", () => {
+    expect(formatBloodPressure("120", "80")).toBe("120/80");
+    expect(formatBloodPressure("120", null)).toBe("120/—");
+    expect(formatBloodPressure(null, "80")).toBe("—/80");
+    expect(formatBloodPressure(null, null)).toBeNull();
+  });
+
   it("recognises every workflow state", () => {
     for (const s of LOOP_STATES) expect(isLoopState(s)).toBe(true);
     expect(isLoopState("unknown")).toBe(false);

@@ -624,8 +624,9 @@ async fn ai_draft_generation_acceptance_and_rejection() {
     .await;
     assert_ne!(st, StatusCode::OK);
 
-    // A fresh draft can be explicitly accepted; the decision is visible in
-    // the workspace payload.
+    // A fresh draft can be explicitly accepted. Approval of an encounter
+    // summary is only possible through the encounter transaction that also
+    // writes the text into the draft note.
     let (st, draft3) = call(
         &state,
         "POST",
@@ -636,6 +637,7 @@ async fn ai_draft_generation_acceptance_and_rejection() {
     .await;
     assert_eq!(st, StatusCode::OK, "{draft3}");
     let third = draft3["id"].as_str().unwrap().to_string();
+    let summary = draft3["output"]["summary"].as_str().unwrap().to_string();
     let (st, rev) = call(
         &state,
         "POST",
@@ -644,7 +646,24 @@ async fn ai_draft_generation_acceptance_and_rejection() {
         Some(json!({ "decision": "approved" })),
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "{rev}");
+    assert_eq!(st, StatusCode::CONFLICT, "{rev}");
+    assert_eq!(rev["error"]["code"], json!("use_encounter_accept"));
+    let (st, accepted) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/ai-draft/accept"),
+        "dev-dr.garcia",
+        Some(json!({
+            "artifact_id": third,
+            "version": 1,
+            "reason_for_encounter": "Fatigue",
+            "assessment": "Iron deficiency suspected",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], json!("approved"));
+    assert_eq!(accepted["note"]["version"], json!(2));
     let (st, ws) = call(
         &state,
         "GET",
@@ -656,10 +675,264 @@ async fn ai_draft_generation_acceptance_and_rejection() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(ws["ai_draft"]["id"], json!(third), "{ws}");
     assert_eq!(ws["ai_draft"]["review_decision"], json!("approved"));
+    assert_eq!(
+        ws["note"]["assessment"],
+        json!(format!("Iron deficiency suspected\n\n{summary}"))
+    );
+    assert_eq!(ws["note"]["version"], json!(2));
 
-    // The assistant never modified the note or the encounter state.
+    // The assistant never signed the note or advanced the encounter.
     assert_eq!(ws["note"]["status"], json!("draft"));
     assert_eq!(ws["encounter"]["status"], json!("in_progress"));
+}
+
+/// Accepting a dMind summary and persisting its text are one transaction:
+/// nothing about a failed acceptance (stale version, over-limit assessment)
+/// is recorded, and a successful one leaves no approved artifact whose text
+/// is absent from the note.
+#[tokio::test]
+async fn ai_acceptance_is_atomic_with_the_note() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+    let note_path = format!("/api/v1/encounters/{enc}/note");
+    let accept_path = format!("/api/v1/encounters/{enc}/ai-draft/accept");
+    let (st, _) = call(
+        &state,
+        "POST",
+        &note_path,
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Cough", "plan": "Rest" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, draft) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/ai-draft"),
+        "dev-dr.garcia",
+        Some(json!({ "language": "en" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    let artifact = draft["id"].as_str().unwrap().to_string();
+    let summary = draft["output"]["summary"].as_str().unwrap().to_string();
+
+    // Stale client version: neither approval nor note text is persisted.
+    let (st, err) = call(
+        &state,
+        "POST",
+        &accept_path,
+        "dev-dr.garcia",
+        Some(json!({ "artifact_id": artifact, "version": 7, "reason_for_encounter": "Cough" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("version_conflict"));
+
+    // Assessment that would exceed the section limit: same outcome.
+    let (st, err) = call(
+        &state,
+        "POST",
+        &accept_path,
+        "dev-dr.garcia",
+        Some(json!({
+            "artifact_id": artifact,
+            "version": 1,
+            "reason_for_encounter": "Cough",
+            "assessment": "a".repeat(20_000 - summary.chars().count() + 1),
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], json!("assessment_limit_exceeded"));
+
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(ws["ai_draft"]["status"], json!("awaiting_review"), "{ws}");
+    assert_eq!(ws["note"]["version"], json!(1));
+    assert_eq!(ws["note"]["assessment"], Value::Null);
+
+    // Acceptance carries the clinician's unsaved edits along with the summary.
+    let (st, accepted) = call(
+        &state,
+        "POST",
+        &accept_path,
+        "dev-dr.garcia",
+        Some(json!({
+            "artifact_id": artifact,
+            "version": 1,
+            "reason_for_encounter": "Cough for two weeks",
+            "plan": "Rest",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["note"]["version"], json!(2));
+    assert_eq!(accepted["note"]["assessment"], json!(summary));
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(ws["ai_draft"]["status"], json!("approved"), "{ws}");
+    assert_eq!(
+        ws["note"]["reason_for_encounter"],
+        json!("Cough for two weeks")
+    );
+    assert_eq!(ws["note"]["assessment"], json!(summary));
+
+    // Re-acceptance is refused; the note is untouched.
+    let (st, err) = call(
+        &state,
+        "POST",
+        &accept_path,
+        "dev-dr.garcia",
+        Some(json!({ "artifact_id": artifact, "version": 2, "reason_for_encounter": "Cough" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("invalid_artifact_state"));
+
+    // Invariant across the whole database: an approved encounter summary is
+    // always present in its note's assessment.
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT a.output->>'summary', n.assessment
+         FROM ai_artifacts a JOIN encounter_notes n ON n.encounter_id = a.encounter_id
+         WHERE a.artifact_type = 'encounter_summary' AND a.status = 'approved'
+           AND a.encounter_id = $1::uuid",
+    )
+    .bind(&enc)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    for (text, assessment) in rows {
+        assert!(assessment.unwrap_or_default().contains(&text));
+    }
+}
+
+/// Signing or cancelling ends the encounter; a summary still awaiting review
+/// is retired with it, and the generic review endpoint independently refuses
+/// artifacts whose encounter is closed or whose note version moved on.
+#[tokio::test]
+async fn lifecycle_transitions_retire_awaiting_ai_drafts() {
+    let state = test_state().await;
+    for transition in ["sign", "cancel"] {
+        let (_, enc) = start_encounter(&state).await;
+        let (st, _) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/note"),
+            "dev-dr.garcia",
+            Some(json!({ "reason_for_encounter": "Headache", "assessment": "Tension type" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, draft) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/ai-draft"),
+            "dev-dr.garcia",
+            Some(json!({ "language": "en" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{draft}");
+        let artifact = draft["id"].as_str().unwrap().to_string();
+
+        // Simulate a stale artifact reaching the review endpoint: force its
+        // bound version behind the note without touching the note itself.
+        sqlx::query("UPDATE ai_artifacts SET note_version = 0 WHERE id = $1::uuid")
+            .bind(&artifact)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let (st, rev) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/ai-artifacts/{artifact}/review"),
+            "dev-dr.garcia",
+            Some(json!({ "decision": "rejected" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{transition}: {rev}");
+        assert_eq!(rev["error"]["code"], json!("artifact_stale"));
+        let (st, rev) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/ai-draft/accept"),
+            "dev-dr.garcia",
+            Some(json!({ "artifact_id": artifact, "version": 1, "reason_for_encounter": "Headache" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{transition}: {rev}");
+        assert_eq!(rev["error"]["code"], json!("artifact_stale"));
+        sqlx::query("UPDATE ai_artifacts SET note_version = 1 WHERE id = $1::uuid")
+            .bind(&artifact)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        let (st, res) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/{transition}"),
+            "dev-dr.garcia",
+            Some(json!({ "version": 1 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{transition}: {res}");
+
+        let status: (String,) =
+            sqlx::query_as("SELECT status FROM ai_artifacts WHERE id = $1::uuid")
+                .bind(&artifact)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(status.0, "superseded", "{transition}");
+
+        for (path, body) in [
+            (
+                format!("/api/v1/ai-artifacts/{artifact}/review"),
+                json!({ "decision": "rejected" }),
+            ),
+            (
+                format!("/api/v1/encounters/{enc}/ai-draft/accept"),
+                json!({ "artifact_id": artifact, "version": 2, "reason_for_encounter": "Headache" }),
+            ),
+        ] {
+            let (st, rev) = call(&state, "POST", &path, "dev-dr.garcia", Some(body)).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{transition} {path}: {rev}");
+        }
+
+        // Even if a stale awaiting row somehow survived, a closed encounter
+        // blocks the review path.
+        sqlx::query("UPDATE ai_artifacts SET status = 'awaiting_review' WHERE id = $1::uuid")
+            .bind(&artifact)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let (st, rev) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/ai-artifacts/{artifact}/review"),
+            "dev-dr.garcia",
+            Some(json!({ "decision": "rejected" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{transition}: {rev}");
+        assert_eq!(rev["error"]["code"], json!("encounter_not_active"));
+    }
 }
 
 /// Cancel the encounter inside an uncommitted transaction that holds the row
@@ -1095,7 +1368,7 @@ async fn recording_vitals_or_diagnoses_supersedes_awaiting_ai_draft() {
         "POST",
         &format!("/api/v1/ai-artifacts/{artifact}/review"),
         "dev-dr.garcia",
-        Some(json!({ "decision": "approved" })),
+        Some(json!({ "decision": "rejected" })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{rev}");
