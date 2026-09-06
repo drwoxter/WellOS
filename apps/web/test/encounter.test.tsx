@@ -109,10 +109,12 @@ const DRAFT_NOTE = {
   signed_by: null,
 };
 
-/** Stub fetch: GET workspace returns `ws`; POST handlers are per-path. */
+/** Stub fetch: GET workspace returns `ws` (or whatever `getWorkspace`
+ *  yields per call); POST handlers are per-path. */
 function setup(
   ws: unknown,
   posts: Record<string, (body: unknown) => Response | Promise<Response>> = {},
+  getWorkspace?: () => Response | Promise<Response>,
 ) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -129,7 +131,7 @@ function setup(
       return Promise.resolve(jsonResponse({}));
     }
     if (url === "/api/v1/encounters/e1")
-      return Promise.resolve(jsonResponse(ws));
+      return Promise.resolve(getWorkspace ? getWorkspace() : jsonResponse(ws));
     return Promise.resolve(jsonResponse({}));
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -964,6 +966,108 @@ describe("encounter documentation workspace", () => {
     await waitFor(() => expect(workspaceReads()).toBe(readsBefore + 1));
     expect(screen.getByLabelText(/^Plan/)).toHaveValue("Rest");
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+  });
+
+  it("ignores a post-save workspace read that resolves after a later save", async () => {
+    const user = userEvent.setup();
+    const saves: Record<string, unknown>[] = [];
+    // Workspace reads after the initial one are answered by the test.
+    const reads: { resolve: (value: Response) => void }[] = [];
+    let version = 1;
+    setup(
+      null,
+      {
+        "/api/v1/encounters/e1/note": (body) => {
+          saves.push(body as Record<string, unknown>);
+          version += 1;
+          return jsonResponse({ id: "n1", status: "draft", version });
+        },
+      },
+      () => {
+        if (reads.length === 0) {
+          reads.push({ resolve: () => undefined });
+          return jsonResponse(workspace());
+        }
+        const d = deferred<Response>();
+        reads.push(d);
+        return d.promise;
+      },
+    );
+    const plan = await screen.findByLabelText(/^Plan/);
+
+    // First save: its follow-up workspace read (reads[1]) is left hanging.
+    await user.type(plan, "A");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    await waitFor(() => expect(reads).toHaveLength(2));
+
+    // Second save completes, and its own read (reads[2]) answers first.
+    await user.type(plan, "B");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(saves).toHaveLength(2));
+    expect(saves[1]).toMatchObject({ version: 2, plan: "AB" });
+    await waitFor(() => expect(reads).toHaveLength(3));
+    reads[2].resolve(
+      jsonResponse(
+        workspace({ note: { ...DRAFT_NOTE, version: 3, plan: "AB" } }),
+      ),
+    );
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    expect(plan).toHaveValue("AB");
+
+    // The older read now arrives with the older note: it must not win.
+    reads[1].resolve(
+      jsonResponse(
+        workspace({ note: { ...DRAFT_NOTE, version: 2, plan: "A" } }),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(plan).toHaveValue("AB");
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+
+    // The next save still builds on the newest version.
+    await user.type(plan, "C");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(saves).toHaveLength(3));
+    expect(saves[2]).toMatchObject({ version: 3, plan: "ABC" });
+  });
+
+  it("keeps the saved workspace usable when the post-save refresh fails", async () => {
+    const user = userEvent.setup();
+    let failReads = false;
+    setup(
+      null,
+      {
+        "/api/v1/encounters/e1/note": () =>
+          jsonResponse({ id: "n1", status: "draft", version: 2 }),
+      },
+      () =>
+        failReads
+          ? apiError(503, "unavailable", "backend unavailable")
+          : jsonResponse(workspace()),
+    );
+    const plan = await screen.findByLabelText(/^Plan/);
+    failReads = true;
+    await user.type(plan, "Rest");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+
+    // The editor stays, with the saved text, behind a retryable notice.
+    expect(
+      await screen.findByText(/could not be refreshed/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Plan/)).toHaveValue("Rest");
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeEnabled();
+
+    failReads = false;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/could not be refreshed/),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText(/^Plan/)).toBeInTheDocument();
   });
 
   it("shows an unauthorized state for out-of-scope encounters", async () => {

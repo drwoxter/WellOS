@@ -997,6 +997,7 @@ function EncounterWorkspace({ id }: { id: string }) {
   const { lang, authenticated } = useSession();
   const [ws, setWs] = useState<Workspace | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [sections, setSections] = useState<NoteSections>(EMPTY_SECTIONS);
   const [revision, setRevision] = useState(0);
   const [savedRevision, setSavedRevision] = useState(0);
@@ -1011,6 +1012,10 @@ function EncounterWorkspace({ id }: { id: string }) {
     follow_up: true,
   });
   const hydratedNote = useRef(false);
+  // Only the newest workspace read may update state; a read that resolves
+  // after a later one is discarded.
+  const loadGen = useRef(0);
+  const loaded = useRef(false);
   const local = useRef<LocalDraft>({
     sections: EMPTY_SECTIONS,
     revision: 0,
@@ -1041,13 +1046,21 @@ function EncounterWorkspace({ id }: { id: string }) {
   }, []);
 
   const load = useCallback(() => {
+    const gen = ++loadGen.current;
     setLoadError(null);
+    setRefreshError(null);
     apiFetch<Workspace>(`/api/v1/encounters/${id}`)
       .then((data) => {
+        if (gen !== loadGen.current) return;
         setWs(data);
+        loaded.current = true;
         const serverVersion = data.note?.version ?? null;
         const localDirty =
           local.current.revision !== local.current.savedRevision;
+        const olderThanLocal =
+          serverVersion !== null &&
+          local.current.version !== null &&
+          serverVersion < local.current.version;
         if (!hydratedNote.current) {
           hydrate(data.note);
           hydratedNote.current = true;
@@ -1055,7 +1068,8 @@ function EncounterWorkspace({ id }: { id: string }) {
           // A save or sign is settling the local draft; its own response
           // decides what is persisted.
         } else if (!localDirty) {
-          hydrate(data.note);
+          // A clean draft only ever moves forward to a newer note.
+          if (!olderThanLocal) hydrate(data.note);
         } else if (serverVersion !== local.current.version) {
           // The note changed on the server while local edits are unsaved.
           // Keep the local version so the next save surfaces a conflict
@@ -1063,7 +1077,12 @@ function EncounterWorkspace({ id }: { id: string }) {
           setSaveError(t(lang, "versionConflict"));
         }
       })
-      .catch((e) => setLoadError(errMessage(e)));
+      .catch((e) => {
+        if (gen !== loadGen.current) return;
+        // A failed refresh must not take a populated workspace away.
+        if (loaded.current) setRefreshError(errMessage(e));
+        else setLoadError(errMessage(e));
+      });
   }, [hydrate, id, lang]);
 
   useEffect(() => {
@@ -1310,6 +1329,16 @@ function EncounterWorkspace({ id }: { id: string }) {
 
   return (
     <>
+      {refreshError ? (
+        <div className="card">
+          <p role="alert" className="error">
+            {t(lang, "refreshFailed")}
+          </p>
+          <button className="secondary" onClick={load}>
+            {t(lang, "retry")}
+          </button>
+        </div>
+      ) : null}
       <SafetyHeader ws={ws} lang={lang} />
 
       <div className="encounter-layout">
