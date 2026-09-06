@@ -624,6 +624,7 @@ function AiDocAid({
   lang,
   draft,
   canDocument,
+  locked,
   onAccepted,
   onChanged,
 }: {
@@ -631,10 +632,15 @@ function AiDocAid({
   lang: Lang;
   draft: AiDraft | null;
   canDocument: boolean;
-  onAccepted: (text: string) => void;
+  /** The parent note is being finalised; no review may start or apply. */
+  locked: boolean;
+  /** Copies accepted text into the local draft; returns an undo, or null
+   *  when the draft is frozen and nothing was copied. */
+  onAccepted: (text: string) => (() => void) | null;
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const disabled = busy || locked;
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -662,24 +668,38 @@ function AiDocAid({
     }
   }
 
+  // Acceptance copies the text into the local draft *before* the decision is
+  // recorded, so an approved artifact can never exist without its text in
+  // the note; if the copy is refused (signing in progress) nothing is
+  // recorded, and if recording fails the copy is undone.
   async function review(decision: "approved" | "rejected") {
-    if (!draft) return;
+    if (!draft || locked) return;
     setBusy(true);
     setError(null);
     setMessage(null);
+    let undo: (() => void) | null = null;
+    if (decision === "approved") {
+      undo = draft.output ? onAccepted(draft.output.summary) : null;
+      if (!undo) {
+        setError(t(lang, "aiReviewBlockedSigning"));
+        setBusy(false);
+        return;
+      }
+    }
     try {
       await apiFetch(`/api/v1/ai-artifacts/${draft.id}/review`, {
         method: "POST",
         body: JSON.stringify({ decision }),
       });
-      if (decision === "approved" && draft.output) {
-        onAccepted(draft.output.summary);
-        setMessage(t(lang, "aiDraftAccepted"));
-      } else {
-        setMessage(t(lang, "aiDraftRejected"));
-      }
+      setMessage(
+        t(
+          lang,
+          decision === "approved" ? "aiDraftAccepted" : "aiDraftRejected",
+        ),
+      );
       onChanged();
     } catch (err) {
+      undo?.();
       setError(errMessage(err));
     } finally {
       setBusy(false);
@@ -703,7 +723,7 @@ function AiDocAid({
       {canDocument ? (
         <button
           className="secondary"
-          disabled={busy}
+          disabled={disabled}
           onClick={() => void generate()}
         >
           {t(lang, "aiGenerateDraft")}
@@ -755,14 +775,14 @@ function AiDocAid({
             <p style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
               <button
                 className="primary"
-                disabled={busy}
+                disabled={disabled}
                 onClick={() => void review("approved")}
               >
                 {t(lang, "aiAcceptDraft")}
               </button>
               <button
                 className="secondary"
-                disabled={busy}
+                disabled={disabled}
                 onClick={() => void review("rejected")}
               >
                 {t(lang, "aiRejectDraft")}
@@ -1201,9 +1221,16 @@ function EncounterWorkspace({ id }: { id: string }) {
   }, [beginMutation, id, lang, load]);
 
   const acceptAiDraft = useCallback(
-    (text: string) => {
-      const current = local.current.sections.assessment;
-      setSection("assessment", current ? `${current}\n\n${text}` : text);
+    (text: string): (() => void) | null => {
+      if (mutationRef.current === "signing") return null;
+      const previous = local.current.sections.assessment;
+      const appended = previous ? `${previous}\n\n${text}` : text;
+      setSection("assessment", appended);
+      return () => {
+        if (local.current.sections.assessment === appended) {
+          setSection("assessment", previous);
+        }
+      };
     },
     [setSection],
   );
@@ -1432,6 +1459,7 @@ function EncounterWorkspace({ id }: { id: string }) {
               lang={lang}
               draft={ws.ai_draft}
               canDocument={ws.capabilities.can_document}
+              locked={frozen}
               onAccepted={acceptAiDraft}
               onChanged={load}
             />

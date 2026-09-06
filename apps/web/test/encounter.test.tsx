@@ -715,6 +715,129 @@ describe("encounter documentation workspace", () => {
     ).toBeInTheDocument();
   });
 
+  const AWAITING_DRAFT = {
+    id: "a1",
+    status: "awaiting_review",
+    output: {
+      summary: "Accepted assistive summary.",
+      limitations: [],
+      cited_sources: ["encounter_note:n1:v1:assessment"],
+    },
+    limitations: [],
+    citations: ["encounter_note:n1:v1:assessment"],
+    model: "dmind-fake",
+    model_version: "0.1.0",
+    generated_at: "2026-08-29T09:30:00Z",
+    review_decision: null,
+    note_version: 1,
+    stale: false,
+  };
+
+  it("copies accepted dMind text into the note before recording approval, undoing on failure", async () => {
+    const user = userEvent.setup();
+    const reviews: unknown[] = [];
+    const pending = [deferred<Response>(), deferred<Response>()];
+    setup(workspace({ note: DRAFT_NOTE, ai_draft: AWAITING_DRAFT }), {
+      "/api/v1/ai-artifacts/a1/review": (body) => {
+        reviews.push(body);
+        return pending[reviews.length - 1].promise;
+      },
+    });
+    const accept = await screen.findByRole("button", {
+      name: "Accept and copy into assessment",
+    });
+    const withSummary = "Viral illness\n\nAccepted assistive summary.";
+
+    // The text is already in the note while approval is being recorded, but
+    // success is not claimed until the decision is stored.
+    await user.click(accept);
+    await waitFor(() =>
+      expect(screen.getByLabelText(/^Assessment/)).toHaveValue(withSummary),
+    );
+    expect(reviews).toEqual([{ decision: "approved" }]);
+    expect(screen.queryByText(/Draft accepted/)).not.toBeInTheDocument();
+
+    // A failed decision rolls the copy back instead of leaving unrecorded
+    // AI text behind.
+    pending[0].resolve(
+      apiError(503, "unavailable", "Review service unavailable"),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Review service unavailable",
+    );
+    expect(screen.getByLabelText(/^Assessment/)).toHaveValue("Viral illness");
+    expect(screen.queryByText(/Draft accepted/)).not.toBeInTheDocument();
+
+    await user.click(accept);
+    pending[1].resolve(jsonResponse({ id: "a1", status: "approved" }));
+    expect(await screen.findByText(/Draft accepted/)).toBeInTheDocument();
+    expect(reviews).toHaveLength(2);
+    expect(screen.getByLabelText(/^Assessment/)).toHaveValue(withSummary);
+    expect(screen.getByText(/Unsaved changes/)).toBeInTheDocument();
+  });
+
+  it("blocks dMind acceptance during a delayed sign so no approval can omit its text", async () => {
+    const user = userEvent.setup();
+    const saveBodies: Record<string, unknown>[] = [];
+    const signCalls: unknown[] = [];
+    const reviewCalls: unknown[] = [];
+    const pendingSign = deferred<Response>();
+    setup(workspace({ note: DRAFT_NOTE, ai_draft: AWAITING_DRAFT }), {
+      "/api/v1/encounters/e1/note": (body) => {
+        saveBodies.push(body as Record<string, unknown>);
+        return jsonResponse({ id: "n1", status: "draft", version: 2 });
+      },
+      "/api/v1/encounters/e1/sign": (body) => {
+        signCalls.push(body);
+        return pendingSign.promise;
+      },
+      "/api/v1/ai-artifacts/a1/review": (body) => {
+        reviewCalls.push(body);
+        return jsonResponse({ id: "a1", status: "approved" });
+      },
+    });
+    const accept = await screen.findByRole("button", {
+      name: "Accept and copy into assessment",
+    });
+    expect(accept).toBeEnabled();
+
+    const plan = screen.getByLabelText(/^Plan/);
+    await user.type(plan, "Rest and fluids");
+    await user.click(screen.getByRole("button", { name: "Sign and complete" }));
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(await screen.findAllByText("Signing…")).not.toHaveLength(0);
+    await waitFor(() => expect(signCalls).toEqual([{ version: 2 }]));
+    expect(saveBodies).toHaveLength(1);
+
+    // While the sign is in flight every dMind control is disabled and an
+    // acceptance attempt neither records a decision nor reports success.
+    expect(accept).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reject draft" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /Generate draft summary/ }),
+    ).toBeDisabled();
+    await user.click(accept);
+    expect(reviewCalls).toHaveLength(0);
+    expect(screen.queryByText(/Draft accepted/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^Assessment/)).toHaveValue("Viral illness");
+
+    pendingSign.resolve(
+      jsonResponse({
+        id: "n1",
+        status: "signed",
+        encounter_status: "completed",
+      }),
+    );
+    expect(await screen.findByText(/Note signed\./)).toBeInTheDocument();
+    // The signed snapshot is exactly what was visible; no approval exists
+    // for text that never entered the note.
+    expect(saveBodies[0]).toMatchObject({
+      assessment: "Viral illness",
+      plan: "Rest and fluids",
+    });
+    expect(reviewCalls).toHaveLength(0);
+  });
+
   it("shows an unauthorized state for out-of-scope encounters", async () => {
     vi.stubGlobal(
       "fetch",

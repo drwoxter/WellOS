@@ -1101,6 +1101,133 @@ async fn recording_vitals_or_diagnoses_supersedes_awaiting_ai_draft() {
     assert_eq!(st, StatusCode::OK, "{rev}");
 }
 
+/// Documented limits are character counts: multibyte Spanish letters and
+/// four-byte emoji fill a field exactly to its limit and are rejected only
+/// one character past it.
+#[tokio::test]
+async fn text_limits_count_unicode_characters_not_bytes() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+    // "ñ" is 2 UTF-8 bytes, the stethoscope emoji is 4.
+    let samples: [&str; 2] = ["ñ", "\u{1FA7A}"];
+
+    async fn expect_validation(state: &AppState, path: &str, body: Value, needle: &str) {
+        let (st, err) = call(state, "POST", path, "dev-dr.garcia", Some(body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{err}");
+        assert_eq!(err["error"]["code"], json!("validation_failed"));
+        assert!(
+            err["error"]["message"].as_str().unwrap().contains(needle),
+            "{err}"
+        );
+    }
+
+    let mut version = 0i64;
+    for ch in samples {
+        // Note sections: 20 000 characters.
+        let (st, note) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/note"),
+            "dev-dr.garcia",
+            Some(json!({
+                "version": if version == 0 { Value::Null } else { json!(version) },
+                "reason_for_encounter": "Dolor abdominal",
+                "assessment": ch.repeat(20_000),
+                "plan": "Seguimiento"
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{ch}: {note}");
+        version = note["version"].as_i64().unwrap();
+        expect_validation(
+            &state,
+            &format!("/api/v1/encounters/{enc}/note"),
+            json!({
+                "version": version,
+                "reason_for_encounter": "Dolor abdominal",
+                "history_present_illness": ch.repeat(20_001)
+            }),
+            "history_present_illness exceeds 20000 characters",
+        )
+        .await;
+
+        // Diagnosis display: 200 characters; code: 32 characters.
+        let (st, dx) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/diagnoses"),
+            "dev-dr.garcia",
+            Some(json!({ "display": ch.repeat(200), "code": ch.repeat(32) })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{ch}: {dx}");
+        expect_validation(
+            &state,
+            &format!("/api/v1/encounters/{enc}/diagnoses"),
+            json!({ "display": ch.repeat(201) }),
+            "display must be between 1 and 200 characters",
+        )
+        .await;
+        expect_validation(
+            &state,
+            &format!("/api/v1/encounters/{enc}/diagnoses"),
+            json!({ "display": "Neumonía", "code": ch.repeat(33) }),
+            "code exceeds 32 characters",
+        )
+        .await;
+    }
+
+    // The saved text round-trips intact.
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ws}");
+    assert_eq!(ws["note"]["assessment"], json!("\u{1FA7A}".repeat(20_000)));
+    let displays: Vec<&str> = ws["diagnoses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["display"].as_str().unwrap())
+        .collect();
+    assert!(displays
+        .iter()
+        .any(|d| d.chars().count() == 200 && d.starts_with('ñ')));
+
+    // Addendum bodies: 8 000 characters, checked on the signed note.
+    let (st, signed) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/sign"),
+        "dev-dr.garcia",
+        Some(json!({ "version": version })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{signed}");
+    for ch in samples {
+        let (st, add) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/addenda"),
+            "dev-dr.garcia",
+            Some(json!({ "body": ch.repeat(8000) })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{ch}: {add}");
+        expect_validation(
+            &state,
+            &format!("/api/v1/encounters/{enc}/addenda"),
+            json!({ "body": ch.repeat(8001) }),
+            "addendum body must be between 1 and 8000 characters",
+        )
+        .await;
+    }
+}
+
 #[tokio::test]
 async fn order_only_encounters_are_not_documentable_consultations() {
     let state = test_state().await;

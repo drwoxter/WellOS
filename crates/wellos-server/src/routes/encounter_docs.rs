@@ -499,6 +499,11 @@ impl SaveNote {
     }
 }
 
+/// Documented text limits count Unicode characters, not UTF-8 bytes.
+fn exceeds_chars(text: &str, max: usize) -> bool {
+    text.chars().nth(max).is_some()
+}
+
 pub async fn save_note(
     State(state): State<AppState>,
     ctx: AuthContext,
@@ -506,7 +511,7 @@ pub async fn save_note(
     Json(body): Json<SaveNote>,
 ) -> Result<Json<Value>, ApiError> {
     for (name, value) in NOTE_SECTIONS.iter().zip(body.sections()) {
-        if value.as_deref().is_some_and(|v| v.len() > 20_000) {
+        if value.as_deref().is_some_and(|v| exceeds_chars(v, 20_000)) {
             return Err(ApiError::bad_request(
                 "validation_failed",
                 format!("{name} exceeds 20000 characters"),
@@ -746,7 +751,7 @@ pub async fn add_addendum(
     Json(body): Json<AddAddendum>,
 ) -> Result<Json<Value>, ApiError> {
     let text = body.body.trim();
-    if text.is_empty() || text.len() > 8000 {
+    if text.is_empty() || exceeds_chars(text, 8000) {
         return Err(ApiError::bad_request(
             "validation_failed",
             "addendum body must be between 1 and 8000 characters",
@@ -1021,14 +1026,14 @@ pub async fn add_diagnosis(
     Json(body): Json<AddDiagnosis>,
 ) -> Result<Json<Value>, ApiError> {
     let display = body.display.trim();
-    if display.is_empty() || display.len() > 200 {
+    if display.is_empty() || exceeds_chars(display, 200) {
         return Err(ApiError::bad_request(
             "validation_failed",
             "display must be between 1 and 200 characters",
         ));
     }
     let code = body.code.as_deref().map(str::trim).unwrap_or("");
-    if code.len() > 32 {
+    if exceeds_chars(code, 32) {
         return Err(ApiError::bad_request(
             "validation_failed",
             "code exceeds 32 characters",
