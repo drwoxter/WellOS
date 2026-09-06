@@ -799,3 +799,353 @@ async fn concurrent_ai_drafts_leave_one_reviewable_artifact() {
     .unwrap();
     assert_eq!(awaiting, 1);
 }
+
+#[tokio::test]
+async fn lab_order_racing_cancellation_creates_no_service_request() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+
+    // Cancellation commits first: the order must observe the cancelled row
+    // after acquiring the lock and fail without inserting anything.
+    let (st, err) = race_with_cancellation(
+        &state,
+        &enc,
+        "POST",
+        "/api/v1/service-requests",
+        Some(json!({
+            "encounter_id": enc,
+            "code_loinc": "2823-3",
+            "display": "Potassium [Moles/volume] in Serum",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("encounter_not_active"));
+
+    let enc_id = uuid::Uuid::parse_str(&enc).unwrap();
+    let (orders,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM service_requests WHERE encounter_id = $1")
+            .bind(enc_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        orders, 0,
+        "no order may exist against a cancelled encounter"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_racing_lab_order_is_refused() {
+    let state = test_state().await;
+    let (patient, enc) = start_encounter(&state).await;
+    let enc_id = uuid::Uuid::parse_str(&enc).unwrap();
+    let patient_id = uuid::Uuid::parse_str(&patient).unwrap();
+
+    // An order transaction holds the encounter lock while the clinician's
+    // cancellation request arrives; the order commits first.
+    let mut tx = state.pool.begin().await.unwrap();
+    let row =
+        sqlx::query("SELECT tenant_id, practitioner_id FROM encounters WHERE id = $1 FOR UPDATE")
+            .bind(enc_id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    let tenant_id: uuid::Uuid = sqlx::Row::get(&row, "tenant_id");
+    let requester_id: uuid::Uuid = sqlx::Row::get(&row, "practitioner_id");
+    sqlx::query(
+        "INSERT INTO service_requests
+         (id, tenant_id, encounter_id, patient_id, requester_id, code_loinc, display)
+         VALUES ($1,$2,$3,$4,$5,'2345-7','Glucose [Mass/volume] in Serum')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(enc_id)
+    .bind(patient_id)
+    .bind(requester_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    let st = state.clone();
+    let path = format!("/api/v1/encounters/{enc}/cancel");
+    let handle = tokio::spawn(async move { call(&st, "POST", &path, "dev-dr.garcia", None).await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.commit().await.unwrap();
+
+    let (st, err) = handle.await.unwrap();
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("encounter_has_orders"));
+
+    let (status,): (String,) = sqlx::query_as("SELECT status FROM encounters WHERE id = $1")
+        .bind(enc_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "in_progress");
+}
+
+#[tokio::test]
+async fn ai_draft_binds_to_note_version_written_before_its_lock() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+    let enc_id = uuid::Uuid::parse_str(&enc).unwrap();
+    let (st, note) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Fever", "assessment": "Initial impression" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{note}");
+    assert_eq!(note["version"], json!(1));
+
+    // A concurrent save holds the encounter lock and moves the note to v2
+    // while generation is requested; generation must read v2, not v1.
+    let mut tx = state.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM encounters WHERE id = $1 FOR UPDATE")
+        .bind(enc_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE encounter_notes SET assessment = 'Revised impression', version = version + 1
+         WHERE encounter_id = $1",
+    )
+    .bind(enc_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    let st = state.clone();
+    let path = format!("/api/v1/encounters/{enc}/ai-draft");
+    let handle =
+        tokio::spawn(
+            async move { call(&st, "POST", &path, "dev-dr.garcia", Some(json!({}))).await },
+        );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.commit().await.unwrap();
+
+    let (st, draft) = handle.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    assert_eq!(draft["note_version"], json!(2));
+    let citations: Vec<String> = draft["citations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        citations
+            .iter()
+            .any(|c| c.starts_with("encounter_note:") && c.contains(":v2:assessment")),
+        "citations must name the exact note version: {citations:?}"
+    );
+    assert!(
+        !citations.iter().any(|c| c.contains(":v1:")),
+        "no citation may reference the superseded version: {citations:?}"
+    );
+    assert!(
+        draft["output"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Revised impression"),
+        "{draft}"
+    );
+
+    // The persisted artifact carries the same version and is reviewable.
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ws}");
+    assert_eq!(ws["ai_draft"]["status"], json!("awaiting_review"));
+    assert_eq!(ws["ai_draft"]["note_version"], json!(2));
+    assert_eq!(ws["ai_draft"]["stale"], json!(false));
+
+    // Saving the note again retires the unreviewed draft so its citations
+    // are never presented against a note version they were not built from.
+    let (st, note) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Fever", "assessment": "Third pass", "version": 2 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{note}");
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ws}");
+    assert_eq!(ws["ai_draft"]["status"], json!("superseded"));
+    assert_eq!(ws["ai_draft"]["note_version"], json!(2));
+    assert_eq!(ws["ai_draft"]["stale"], json!(true));
+    let (awaiting,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM ai_artifacts WHERE encounter_id = $1 AND status = 'awaiting_review'",
+    )
+    .bind(enc_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(awaiting, 0);
+}
+
+#[tokio::test]
+async fn order_only_encounters_are_not_documentable_consultations() {
+    let state = test_state().await;
+    let (patient, consultation) = start_encounter(&state).await;
+
+    let (st, err) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        "dev-dr.garcia",
+        Some(json!({ "patient_id": patient, "encounter_type": "visit" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{err}");
+
+    let (st, enc) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        "dev-dr.garcia",
+        Some(json!({ "patient_id": patient, "encounter_type": "order_only" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{enc}");
+    let order_only = enc["id"].as_str().unwrap().to_string();
+
+    // Laboratory ordering stays available from the order context…
+    let (st, sr) = call(
+        &state,
+        "POST",
+        "/api/v1/service-requests",
+        "dev-dr.garcia",
+        Some(json!({
+            "encounter_id": order_only,
+            "code_loinc": "2823-3",
+            "display": "Potassium [Moles/volume] in Serum",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{sr}");
+
+    // …but clinical documentation is refused for every note mutation.
+    for (path, body) in [
+        ("note", json!({ "assessment": "should not be recorded" })),
+        ("vitals", json!({ "heart_rate_bpm": 70 })),
+        (
+            "diagnoses",
+            json!({ "display": "Fatigue", "status": "active" }),
+        ),
+        ("sign", json!({ "version": 1 })),
+        ("ai-draft", json!({})),
+    ] {
+        let (st, err) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{order_only}/{path}"),
+            "dev-dr.garcia",
+            Some(body),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{path}: {err}");
+        assert_eq!(err["error"]["code"], json!("not_a_consultation"), "{path}");
+    }
+
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{order_only}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ws}");
+    assert_eq!(ws["encounter"]["encounter_type"], json!("order_only"));
+    assert_eq!(ws["capabilities"]["can_document"], json!(false));
+    assert_eq!(ws["capabilities"]["can_sign"], json!(false));
+    assert_eq!(ws["capabilities"]["can_order_lab"], json!(true));
+    assert_eq!(ws["service_requests"].as_array().unwrap().len(), 1);
+
+    // The chart distinguishes both open encounters by type, so the UI can
+    // offer "Resume consultation" only for the genuine draft consultation.
+    let (st, chart) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{patient}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{chart}");
+    let encounters = chart["encounters"].as_array().unwrap();
+    let by_id = |id: &str| encounters.iter().find(|e| e["id"] == json!(id)).unwrap();
+    assert_eq!(
+        by_id(&consultation)["encounter_type"],
+        json!("consultation")
+    );
+    assert_eq!(by_id(&consultation)["status"], json!("in_progress"));
+    assert_eq!(by_id(&order_only)["encounter_type"], json!("order_only"));
+    assert_eq!(by_id(&order_only)["status"], json!("in_progress"));
+    // Laboratory activity from the order-only context stays on the chart.
+    assert!(
+        chart["service_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == sr["id"]),
+        "{chart}"
+    );
+}
+
+#[tokio::test]
+async fn seeded_result_loop_encounters_are_order_only() {
+    let state = test_state().await;
+    // The seeded result loops (critical awaiting review, awaiting
+    // notification, closed) live on order contexts, never on consultations.
+    let (order_only,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM encounters e
+         WHERE e.encounter_type = 'order_only'
+           AND EXISTS (SELECT 1 FROM service_requests s WHERE s.encounter_id = e.id)",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(
+        order_only >= 3,
+        "seed must include legacy order-only encounters"
+    );
+    // No order context ever acquired a note, and every documented encounter
+    // is a consultation.
+    let (documented_order_only,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM encounters e
+         WHERE e.encounter_type = 'order_only'
+           AND EXISTS (SELECT 1 FROM encounter_notes n WHERE n.encounter_id = e.id)",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(documented_order_only, 0);
+    let (seeded_consultations,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM encounters e
+         WHERE e.encounter_type = 'consultation'
+           AND EXISTS (SELECT 1 FROM encounter_notes n WHERE n.encounter_id = e.id)",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(seeded_consultations >= 3);
+}

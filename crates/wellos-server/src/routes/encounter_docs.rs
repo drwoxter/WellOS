@@ -28,11 +28,12 @@ struct EncounterCtx {
     facility_id: Uuid,
     practitioner_id: Uuid,
     status: String,
+    encounter_type: String,
 }
 
 async fn load_encounter(state: &AppState, id: Uuid) -> Result<EncounterCtx, ApiError> {
     let row = sqlx::query(
-        "SELECT tenant_id, patient_id, facility_id, practitioner_id, status
+        "SELECT tenant_id, patient_id, facility_id, practitioner_id, status, encounter_type
          FROM encounters WHERE id = $1",
     )
     .bind(id)
@@ -45,6 +46,7 @@ async fn load_encounter(state: &AppState, id: Uuid) -> Result<EncounterCtx, ApiE
         facility_id: row.get("facility_id"),
         practitioner_id: row.get("practitioner_id"),
         status: row.get("status"),
+        encounter_type: row.get("encounter_type"),
     })
 }
 
@@ -64,7 +66,7 @@ async fn lock_encounter(
     id: Uuid,
 ) -> Result<EncounterCtx, ApiError> {
     let row = sqlx::query(
-        "SELECT tenant_id, patient_id, facility_id, practitioner_id, status
+        "SELECT tenant_id, patient_id, facility_id, practitioner_id, status, encounter_type
          FROM encounters WHERE id = $1 FOR UPDATE",
     )
     .bind(id)
@@ -77,20 +79,34 @@ async fn lock_encounter(
         facility_id: row.get("facility_id"),
         practitioner_id: row.get("practitioner_id"),
         status: row.get("status"),
+        encounter_type: row.get("encounter_type"),
     })
 }
 
-/// Documentation writes attach to the practitioner's own active encounter.
+/// Documentation writes attach to the practitioner's own active consultation.
+/// Order-only encounters exist purely as laboratory-order contexts and never
+/// accept clinical documentation.
 fn require_own_active(enc: &EncounterCtx, ctx: &AuthContext) -> Result<(), ApiError> {
     if enc.practitioner_id != ctx.user_id {
         return Err(ApiError::forbidden(
             "documentation requires the practitioner's own encounter",
         ));
     }
+    require_consultation(enc)?;
     if enc.status != "in_progress" {
         return Err(ApiError::conflict(
             "encounter_not_active",
             "this encounter is no longer in progress",
+        ));
+    }
+    Ok(())
+}
+
+fn require_consultation(enc: &EncounterCtx) -> Result<(), ApiError> {
+    if enc.encounter_type != "consultation" {
+        return Err(ApiError::conflict(
+            "not_a_consultation",
+            "this encounter is a laboratory-order context and cannot be documented",
         ));
     }
     Ok(())
@@ -341,9 +357,13 @@ pub async fn workspace(
     .collect::<Vec<_>>();
 
     // Latest dMind documentation draft for this encounter (assistive only).
+    // A draft is stale once the note version it cited is no longer the
+    // recorded version; saving the note supersedes unreviewed drafts, so this
+    // is a defensive display flag rather than the integrity boundary.
+    let current_note_version = note.as_ref().map(|n| n.get::<i64, _>("version"));
     let ai_draft = sqlx::query(
         "SELECT id, status, output, limitations, citations, model, model_version,
-                generated_at, review_decision
+                generated_at, review_decision, note_version
          FROM ai_artifacts
          WHERE tenant_id = $1 AND encounter_id = $2 AND artifact_type = 'encounter_summary'
          ORDER BY created_at DESC LIMIT 1",
@@ -353,6 +373,7 @@ pub async fn workspace(
     .fetch_optional(&state.pool)
     .await?
     .map(|r| {
+        let note_version: Option<i64> = r.get("note_version");
         json!({
             "id": r.get::<Uuid,_>("id"),
             "status": r.get::<String,_>("status"),
@@ -363,6 +384,8 @@ pub async fn workspace(
             "model_version": r.get::<Option<String>,_>("model_version"),
             "generated_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("generated_at"),
             "review_decision": r.get::<Option<String>,_>("review_decision"),
+            "note_version": note_version,
+            "stale": note_version != current_note_version,
         })
     })
     .unwrap_or(Value::Null);
@@ -375,13 +398,14 @@ pub async fn workspace(
     };
     let own = enc.practitioner_id == ctx.user_id;
     let active = enc.status == "in_progress";
+    let consultation = enc.encounter_type == "consultation";
     let note_signed = note
         .as_ref()
         .is_some_and(|n| n.get::<String, _>("status") == "signed");
     let capabilities = json!({
-        "can_document": own && active && covers(actions::ENCOUNTER_DOCUMENT),
-        "can_sign": own && active && !note_signed && covers(actions::ENCOUNTER_SIGN),
-        "can_add_addendum": own && note_signed && covers(actions::ENCOUNTER_DOCUMENT),
+        "can_document": own && active && consultation && covers(actions::ENCOUNTER_DOCUMENT),
+        "can_sign": own && active && consultation && !note_signed && covers(actions::ENCOUNTER_SIGN),
+        "can_add_addendum": own && consultation && note_signed && covers(actions::ENCOUNTER_DOCUMENT),
         "can_order_lab": own && active && covers(actions::SERVICE_REQUEST_CREATE),
     });
 
@@ -559,6 +583,20 @@ pub async fn save_note(
             (note_id, current + 1)
         }
     };
+    // Unreviewed dMind drafts cite the note version they were generated from;
+    // once that version moves on they are superseded rather than left
+    // awaiting review against facts that no longer match the record.
+    sqlx::query(
+        "UPDATE ai_artifacts SET status = $1
+         WHERE tenant_id = $2 AND encounter_id = $3 AND artifact_type = 'encounter_summary'
+           AND status = $4",
+    )
+    .bind(ArtifactStatus::Superseded.as_str())
+    .bind(enc.tenant_id)
+    .bind(id)
+    .bind(ArtifactStatus::AwaitingReview.as_str())
+    .execute(&mut *tx)
+    .await?;
     audit::emit(
         &mut *tx,
         &ctx,
@@ -719,6 +757,7 @@ pub async fn add_addendum(
             "addenda require the practitioner's own encounter",
         ));
     }
+    require_consultation(&enc)?;
 
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
@@ -1073,6 +1112,23 @@ pub async fn cancel(
             "an encounter with a signed note cannot be cancelled",
         ));
     }
+    // Cancellation and laboratory ordering both lock the encounter row, so
+    // they serialize deterministically: an order that committed first is
+    // visible here and blocks cancellation of the consultation it belongs to.
+    let has_orders: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM service_requests
+         WHERE tenant_id = $1 AND encounter_id = $2 LIMIT 1",
+    )
+    .bind(enc.tenant_id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if has_orders.is_some() {
+        return Err(ApiError::conflict(
+            "encounter_has_orders",
+            "this consultation has laboratory orders and cannot be cancelled",
+        ));
+    }
     let updated = sqlx::query(
         "UPDATE encounters SET status='cancelled', completed_at = now()
          WHERE id = $1 AND status = 'in_progress'",
@@ -1142,29 +1198,40 @@ pub async fn ai_draft(
     .await?;
     require_own_active(&enc, &ctx)?;
 
-    // Facts are restricted to information already recorded in this
-    // encounter: note sections, the latest vital-sign set, and diagnoses.
+    // Facts are collected only after the encounter row is locked: every
+    // documentation write (note save, vitals, diagnoses, sign, cancel) takes
+    // the same lock, so the snapshot read here — including the note version
+    // recorded in each citation — is exactly the input the persisted artifact
+    // was generated from. Only the local deterministic provider is used, so
+    // no external call happens while the lock is held.
+    let mut tx = state.pool.begin().await?;
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+
     let mut facts: Vec<(String, String)> = Vec::new();
     let mut missing: Vec<&str> = Vec::new();
     let note = sqlx::query(
-        "SELECT id, reason_for_encounter, history_present_illness, medical_history,
+        "SELECT id, version, reason_for_encounter, history_present_illness, medical_history,
                 review_of_systems, physical_exam, assessment, plan, follow_up
          FROM encounter_notes WHERE tenant_id = $1 AND encounter_id = $2",
     )
     .bind(enc.tenant_id)
     .bind(id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *tx)
     .await?;
+    let note_version: Option<i64> = note.as_ref().map(|n| n.get("version"));
     match &note {
         Some(n) => {
             let note_id: Uuid = n.get("id");
+            let version: i64 = n.get("version");
             for section in NOTE_SECTIONS {
                 match n
                     .get::<Option<String>, _>(*section)
                     .filter(|v| !v.trim().is_empty())
                 {
                     Some(text) => facts.push((
-                        format!("encounter_note:{note_id}:{section}"),
+                        format!("encounter_note:{note_id}:v{version}:{section}"),
                         format!("{}: {}", section.replace('_', " "), text.trim()),
                     )),
                     None => missing.push(section),
@@ -1181,7 +1248,7 @@ pub async fn ai_draft(
     )
     .bind(enc.tenant_id)
     .bind(id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *tx)
     .await?;
     match &latest_vitals {
         Some(v) => {
@@ -1213,7 +1280,7 @@ pub async fn ai_draft(
     )
     .bind(enc.tenant_id)
     .bind(id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?;
     if diagnoses.is_empty() {
         missing.push("diagnoses");
@@ -1271,16 +1338,26 @@ pub async fn ai_draft(
         ));
     }
 
+    // The artifact is bound to the note version its citations name; the lock
+    // makes a change impossible, and this re-read is the invariant check.
+    let current_note_version: Option<i64> = sqlx::query_scalar(
+        "SELECT version FROM encounter_notes WHERE tenant_id = $1 AND encounter_id = $2",
+    )
+    .bind(enc.tenant_id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current_note_version != note_version {
+        return Err(ApiError::conflict(
+            "note_version_changed",
+            "the note changed while the draft was being generated; request a new draft",
+        ));
+    }
+
     let artifact_id = Uuid::now_v7();
-    let mut tx = state.pool.begin().await?;
-    // Locking the encounter also serializes concurrent draft generation, so
+    // The held encounter lock also serializes concurrent draft generation, so
     // the supersede-then-insert below leaves exactly one awaiting_review
     // draft per encounter.
-    let enc = lock_encounter(&mut tx, id).await?;
-    require_own_active(&enc, &ctx)?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
-    // Any previous unreviewed draft for this encounter is superseded so only
-    // one draft awaits review at a time.
     sqlx::query(
         "UPDATE ai_artifacts SET status = $1
          WHERE tenant_id = $2 AND encounter_id = $3 AND artifact_type = 'encounter_summary'
@@ -1296,9 +1373,9 @@ pub async fn ai_draft(
         "INSERT INTO ai_artifacts
          (id, tenant_id, patient_id, encounter_id, artifact_type, autonomy_level, status,
           model, model_version, route, template, input_hash, output, output_schema,
-          citations, limitations, generated_at)
+          citations, limitations, note_version, generated_at)
          VALUES ($1,$2,$3,$4,'encounter_summary','A1',$5,$6,$7,$8,$9,$10,$11,
-                 'result-summary.v1',$12,$13, now())",
+                 'result-summary.v1',$12,$13,$14, now())",
     )
     .bind(artifact_id)
     .bind(enc.tenant_id)
@@ -1313,6 +1390,7 @@ pub async fn ai_draft(
     .bind(serde_json::to_value(&resp.output).map_err(ApiError::internal)?)
     .bind(serde_json::to_value(&resp.output.cited_sources).map_err(ApiError::internal)?)
     .bind(serde_json::to_value(&limitations).map_err(ApiError::internal)?)
+    .bind(note_version)
     .execute(&mut *tx)
     .await?;
     audit::emit(
@@ -1320,7 +1398,12 @@ pub async fn ai_draft(
         &ctx,
         "ai.artifact.generated",
         &state.cell,
-        json!({ "artifact_id": artifact_id, "encounter_id": id }),
+        json!({
+            "artifact_id": artifact_id,
+            "encounter_id": id,
+            "note_version": note_version,
+            "input_hash": resp.input_hash,
+        }),
         None,
     )
     .await
@@ -1333,6 +1416,7 @@ pub async fn ai_draft(
         "output": resp.output,
         "limitations": limitations,
         "citations": resp.output.cited_sources,
+        "note_version": note_version,
         "model": resp.model,
         "model_version": resp.model_version,
     })))

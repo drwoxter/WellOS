@@ -6,6 +6,7 @@ import { AppShell } from "../../chrome";
 import { t } from "@/lib/i18n";
 import type { Lang, TKey } from "@/lib/i18n";
 import { ApiRequestError, apiFetch, useSession } from "@/lib/session";
+import { useUnsavedChangesGuard } from "@/lib/unsaved-guard";
 import {
   LAB_TESTS,
   ageYears,
@@ -61,6 +62,8 @@ type AiDraft = {
   model_version: string | null;
   generated_at: string | null;
   review_decision: string | null;
+  note_version: number | null;
+  stale: boolean;
 };
 
 type Workspace = {
@@ -190,8 +193,13 @@ function SafetyHeader({ ws, lang }: { ws: Workspace; lang: Lang }) {
         </span>
       </div>
       <p className="muted" style={{ margin: "0.4rem 0 0" }}>
-        {t(lang, "consultation")} · {ws.encounter.practitioner} ·{" "}
-        {ws.encounter.facility_name} ·{" "}
+        {t(
+          lang,
+          ws.encounter.encounter_type === "consultation"
+            ? "consultation"
+            : "orderOnlyEncounter",
+        )}{" "}
+        · {ws.encounter.practitioner} · {ws.encounter.facility_name} ·{" "}
         {formatDateTime(lang, ws.encounter.started_at)}
       </p>
       <div style={{ marginTop: "0.5rem" }}>
@@ -630,7 +638,12 @@ function AiDocAid({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  const awaiting = draft?.status === "awaiting_review";
+  const awaiting = draft?.status === "awaiting_review" && !draft.stale;
+  // Superseded by a later note save before the clinician reviewed it.
+  const outdated =
+    draft !== null &&
+    !draft.review_decision &&
+    (draft.stale || draft.status === "superseded");
 
   async function generate() {
     setBusy(true);
@@ -696,10 +709,20 @@ function AiDocAid({
           {t(lang, "aiGenerateDraft")}
         </button>
       ) : null}
+      {outdated ? (
+        <p className="muted" role="status">
+          {t(lang, "aiDraftStale")}
+        </p>
+      ) : null}
       {draft && awaiting && draft.output ? (
         <div style={{ marginTop: "0.6rem" }}>
           <p>
-            <span className="badge warn">{t(lang, "aiAssistiveDraft")}</span>
+            <span className="badge warn">{t(lang, "aiAssistiveDraft")}</span>{" "}
+            {draft.note_version !== null ? (
+              <span className="muted">
+                {t(lang, "noteVersion")} {draft.note_version}
+              </span>
+            ) : null}
           </p>
           <blockquote className="ai-draft-text">
             {draft.output.summary}
@@ -938,14 +961,27 @@ function SignedNoteView({
   );
 }
 
+type Mutation = "idle" | "saving" | "signing" | "cancelling";
+
+// The clinician's local draft. `revision` advances on every keystroke and
+// `savedRevision` is the last revision the server confirmed, so the note is
+// dirty exactly when they differ — a save that started before newer edits
+// can only ever confirm the revision it actually submitted.
+type LocalDraft = {
+  sections: NoteSections;
+  revision: number;
+  savedRevision: number;
+  version: number | null;
+};
+
 function EncounterWorkspace({ id }: { id: string }) {
   const { lang, authenticated } = useSession();
   const [ws, setWs] = useState<Workspace | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [sections, setSections] = useState<NoteSections>(EMPTY_SECTIONS);
-  const [noteVersion, setNoteVersion] = useState<number | null>(null);
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const [savedRevision, setSavedRevision] = useState(0);
+  const [mutation, setMutation] = useState<Mutation>("idle");
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [confirmingSign, setConfirmingSign] = useState(false);
@@ -956,14 +992,34 @@ function EncounterWorkspace({ id }: { id: string }) {
     follow_up: true,
   });
   const hydratedNote = useRef(false);
-  const dirtyRef = useRef(false);
-  const noteVersionRef = useRef<number | null>(null);
-  useEffect(() => {
-    dirtyRef.current = dirty;
-  }, [dirty]);
-  useEffect(() => {
-    noteVersionRef.current = noteVersion;
-  }, [noteVersion]);
+  const local = useRef<LocalDraft>({
+    sections: EMPTY_SECTIONS,
+    revision: 0,
+    savedRevision: 0,
+    version: null,
+  });
+  const mutationRef = useRef<Mutation>("idle");
+
+  const dirty = revision !== savedRevision;
+  const busy = mutation !== "idle";
+  const frozen = mutation === "signing";
+
+  const beginMutation = useCallback((m: Mutation) => {
+    mutationRef.current = m;
+    setMutation(m);
+  }, []);
+
+  const hydrate = useCallback((note: Note | null) => {
+    const next: LocalDraft = {
+      sections: sectionsFromNote(note),
+      revision: local.current.revision,
+      savedRevision: local.current.revision,
+      version: note?.version ?? null,
+    };
+    local.current = next;
+    setSections(next.sections);
+    setSavedRevision(next.savedRevision);
+  }, []);
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -971,14 +1027,17 @@ function EncounterWorkspace({ id }: { id: string }) {
       .then((data) => {
         setWs(data);
         const serverVersion = data.note?.version ?? null;
+        const localDirty =
+          local.current.revision !== local.current.savedRevision;
         if (!hydratedNote.current) {
-          setSections(sectionsFromNote(data.note));
-          setNoteVersion(serverVersion);
+          hydrate(data.note);
           hydratedNote.current = true;
-        } else if (!dirtyRef.current) {
-          setSections(sectionsFromNote(data.note));
-          setNoteVersion(serverVersion);
-        } else if (serverVersion !== noteVersionRef.current) {
+        } else if (mutationRef.current !== "idle") {
+          // A save or sign is settling the local draft; its own response
+          // decides what is persisted.
+        } else if (!localDirty) {
+          hydrate(data.note);
+        } else if (serverVersion !== local.current.version) {
           // The note changed on the server while local edits are unsaved.
           // Keep the local version so the next save surfaces a conflict
           // instead of silently overwriting the newer note.
@@ -986,62 +1045,61 @@ function EncounterWorkspace({ id }: { id: string }) {
         }
       })
       .catch((e) => setLoadError(errMessage(e)));
-  }, [id, lang]);
+  }, [hydrate, id, lang]);
 
   useEffect(() => {
     if (authenticated) load();
   }, [authenticated, load]);
 
-  // Protect against losing unsaved documentation on navigation: browser
-  // unloads (refresh, tab close, external links) and client-side App Router
-  // navigation through internal links.
-  useEffect(() => {
-    if (!dirty) return;
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-    };
-    const clickHandler = (e: MouseEvent) => {
-      const target = e.target instanceof Element ? e.target : null;
-      const anchor = target?.closest("a[href]");
-      if (!anchor) return;
-      if (!window.confirm(t(lang, "unsavedLeaveConfirm"))) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    };
-    window.addEventListener("beforeunload", handler);
-    document.addEventListener("click", clickHandler, true);
-    return () => {
-      window.removeEventListener("beforeunload", handler);
-      document.removeEventListener("click", clickHandler, true);
-    };
-  }, [dirty, lang]);
+  useUnsavedChangesGuard(dirty, t(lang, "unsavedLeaveConfirm"));
 
   const editable = Boolean(
     ws && ws.capabilities.can_document && ws.note?.status !== "signed",
   );
 
   const setSection = useCallback((field: keyof NoteSections, value: string) => {
-    setSections((s) => ({ ...s, [field]: value }));
-    setDirty(true);
+    // Editing is frozen while the signed content is being finalised.
+    if (mutationRef.current === "signing") return;
+    const next: LocalDraft = {
+      ...local.current,
+      sections: { ...local.current.sections, [field]: value },
+      revision: local.current.revision + 1,
+    };
+    local.current = next;
+    setSections(next.sections);
+    setRevision(next.revision);
     setSaveMessage(null);
   }, []);
 
-  const save = useCallback(async (): Promise<number | null> => {
-    setSaving(true);
+  // Submits an immutable snapshot of the local draft. Only the snapshot's
+  // revision is confirmed as saved, so text typed while the request was in
+  // flight stays marked unsaved.
+  const submitDraft = useCallback(async (): Promise<{
+    version: number;
+    revision: number;
+  } | null> => {
+    const snapshot = local.current;
     setSaveError(null);
     setSaveMessage(null);
     try {
-      const body: Record<string, unknown> = { ...sections };
-      if (noteVersion !== null) body.version = noteVersion;
+      const body: Record<string, unknown> = { ...snapshot.sections };
+      if (snapshot.version !== null) body.version = snapshot.version;
       const res = await apiFetch<{ version: number }>(
         `/api/v1/encounters/${id}/note`,
         { method: "POST", body: JSON.stringify(body) },
       );
-      setNoteVersion(res.version);
-      setDirty(false);
-      setSaveMessage(t(lang, "draftSaved"));
-      return res.version;
+      local.current = {
+        ...local.current,
+        version: res.version,
+        savedRevision: snapshot.revision,
+      };
+      setSavedRevision(snapshot.revision);
+      setSaveMessage(
+        local.current.revision === snapshot.revision
+          ? t(lang, "draftSaved")
+          : t(lang, "draftSavedNewerEdits"),
+      );
+      return { version: res.version, revision: snapshot.revision };
     } catch (err) {
       if (err instanceof ApiRequestError && err.code === "version_conflict") {
         setSaveError(t(lang, "versionConflict"));
@@ -1051,29 +1109,47 @@ function EncounterWorkspace({ id }: { id: string }) {
         setSaveError(errMessage(err));
       }
       return null;
-    } finally {
-      setSaving(false);
     }
-  }, [id, lang, noteVersion, sections]);
+  }, [id, lang]);
+
+  const save = useCallback(async () => {
+    if (mutationRef.current !== "idle") return;
+    beginMutation("saving");
+    try {
+      await submitDraft();
+    } finally {
+      beginMutation("idle");
+    }
+  }, [beginMutation, submitDraft]);
 
   const sign = useCallback(async () => {
+    if (mutationRef.current !== "idle") return;
     setConfirmingSign(false);
-    setSaving(true);
+    beginMutation("signing");
     setSaveError(null);
     try {
-      let version = noteVersion;
-      if (dirty || version === null) {
-        setSaving(false);
-        version = await save();
-        setSaving(true);
-        if (version === null) return;
+      const startRevision = local.current.revision;
+      let version = local.current.version;
+      if (
+        local.current.revision !== local.current.savedRevision ||
+        version === null
+      ) {
+        const saved = await submitDraft();
+        if (!saved) return;
+        version = saved.version;
+      }
+      // Inputs are frozen while signing; this confirms the version being
+      // signed is the one holding every visible edit.
+      if (local.current.revision !== startRevision) {
+        setSaveMessage(null);
+        setSaveError(t(lang, "signAbortedNoteChanged"));
+        return;
       }
       await apiFetch(`/api/v1/encounters/${id}/sign`, {
         method: "POST",
         body: JSON.stringify({ version }),
       });
       setSaveMessage(t(lang, "noteSigned"));
-      setDirty(false);
       hydratedNote.current = false;
       load();
     } catch (err) {
@@ -1096,35 +1172,45 @@ function EncounterWorkspace({ id }: { id: string }) {
         setSaveError(errMessage(err));
       }
     } finally {
-      setSaving(false);
+      beginMutation("idle");
     }
-  }, [dirty, id, lang, load, noteVersion, save]);
+  }, [beginMutation, id, lang, load, submitDraft]);
 
   const cancelEncounter = useCallback(async () => {
+    if (mutationRef.current !== "idle") return;
     setConfirmingCancel(false);
-    setSaving(true);
+    beginMutation("cancelling");
     setSaveError(null);
     try {
       await apiFetch(`/api/v1/encounters/${id}/cancel`, { method: "POST" });
       setSaveMessage(t(lang, "encounterCancelled"));
-      setDirty(false);
+      // A cancelled consultation keeps no draft: drop local edits so the
+      // navigation guard stands down.
+      local.current = {
+        ...local.current,
+        savedRevision: local.current.revision,
+      };
+      setSavedRevision(local.current.revision);
+      hydratedNote.current = false;
       load();
     } catch (err) {
       setSaveError(errMessage(err));
     } finally {
-      setSaving(false);
+      beginMutation("idle");
     }
-  }, [id, lang, load]);
+  }, [beginMutation, id, lang, load]);
 
-  const acceptAiDraft = useCallback((text: string) => {
-    setSections((s) => ({
-      ...s,
-      assessment: s.assessment ? `${s.assessment}\n\n${text}` : text,
-    }));
-    setDirty(true);
-  }, []);
+  const acceptAiDraft = useCallback(
+    (text: string) => {
+      const current = local.current.sections.assessment;
+      setSection("assessment", current ? `${current}\n\n${text}` : text);
+    },
+    [setSection],
+  );
 
   const currentVitals = useMemo(() => ws?.vitals ?? [], [ws]);
+  const orderOnly =
+    ws !== null && ws.encounter.encounter_type !== "consultation";
 
   if (loadError) {
     const denied =
@@ -1156,13 +1242,27 @@ function EncounterWorkspace({ id }: { id: string }) {
 
       <div className="encounter-layout">
         <div className="encounter-main">
-          {signed ? (
+          {orderOnly ? (
+            <div className="card">
+              <h2>{t(lang, "orderOnlyEncounter")}</h2>
+              <p className="muted">{t(lang, "orderOnlyEncounterHelp")}</p>
+            </div>
+          ) : signed ? (
             <SignedNoteView ws={ws} lang={lang} onChanged={load} />
           ) : ws.capabilities.can_document ? (
-            <div className="card">
+            <div className="card" aria-busy={busy}>
               <h2>{t(lang, "clinicalNote")}</h2>
               <p>
                 <span className="badge neutral">{t(lang, "draftBadge")}</span>{" "}
+                {mutation === "saving" ? (
+                  <span className="badge neutral" role="status">
+                    {t(lang, "savingDraft")}
+                  </span>
+                ) : mutation === "signing" ? (
+                  <span className="badge neutral" role="status">
+                    {t(lang, "signingNote")}
+                  </span>
+                ) : null}{" "}
                 {dirty ? (
                   <span className="badge warn">
                     {t(lang, "unsavedChanges")}
@@ -1205,6 +1305,7 @@ function EncounterWorkspace({ id }: { id: string }) {
                         rows={f.field === "reason_for_encounter" ? 2 : 3}
                         value={sections[f.field]}
                         placeholder={t(lang, f.placeholderKey)}
+                        readOnly={frozen}
                         onChange={(e) => setSection(f.field, e.target.value)}
                       />
                     ) : null}
@@ -1226,7 +1327,7 @@ function EncounterWorkspace({ id }: { id: string }) {
                   <p>{t(lang, "confirmSign")}</p>
                   <button
                     className="primary"
-                    disabled={saving}
+                    disabled={busy}
                     onClick={() => void sign()}
                   >
                     {t(lang, "confirm")}
@@ -1243,7 +1344,7 @@ function EncounterWorkspace({ id }: { id: string }) {
                   <p>{t(lang, "confirmCancelEncounter")}</p>
                   <button
                     className="primary"
-                    disabled={saving}
+                    disabled={busy}
                     onClick={() => void cancelEncounter()}
                   >
                     {t(lang, "confirm")}
@@ -1261,23 +1362,27 @@ function EncounterWorkspace({ id }: { id: string }) {
                 >
                   <button
                     className="secondary"
-                    disabled={saving || !editable}
+                    disabled={busy || !editable}
                     onClick={() => void save()}
                   >
-                    {saving ? t(lang, "savingDraft") : t(lang, "saveDraft")}
+                    {mutation === "saving"
+                      ? t(lang, "savingDraft")
+                      : t(lang, "saveDraft")}
                   </button>
                   {ws.capabilities.can_sign ? (
                     <button
                       className="primary"
-                      disabled={saving}
+                      disabled={busy}
                       onClick={() => setConfirmingSign(true)}
                     >
-                      {t(lang, "signComplete")}
+                      {mutation === "signing"
+                        ? t(lang, "signingNote")
+                        : t(lang, "signComplete")}
                     </button>
                   ) : null}
                   <button
                     className="tertiary"
-                    disabled={saving}
+                    disabled={busy}
                     onClick={() => setConfirmingCancel(true)}
                   >
                     {t(lang, "cancelEncounter")}

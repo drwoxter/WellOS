@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import EncounterPage from "@/app/encounters/[id]/page";
 import { SessionProvider } from "@/lib/session";
 
+// One shared router instance, as the App Router context provides: the
+// navigation guard wraps its methods and `next/link` navigates through it.
+const router = { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() };
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => router,
   usePathname: () => "/encounters/e1",
 }));
 
@@ -80,10 +83,36 @@ function apiError(status: number, code: string, message: string): Response {
   return jsonResponse({ error: { code, message } }, status);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+const DRAFT_NOTE = {
+  id: "n1",
+  status: "draft",
+  version: 1,
+  reason_for_encounter: "Cough",
+  history_present_illness: null,
+  medical_history: null,
+  review_of_systems: null,
+  physical_exam: null,
+  assessment: "Viral illness",
+  plan: null,
+  follow_up: null,
+  author: "Dr. García",
+  updated_at: "2026-08-29T09:10:00Z",
+  signed_at: null,
+  signed_by: null,
+};
+
 /** Stub fetch: GET workspace returns `ws`; POST handlers are per-path. */
 function setup(
   ws: unknown,
-  posts: Record<string, (body: unknown) => Response> = {},
+  posts: Record<string, (body: unknown) => Response | Promise<Response>> = {},
 ) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -115,6 +144,8 @@ function setup(
 describe("encounter documentation workspace", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
+    router.push.mockClear();
+    router.replace.mockClear();
   });
 
   it("shows the safety header, allergy badge and editable note for a draft", async () => {
@@ -430,28 +461,258 @@ describe("encounter documentation workspace", () => {
     );
   });
 
-  it("asks for confirmation before internal navigation with unsaved edits", async () => {
+  it("keeps text typed during a delayed save marked unsaved", async () => {
+    const user = userEvent.setup();
+    const saveBodies: Record<string, unknown>[] = [];
+    const pending = deferred<Response>();
+    let calls = 0;
+    setup(workspace(), {
+      "/api/v1/encounters/e1/note": (body) => {
+        saveBodies.push(body as Record<string, unknown>);
+        calls += 1;
+        return calls === 1
+          ? pending.promise
+          : jsonResponse({ id: "n1", status: "draft", version: 2 });
+      },
+    });
+    const reason = await screen.findByLabelText(/Reason for consultation/);
+    await user.type(reason, "Chest pain");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findAllByText("Saving…")).not.toHaveLength(0);
+
+    // Repeated saves are refused while the first is in flight.
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    expect(saveBodies).toHaveLength(1);
+
+    // The clinician keeps typing while the request is pending.
+    await user.type(screen.getByLabelText(/Reason for consultation/), " worse");
+    expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue(
+      "Chest pain worse",
+    );
+
+    pending.resolve(jsonResponse({ id: "n1", status: "draft", version: 1 }));
+    expect(
+      await screen.findByText(
+        "Draft saved. Edits made while saving are not saved yet.",
+      ),
+    ).toBeInTheDocument();
+    expect(saveBodies[0]).toMatchObject({ reason_for_encounter: "Chest pain" });
+    // Only the submitted snapshot counts as saved: the newer text remains
+    // visible and the note stays dirty.
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue(
+      "Chest pain worse",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    expect(saveBodies[1]).toMatchObject({
+      reason_for_encounter: "Chest pain worse",
+      version: 1,
+    });
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+  });
+
+  it("freezes editing during a delayed sign and signs exactly the visible draft", async () => {
+    const user = userEvent.setup();
+    const saveBodies: Record<string, unknown>[] = [];
+    const signCalls: unknown[] = [];
+    const pendingSave = deferred<Response>();
+    setup(workspace({ note: DRAFT_NOTE }), {
+      "/api/v1/encounters/e1/note": (body) => {
+        saveBodies.push(body as Record<string, unknown>);
+        return pendingSave.promise;
+      },
+      "/api/v1/encounters/e1/sign": (body) => {
+        signCalls.push(body);
+        return jsonResponse({
+          id: "n1",
+          status: "signed",
+          encounter_status: "completed",
+        });
+      },
+    });
+    const plan = await screen.findByLabelText(/^Plan/);
+    await user.type(plan, "Rest and fluids");
+    await user.click(screen.getByRole("button", { name: "Sign and complete" }));
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(await screen.findAllByText("Signing…")).not.toHaveLength(0);
+    expect(saveBodies).toHaveLength(1);
+    expect(saveBodies[0]).toMatchObject({
+      plan: "Rest and fluids",
+      version: 1,
+    });
+
+    // Inputs are read-only while the sign finalises: nothing typed now can
+    // be lost between the saved snapshot and the signed record.
+    const frozenPlan = screen.getByLabelText(/^Plan/);
+    expect(frozenPlan).toHaveAttribute("readonly");
+    await user.type(frozenPlan, " and review");
+    expect(frozenPlan).toHaveValue("Rest and fluids");
+
+    pendingSave.resolve(
+      jsonResponse({ id: "n1", status: "draft", version: 2 }),
+    );
+    await waitFor(() => expect(signCalls).toHaveLength(1));
+    expect(signCalls[0]).toEqual({ version: 2 });
+    expect(await screen.findByText(/Note signed\./)).toBeInTheDocument();
+  });
+
+  it("guards programmatic navigation and browser history while dirty", async () => {
     const user = userEvent.setup();
     const confirmMock = vi.fn(() => false);
     vi.stubGlobal("confirm", confirmMock);
-    setup(workspace());
+    const originalPush = router.push;
+    setup(workspace(), {
+      "/api/v1/encounters/e1/note": () =>
+        jsonResponse({ id: "n1", status: "draft", version: 1 }),
+    });
     const reason = await screen.findByLabelText(/Reason for consultation/);
     await user.type(reason, "Chest pain");
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
 
-    const anchor = document.createElement("a");
-    anchor.href = "/patients/p1";
-    anchor.textContent = "Patient chart";
-    document.body.appendChild(anchor);
-    const cancelled = !fireEvent.click(anchor);
+    // Declined programmatic navigation: nothing happens.
+    router.push("/patients/p1");
     expect(confirmMock).toHaveBeenCalledWith(
       expect.stringMatching(/unsaved documentation/i),
     );
-    expect(cancelled).toBe(true);
+    expect(originalPush).not.toHaveBeenCalled();
+
+    // Declined Back: URL, text and dirty state are untouched.
+    const href = window.location.href;
+    window.history.back();
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(2));
+    expect(window.location.href).toBe(href);
     expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue(
       "Chest pain",
     );
-    anchor.remove();
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    // Accepted programmatic navigation proceeds exactly once.
+    confirmMock.mockReturnValue(true);
+    router.push("/patients/p1");
+    await waitFor(() =>
+      expect(originalPush).toHaveBeenCalledWith("/patients/p1", undefined),
+    );
+    expect(confirmMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("stands the navigation guard down once the draft is saved", async () => {
+    const user = userEvent.setup();
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+    const originalPush = router.push;
+    setup(workspace(), {
+      "/api/v1/encounters/e1/note": () =>
+        jsonResponse({ id: "n1", status: "draft", version: 1 }),
+    });
+    const reason = await screen.findByLabelText(/Reason for consultation/);
+    await user.type(reason, "Chest pain");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    expect(router.push).toBe(originalPush);
+    router.push("/patients/p1");
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(originalPush).toHaveBeenCalledWith("/patients/p1");
+  });
+
+  it("presents order-only encounters as laboratory contexts, not consultations", async () => {
+    setup(
+      workspace({
+        encounter: {
+          id: "e1",
+          status: "in_progress",
+          encounter_type: "order_only",
+          started_at: "2026-08-29T09:00:00Z",
+          completed_at: null,
+          practitioner: "Dr. García",
+          facility_name: "Central Hospital",
+          own: true,
+        },
+        capabilities: {
+          can_document: false,
+          can_sign: false,
+          can_add_addendum: false,
+          can_order_lab: true,
+        },
+      }),
+    );
+    expect(
+      await screen.findByText(/only holds laboratory orders/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/Reason for consultation/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Sign and complete" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText("Laboratory orders").length).toBeGreaterThan(0);
+  });
+
+  it("flags a dMind draft generated from an older note version as stale", async () => {
+    setup(
+      workspace({
+        note: { ...DRAFT_NOTE, version: 3 },
+        ai_draft: {
+          id: "a1",
+          status: "superseded",
+          output: {
+            summary: "Older assistive summary.",
+            limitations: [],
+            cited_sources: ["encounter_note:n1:v2:assessment"],
+          },
+          limitations: [],
+          citations: ["encounter_note:n1:v2:assessment"],
+          model: "dmind-fake",
+          model_version: "0.1.0",
+          generated_at: "2026-08-29T09:30:00Z",
+          review_decision: null,
+          note_version: 2,
+          stale: true,
+        },
+      }),
+    );
+    expect(
+      await screen.findByText(/note changed after this draft was generated/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Accept and copy into assessment" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Older assistive summary."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the exact note version a current dMind draft was generated from", async () => {
+    setup(
+      workspace({
+        note: { ...DRAFT_NOTE, version: 3 },
+        ai_draft: {
+          id: "a1",
+          status: "awaiting_review",
+          output: {
+            summary: "Current assistive summary.",
+            limitations: [],
+            cited_sources: ["encounter_note:n1:v3:assessment"],
+          },
+          limitations: [],
+          citations: ["encounter_note:n1:v3:assessment"],
+          model: "dmind-fake",
+          model_version: "0.1.0",
+          generated_at: "2026-08-29T09:30:00Z",
+          review_decision: null,
+          note_version: 3,
+          stale: false,
+        },
+      }),
+    );
+    expect(
+      await screen.findByText("Current assistive summary."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Note version 3/)).toBeInTheDocument();
+    expect(
+      screen.getByText("encounter_note:n1:v3:assessment"),
+    ).toBeInTheDocument();
   });
 
   it("shows an unauthorized state for out-of-scope encounters", async () => {

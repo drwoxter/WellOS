@@ -78,7 +78,12 @@ consultation documentation it also seeds an in-progress draft consultation
 (Alba Demopatient), a signed encounter with vital signs, a diagnosis and a
 plan (Carlos Demopatient), a signed encounter with a later addendum (Marta
 Demopatient) and a patient ready for a fresh consultation (Jonás
-Demopatient). `make reset` restores all demo states.
+Demopatient). Encounters carry an explicit `encounter_type`: `consultation`
+holds the clinical note, while `order_only` is the laboratory-order context
+used by the result loops (pre-documentation encounters are backfilled to it);
+order-only encounters appear in the timeline as “Laboratory orders”, are never
+offered as “Resume consultation” and refuse note, vitals, diagnosis, sign and
+dMind mutations. `make reset` restores all demo states.
 
 Development tokens work only against
 seeded synthetic users and only when `WELLOS_ENV=development` and

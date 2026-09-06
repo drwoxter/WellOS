@@ -44,17 +44,7 @@ type Chart = {
     loop_state: string;
     created_at: string;
   }[];
-  encounters: {
-    id: string;
-    status: string;
-    encounter_type: string;
-    started_at: string;
-    completed_at: string | null;
-    practitioner: string;
-    own: boolean;
-    note_status: string | null;
-    addenda_count: number;
-  }[];
+  encounters: ChartEncounter[];
   consents: { purpose: string; status: string }[];
   alerts: { severity: string; message: string; created_at: string }[];
   vitals: {
@@ -70,6 +60,29 @@ type Chart = {
     recorded_at: string;
   }[];
 };
+
+type ChartEncounter = {
+  id: string;
+  status: string;
+  encounter_type: string;
+  started_at: string;
+  completed_at: string | null;
+  practitioner: string;
+  own: boolean;
+  note_status: string | null;
+  addenda_count: number;
+};
+
+// The requester's own encounter still open for laboratory activity; this
+// includes order-only contexts, which hold orders but never a note.
+function isOpenOwnEncounter(e: ChartEncounter): boolean {
+  return e.status === "in_progress" && e.own;
+}
+
+// Only a genuine consultation can be picked up again for documentation.
+function isResumableConsultation(e: ChartEncounter): boolean {
+  return isOpenOwnEncounter(e) && e.encounter_type === "consultation";
+}
 
 function encounterStatusKey(status: string): TKey {
   switch (status) {
@@ -149,10 +162,12 @@ function Timeline({ chart, lang }: { chart: Chart; lang: Lang }) {
           : "";
       evts.push({
         when: e.started_at,
-        text: `${t(lang, "consultation")}: ${e.practitioner} — ${t(
+        text: `${t(
           lang,
-          encounterStatusKey(e.status),
-        )}${addenda}`,
+          e.encounter_type === "consultation"
+            ? "consultation"
+            : "orderOnlyEncounter",
+        )}: ${e.practitioner} — ${t(lang, encounterStatusKey(e.status))}${addenda}`,
         href: `/encounters/${e.id}`,
       });
     }
@@ -205,9 +220,7 @@ function Actions({
   const [encounterId, setEncounterId] = useState("new");
   const router = useRouter();
 
-  const resumable = chart.encounters.find(
-    (e) => e.status === "in_progress" && e.own,
-  );
+  const resumable = chart.encounters.find(isResumableConsultation);
 
   async function startEncounter() {
     setBusy(true);
@@ -236,7 +249,10 @@ function Actions({
       if (encId === "new") {
         const enc = await apiFetch<{ id: string }>("/api/v1/encounters", {
           method: "POST",
-          body: JSON.stringify({ patient_id: chart.patient.id }),
+          body: JSON.stringify({
+            patient_id: chart.patient.id,
+            encounter_type: "order_only",
+          }),
         });
         encId = enc.id;
         // Reuse this encounter if the order below fails and is retried,
@@ -320,13 +336,11 @@ function Actions({
             onChange={(e) => setEncounterId(e.target.value)}
           >
             <option value="new">{t(lang, "newEncounter")}</option>
-            {chart.encounters
-              .filter((enc) => enc.status === "in_progress" && enc.own)
-              .map((enc) => (
-                <option key={enc.id} value={enc.id}>
-                  {formatDateTime(lang, enc.started_at)} — {enc.practitioner}
-                </option>
-              ))}
+            {chart.encounters.filter(isOpenOwnEncounter).map((enc) => (
+              <option key={enc.id} value={enc.id}>
+                {formatDateTime(lang, enc.started_at)} — {enc.practitioner}
+              </option>
+            ))}
           </select>
           <p>
             <button className="primary" type="submit" disabled={busy}>
@@ -557,7 +571,17 @@ function PatientWorkspace({ id }: { id: string }) {
               {chart.encounters.map((e) => (
                 <li key={e.id} className="result-card">
                   <div className="grow">
-                    <div className="title">{e.practitioner}</div>
+                    <div className="title">
+                      {e.practitioner}
+                      {e.encounter_type !== "consultation" ? (
+                        <>
+                          {" "}
+                          <span className="badge neutral">
+                            {t(lang, "orderOnlyEncounter")}
+                          </span>
+                        </>
+                      ) : null}
+                    </div>
                     <div className="muted">
                       {t(lang, "started")}: {formatDateTime(lang, e.started_at)}
                       {e.addenda_count > 0
@@ -569,9 +593,11 @@ function PatientWorkspace({ id }: { id: string }) {
                     {t(lang, encounterStatusKey(e.status))}
                   </span>
                   <Link className="navlink" href={`/encounters/${e.id}`}>
-                    {e.status === "in_progress" && e.own
+                    {isResumableConsultation(e)
                       ? t(lang, "resumeConsultation")
-                      : t(lang, "openSummary")}
+                      : e.encounter_type !== "consultation"
+                        ? t(lang, "openOrders")
+                        : t(lang, "openSummary")}
                   </Link>
                 </li>
               ))}

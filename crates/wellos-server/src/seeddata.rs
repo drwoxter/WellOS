@@ -850,8 +850,8 @@ async fn seed_demo_loop(
     let started = chrono::Utc::now() - chrono::Duration::hours(spec.hours_ago);
     let encounter_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id, status, started_at)
-         VALUES ($1,$2,$3,$4,$5,'in_progress',$6)",
+        "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id, status, encounter_type, started_at)
+         VALUES ($1,$2,$3,$4,$5,'in_progress','order_only',$6)",
     )
     .bind(encounter_id)
     .bind(tenant)

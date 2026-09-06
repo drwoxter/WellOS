@@ -10,6 +10,11 @@ ALTER TABLE encounters
     ADD COLUMN encounter_type text NOT NULL DEFAULT 'consultation',
     ADD COLUMN completed_at timestamptz;
 
+-- Encounters created before consultation documentation existed are
+-- laboratory-order contexts, not documentable consultations: they must not
+-- surface as resumable consultations or accept clinical notes.
+UPDATE encounters SET encounter_type = 'order_only';
+
 CREATE TABLE encounter_notes (
     id           uuid PRIMARY KEY,
     tenant_id    uuid NOT NULL REFERENCES tenants(id),
@@ -78,4 +83,6 @@ ALTER TABLE conditions
 -- request; existing result summaries keep their service_request link.
 ALTER TABLE ai_artifacts
     ALTER COLUMN service_request_id DROP NOT NULL,
-    ADD COLUMN encounter_id uuid REFERENCES encounters(id);
+    ADD COLUMN encounter_id uuid REFERENCES encounters(id),
+    -- Exact encounter-note version the draft was generated from.
+    ADD COLUMN note_version bigint;

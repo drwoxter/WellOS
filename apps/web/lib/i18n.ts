@@ -261,8 +261,20 @@ const dict = {
       "Sign this note? A signed note is permanent; later corrections are recorded as dated addenda.",
     unsavedChanges: "Unsaved changes",
     savingDraft: "Saving…",
+    signingNote: "Signing…",
     draftSaved: "Draft saved.",
+    draftSavedNewerEdits:
+      "Draft saved. Edits made while saving are not saved yet.",
+    signAbortedNoteChanged:
+      "The note changed while signing. Review the draft and sign again.",
     noteSigned: "Note signed. This consultation is complete.",
+    orderOnlyEncounter: "Laboratory orders",
+    orderOnlyEncounterHelp:
+      "This encounter only holds laboratory orders and their results. It cannot be documented as a consultation.",
+    openOrders: "Open orders",
+    aiDraftStale:
+      "The note changed after this draft was generated. Generate a new draft before reviewing.",
+    noteVersion: "Note version",
     draftBadge: "Draft",
     signedBadge: "Signed",
     signedAt: "Signed",
@@ -603,8 +615,20 @@ const dict = {
       "¿Firmar esta nota? Una nota firmada es permanente; las correcciones posteriores se registran como adendas fechadas.",
     unsavedChanges: "Cambios sin guardar",
     savingDraft: "Guardando…",
+    signingNote: "Firmando…",
     draftSaved: "Borrador guardado.",
+    draftSavedNewerEdits:
+      "Borrador guardado. Los cambios hechos mientras se guardaba aún no están guardados.",
+    signAbortedNoteChanged:
+      "La nota cambió durante la firma. Revise el borrador y firme de nuevo.",
     noteSigned: "Nota firmada. Esta consulta está completa.",
+    orderOnlyEncounter: "Órdenes de laboratorio",
+    orderOnlyEncounterHelp:
+      "Este encuentro solo contiene órdenes de laboratorio y sus resultados. No puede documentarse como consulta.",
+    openOrders: "Abrir órdenes",
+    aiDraftStale:
+      "La nota cambió después de generar este borrador. Genere un borrador nuevo antes de revisarlo.",
+    noteVersion: "Versión de la nota",
     draftBadge: "Borrador",
     signedBadge: "Firmada",
     signedAt: "Firmada",

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import PatientPage from "@/app/patients/[id]/page";
 import { SessionProvider } from "@/lib/session";
 
@@ -36,7 +37,32 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function setup(facilities: unknown[]) {
+const CLINICAL_FACILITY = [
+  {
+    id: "facility-b",
+    name: "Annex Clinic",
+    accessible: true,
+    can_register: false,
+    can_act_clinically: true,
+  },
+];
+
+function encounter(overrides: Record<string, unknown>) {
+  return {
+    id: "e-consult",
+    status: "in_progress",
+    encounter_type: "consultation",
+    started_at: "2026-08-28T09:00:00Z",
+    completed_at: null,
+    practitioner: "Dr. García",
+    own: true,
+    note_status: "draft",
+    addenda_count: 0,
+    ...overrides,
+  };
+}
+
+function setup(facilities: unknown[], chart: unknown = CHART) {
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL) => {
@@ -44,7 +70,7 @@ function setup(facilities: unknown[]) {
       if (url === "/api/session")
         return Promise.resolve(jsonResponse({ authenticated: true }));
       if (url === "/api/v1/patients/p1")
-        return Promise.resolve(jsonResponse(CHART));
+        return Promise.resolve(jsonResponse(chart));
       if (url === "/api/v1/meta/tenant")
         return Promise.resolve(
           jsonResponse({
@@ -110,5 +136,69 @@ describe("patient chart clinical actions", () => {
     expect(
       screen.queryByRole("button", { name: "Start consultation" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("never offers a historical order-only encounter as a resumable consultation", async () => {
+    setup(CLINICAL_FACILITY, {
+      ...CHART,
+      encounters: [
+        encounter({
+          id: "e-orders",
+          encounter_type: "order_only",
+          note_status: null,
+        }),
+      ],
+    });
+    expect(
+      await screen.findByRole("button", { name: "Start consultation" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /Resume consultation/ }),
+    ).not.toBeInTheDocument();
+    // Its laboratory activity stays visible in the timeline, labelled for
+    // what it is, and reachable from the encounters tab.
+    expect(
+      screen.getByText(/Laboratory orders: Dr\. García/),
+    ).toBeInTheDocument();
+    await userEvent
+      .setup()
+      .click(screen.getByRole("tab", { name: "Encounters" }));
+    expect(
+      screen.queryByRole("link", { name: /Resume consultation/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open orders" })).toHaveAttribute(
+      "href",
+      "/encounters/e-orders",
+    );
+  });
+
+  it("offers a genuine draft consultation for resumption", async () => {
+    setup(CLINICAL_FACILITY, {
+      ...CHART,
+      encounters: [
+        encounter({
+          id: "e-orders",
+          encounter_type: "order_only",
+          note_status: null,
+          started_at: "2026-08-29T09:00:00Z",
+        }),
+        encounter({ id: "e-consult" }),
+      ],
+    });
+    expect(
+      await screen.findByRole("link", { name: /Resume consultation/ }),
+    ).toHaveAttribute("href", "/encounters/e-consult");
+    await userEvent
+      .setup()
+      .click(screen.getByRole("tab", { name: "Encounters" }));
+    const resume = screen.getAllByRole("link", { name: /Resume consultation/ });
+    expect(resume).toHaveLength(2);
+    for (const link of resume) {
+      expect(link).toHaveAttribute("href", "/encounters/e-consult");
+    }
+    expect(screen.getByRole("link", { name: "Open orders" })).toHaveAttribute(
+      "href",
+      "/encounters/e-orders",
+    );
   });
 });
