@@ -278,6 +278,8 @@ const dict = {
       "Your note has unsaved edits this draft does not cover. Save the note and generate a new draft before accepting.",
     aiGenerateNeedsSave:
       "The note must be saved before a draft can be generated. Resolve the save error and try again.",
+    aiGenerateEditedDuringSave:
+      "The note changed while it was being saved, so no draft was generated. Generate again to summarise the current note.",
     noteVersion: "Note version",
     draftBadge: "Draft",
     signedBadge: "Signed",
@@ -638,6 +640,8 @@ const dict = {
       "Su nota tiene cambios sin guardar que este borrador no incluye. Guarde la nota y genere un borrador nuevo antes de aceptarlo.",
     aiGenerateNeedsSave:
       "La nota debe guardarse antes de generar un borrador. Resuelva el error de guardado e inténtelo de nuevo.",
+    aiGenerateEditedDuringSave:
+      "La nota cambió mientras se guardaba, por lo que no se generó ningún borrador. Genere de nuevo para resumir la nota actual.",
     noteVersion: "Versión de la nota",
     draftBadge: "Borrador",
     signedBadge: "Firmada",

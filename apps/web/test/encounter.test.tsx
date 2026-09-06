@@ -1193,6 +1193,56 @@ describe("encounter documentation workspace", () => {
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
   });
 
+  it("does not generate a dMind draft when the note is edited during the save before it", async () => {
+    const user = userEvent.setup();
+    const posts: string[] = [];
+    const pendingSave = deferred<Response>();
+    setup(workspace({ note: { ...DRAFT_NOTE } }), {
+      "/api/v1/encounters/e1/note": () => {
+        posts.push("note");
+        return posts.length === 1
+          ? pendingSave.promise
+          : jsonResponse({ id: "n1", status: "draft", version: 3 });
+      },
+      "/api/v1/encounters/e1/ai-draft": () => {
+        posts.push("ai-draft");
+        return jsonResponse({ ...AWAITING_DRAFT, note_version: 3 });
+      },
+    });
+    const plan = await screen.findByLabelText(/^Plan/);
+    await user.type(plan, "Rest");
+    await user.click(
+      screen.getByRole("button", { name: "Generate draft summary" }),
+    );
+    await waitFor(() => expect(posts).toEqual(["note"]));
+
+    // More text arrives while the prerequisite save is still in flight; it
+    // is not in the saved snapshot, so no draft may be generated from it.
+    await user.type(plan, " and fluids");
+    pendingSave.resolve(
+      jsonResponse({ id: "n1", status: "draft", version: 2 }),
+    );
+
+    expect(
+      await screen.findByText(/The note changed while it was being saved/),
+    ).toBeInTheDocument();
+    expect(posts).toEqual(["note"]);
+    expect(plan).toHaveValue("Rest and fluids");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Draft saved. Edits made while saving are not saved yet.",
+      ),
+    ).toBeInTheDocument();
+
+    // Generating again saves the visible text first and then proceeds.
+    await user.click(
+      screen.getByRole("button", { name: "Generate draft summary" }),
+    );
+    await waitFor(() => expect(posts).toEqual(["note", "note", "ai-draft"]));
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+  });
+
   it("withholds dMind acceptance while the note has edits the draft never summarised", async () => {
     const user = userEvent.setup();
     const accepts: unknown[] = [];

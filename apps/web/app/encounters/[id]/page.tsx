@@ -637,8 +637,9 @@ function AiDocAid({
   /** The note has edits the server — and so any draft — has not seen. */
   dirty: boolean;
   /** Saves a dirty note so generation summarises exactly what the clinician
-   *  sees; resolves false when it could not be saved. */
-  onPersistNote: () => Promise<boolean>;
+   *  sees: `unsaved` when it could not be saved, `edited` when the clinician
+   *  typed more while it was being saved. */
+  onPersistNote: () => Promise<"saved" | "unsaved" | "edited">;
   /** Persists the accepted summary into the draft note atomically with the
    *  approval; resolves false when another mutation is running. */
   onAccepted: (artifactId: string, summary: string) => Promise<boolean>;
@@ -664,8 +665,16 @@ function AiDocAid({
     setError(null);
     setMessage(null);
     try {
-      if (!(await onPersistNote())) {
-        setError(t(lang, "aiGenerateNeedsSave"));
+      const persisted = await onPersistNote();
+      if (persisted !== "saved") {
+        setError(
+          t(
+            lang,
+            persisted === "edited"
+              ? "aiGenerateEditedDuringSave"
+              : "aiGenerateNeedsSave",
+          ),
+        );
         return;
       }
       await apiFetch(`/api/v1/encounters/${encounterId}/ai-draft`, {
@@ -1196,13 +1205,19 @@ function EncounterWorkspace({ id }: { id: string }) {
   }, [beginMutation, load, submitDraft]);
 
   // dMind summarises persisted facts only, so a dirty note is saved before a
-  // draft is requested; the draft then covers exactly the visible text.
-  const persistForAi = useCallback(async (): Promise<boolean> => {
-    if (local.current.revision === local.current.savedRevision) return true;
-    if (mutationRef.current !== "idle") return false;
+  // draft is requested; the draft then covers exactly the visible text. Text
+  // typed while that save is in flight is not persisted, so generation is
+  // refused until the note is clean.
+  const persistForAi = useCallback(async (): Promise<
+    "saved" | "unsaved" | "edited"
+  > => {
+    if (local.current.revision === local.current.savedRevision) return "saved";
+    if (mutationRef.current !== "idle") return "unsaved";
     beginMutation("saving");
     try {
-      return (await submitDraft()) !== null;
+      const saved = await submitDraft();
+      if (saved === null) return "unsaved";
+      return local.current.revision === saved.revision ? "saved" : "edited";
     } finally {
       beginMutation("idle");
     }
