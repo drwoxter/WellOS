@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import EncounterPage from "@/app/encounters/[id]/page";
 import { SessionProvider } from "@/lib/session";
@@ -81,6 +81,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function apiError(status: number, code: string, message: string): Response {
   return jsonResponse({ error: { code, message } }, status);
+}
+
+/** Let queued history traversals dispatch their popstate events. */
+function settleHistory(): Promise<void> {
+  return new Promise((r) => setTimeout(r, 25));
 }
 
 function deferred<T>() {
@@ -597,6 +602,101 @@ describe("encounter documentation workspace", () => {
       expect(originalPush).toHaveBeenCalledWith("/patients/p1", undefined),
     );
     expect(confirmMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps guarding after Forward onto a duplicate entry and only asks when Back leaves the screen", async () => {
+    const user = userEvent.setup();
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+    setup(workspace());
+    const reason = await screen.findByLabelText(/Reason for consultation/);
+    await user.type(reason, "Chest pain");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    const href = window.location.href;
+
+    // A same-URL entry ahead of the guard's duplicate, as left behind by a
+    // guard that re-armed before its predecessor's cleanup settled.
+    window.history.pushState(window.history.state, "", window.location.href);
+    window.history.back();
+    await settleHistory();
+    window.history.forward();
+    await settleHistory();
+
+    // Forward never left the screen: no question, nothing stood down.
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(window.location.href).toBe(href);
+    expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue(
+      "Chest pain",
+    );
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    // Back onto the screen's own entry asks; declining keeps everything.
+    window.history.back();
+    await settleHistory();
+    window.history.back();
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
+    expect(window.location.href).toBe(href);
+    expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue(
+      "Chest pain",
+    );
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    // Accepting continues backward, off the screen, with one question.
+    confirmMock.mockReturnValue(true);
+    const backSpy = vi.spyOn(window.history, "back");
+    window.history.back();
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(2));
+    expect(backSpy).toHaveBeenCalledTimes(2);
+    backSpy.mockRestore();
+  });
+
+  it("re-arms Back when the note is edited again right after a save", async () => {
+    const user = userEvent.setup();
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+    const pendingSave = deferred<Response>();
+    setup(workspace(), {
+      "/api/v1/encounters/e1/note": () => pendingSave.promise,
+    });
+    const reason = await screen.findByLabelText(/Reason for consultation/);
+    await user.type(reason, "Chest pain");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+
+    // Edit in the same task that renders the save result, before the
+    // previous guard's cleanup traversal (a queued task) has landed.
+    const raced = new Promise<void>((resolve) => {
+      const observer = new MutationObserver(() => {
+        if (!screen.queryByText("Draft saved.")) return;
+        observer.disconnect();
+        fireEvent.change(reason, { target: { value: "Chest pain, acute" } });
+        resolve();
+      });
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    });
+    pendingSave.resolve(
+      jsonResponse({ id: "n1", status: "draft", version: 1 }),
+    );
+    await raced;
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    const href = window.location.href;
+    await settleHistory();
+
+    // No duplicate is left ahead of the guard, and Back asks exactly once.
+    window.history.forward();
+    await settleHistory();
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(window.location.href).toBe(href);
+    window.history.back();
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
+    expect(window.location.href).toBe(href);
+    expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue(
+      "Chest pain, acute",
+    );
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
   });
 
   it("stands the navigation guard down once the draft is saved", async () => {

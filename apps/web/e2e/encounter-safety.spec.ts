@@ -117,6 +117,51 @@ test("browser Back is confirmed while a note has unsaved edits", async ({
   expect(dialogs).toBe(1);
 });
 
+test("browser Forward that stays on the screen never asks and leaves the guard armed", async ({
+  page,
+}) => {
+  await signInAs(page, "dr.garcia");
+  await openChart(page, "SYN-0001");
+  const chartUrl = page.url();
+  await page.getByRole("link", { name: /Resume consultation/ }).click();
+  await expect(page).toHaveURL(/\/encounters\//);
+  const encounterUrl = page.url();
+
+  const history = page.getByLabel(/History of presenting complaint/);
+  const before = await history.inputValue();
+  const typed = `${before} Unsaved forward edit (synthetic).`;
+  await history.fill(typed);
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+
+  let dialogs = 0;
+  page.on("dialog", (d) => {
+    dialogs += 1;
+    void d.accept();
+  });
+
+  // A same-URL entry ahead of the guard's duplicate (what a guard re-armed
+  // before its predecessor's cleanup settled leaves behind), then Back and
+  // Forward across it: the screen never changes, so nothing is asked.
+  await page.evaluate(() =>
+    window.history.pushState(window.history.state, "", window.location.href),
+  );
+  await page.goBack({ waitUntil: "commit" });
+  await page.goForward({ waitUntil: "commit" });
+  await expect(page).toHaveURL(encounterUrl);
+  await expect(history).toHaveValue(typed);
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+  expect(dialogs).toBe(0);
+
+  // The guard did not stand down: leaving backward still asks, exactly once,
+  // and the accepted Back continues to the patient chart.
+  await page.goBack({ waitUntil: "commit" });
+  await expect(page).toHaveURL(encounterUrl);
+  expect(dialogs).toBe(0);
+  await page.goBack({ waitUntil: "commit" });
+  await expect(page).toHaveURL(chartUrl);
+  expect(dialogs).toBe(1);
+});
+
 test("historical order-only encounters are laboratory contexts, not resumable consultations", async ({
   page,
 }) => {
