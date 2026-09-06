@@ -1070,6 +1070,89 @@ describe("encounter documentation workspace", () => {
     expect(screen.getByLabelText(/^Plan/)).toBeInTheDocument();
   });
 
+  it("closes the workspace after signing even when the refresh fails", async () => {
+    const user = userEvent.setup();
+    let failReads = false;
+    setup(
+      null,
+      {
+        "/api/v1/encounters/e1/note": () =>
+          jsonResponse({ id: "n1", status: "draft", version: 2 }),
+        "/api/v1/encounters/e1/sign": () =>
+          jsonResponse({
+            id: "n1",
+            status: "signed",
+            encounter_status: "completed",
+          }),
+      },
+      () =>
+        failReads
+          ? apiError(503, "unavailable", "backend unavailable")
+          : jsonResponse(workspace()),
+    );
+    const plan = await screen.findByLabelText(/^Plan/);
+    await user.type(plan, "Rest and fluids");
+    failReads = true;
+    await user.click(screen.getByRole("button", { name: "Sign and complete" }));
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    // The signed record is shown read-only with the confirmed text; nothing
+    // can be edited, saved, signed or cancelled against the closed encounter.
+    expect(await screen.findByText("Clinical summary")).toBeInTheDocument();
+    expect(screen.getByText("Signed and completed")).toBeInTheDocument();
+    expect(screen.getByText("Rest and fluids")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Plan/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Save draft" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Sign and complete" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Cancel consultation" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Record vital signs" }),
+    ).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/could not be refreshed/),
+    ).toBeInTheDocument();
+  });
+
+  it("closes the workspace after cancellation even when the refresh fails", async () => {
+    const user = userEvent.setup();
+    let failReads = false;
+    setup(
+      null,
+      {
+        "/api/v1/encounters/e1/cancel": () =>
+          jsonResponse({ id: "e1", status: "cancelled" }),
+      },
+      () =>
+        failReads
+          ? apiError(503, "unavailable", "backend unavailable")
+          : jsonResponse(workspace()),
+    );
+    await screen.findByLabelText(/^Plan/);
+    failReads = true;
+    await user.click(
+      screen.getByRole("button", { name: "Cancel consultation" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Plan/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Save draft" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Record vital signs" }),
+    ).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/could not be refreshed/),
+    ).toBeInTheDocument();
+  });
+
   it("shows an unauthorized state for out-of-scope encounters", async () => {
     vi.stubGlobal(
       "fetch",

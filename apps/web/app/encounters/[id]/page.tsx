@@ -1169,6 +1169,61 @@ function EncounterWorkspace({ id }: { id: string }) {
     if (saved) load();
   }, [beginMutation, load, submitDraft]);
 
+  // A confirmed lifecycle transition closes the workspace locally before the
+  // server state is re-read, so a failed refresh can never leave mutation
+  // controls enabled against a completed or cancelled encounter.
+  const closeLocally = useCallback(
+    (status: "completed" | "cancelled", signedNoteId?: string) => {
+      const signed = local.current;
+      setWs((prev) => {
+        if (!prev) return prev;
+        let note = prev.note;
+        if (status === "completed") {
+          const base: Note = prev.note ?? {
+            id: signedNoteId ?? "",
+            status: "signed",
+            version: signed.version ?? 0,
+            reason_for_encounter: null,
+            history_present_illness: null,
+            medical_history: null,
+            review_of_systems: null,
+            physical_exam: null,
+            assessment: null,
+            plan: null,
+            follow_up: null,
+            author: prev.encounter.practitioner,
+            updated_at: prev.encounter.started_at,
+            signed_at: null,
+            signed_by: null,
+          };
+          note = {
+            ...base,
+            ...signed.sections,
+            status: "signed",
+            version: signed.version ?? base.version,
+          };
+        }
+        const ai_draft =
+          prev.ai_draft?.status === "awaiting_review"
+            ? { ...prev.ai_draft, stale: true }
+            : prev.ai_draft;
+        return {
+          ...prev,
+          encounter: { ...prev.encounter, status },
+          note,
+          ai_draft,
+          capabilities: {
+            can_document: false,
+            can_sign: false,
+            can_add_addendum: false,
+            can_order_lab: false,
+          },
+        };
+      });
+    },
+    [],
+  );
+
   const sign = useCallback(async () => {
     if (mutationRef.current !== "idle") return;
     setConfirmingSign(false);
@@ -1192,11 +1247,12 @@ function EncounterWorkspace({ id }: { id: string }) {
         setSaveError(t(lang, "signAbortedNoteChanged"));
         return;
       }
-      await apiFetch(`/api/v1/encounters/${id}/sign`, {
-        method: "POST",
-        body: JSON.stringify({ version }),
-      });
+      const signedNote = await apiFetch<{ id: string }>(
+        `/api/v1/encounters/${id}/sign`,
+        { method: "POST", body: JSON.stringify({ version }) },
+      );
       setSaveMessage(t(lang, "noteSigned"));
+      closeLocally("completed", signedNote.id);
       hydratedNote.current = false;
       load();
     } catch (err) {
@@ -1221,7 +1277,7 @@ function EncounterWorkspace({ id }: { id: string }) {
     } finally {
       beginMutation("idle");
     }
-  }, [beginMutation, id, lang, load, submitDraft]);
+  }, [beginMutation, closeLocally, id, lang, load, submitDraft]);
 
   const cancelEncounter = useCallback(async () => {
     if (mutationRef.current !== "idle") return;
@@ -1238,6 +1294,7 @@ function EncounterWorkspace({ id }: { id: string }) {
         savedRevision: local.current.revision,
       };
       setSavedRevision(local.current.revision);
+      closeLocally("cancelled");
       hydratedNote.current = false;
       load();
     } catch (err) {
@@ -1245,7 +1302,7 @@ function EncounterWorkspace({ id }: { id: string }) {
     } finally {
       beginMutation("idle");
     }
-  }, [beginMutation, id, lang, load]);
+  }, [beginMutation, closeLocally, id, lang, load]);
 
   // Acceptance is one server transaction: the current draft is submitted
   // together with the artifact, the server appends the summary to the
