@@ -884,6 +884,108 @@ async fn ai_acceptance_is_atomic_with_the_note() {
     assert_eq!(ws["note"]["version"], json!(1));
 }
 
+/// Accepting a summary appends it below the clinician's assessment exactly as
+/// stored: no character of the clinician-authored text (including deliberate
+/// indentation or trailing line breaks) is rewritten by the assistant.
+#[tokio::test]
+async fn ai_acceptance_preserves_clinician_assessment_verbatim() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+    let existing = "  1. Viral URTI\n  2. Dehydration, mild\n\n";
+    let (st, saved) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Cough", "assessment": existing })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{saved}");
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ws}");
+    assert_eq!(ws["note"]["assessment"], json!(existing));
+    let (st, draft) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/ai-draft"),
+        "dev-dr.garcia",
+        Some(json!({ "language": "en" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    let summary = draft["output"]["summary"].as_str().unwrap();
+
+    let (st, accepted) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/ai-draft/accept"),
+        "dev-dr.garcia",
+        Some(json!({
+            "artifact_id": draft["id"],
+            "version": 1,
+            "reason_for_encounter": "Cough",
+            "assessment": existing,
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{accepted}");
+    let combined = accepted["note"]["assessment"].as_str().unwrap();
+    assert_eq!(combined, format!("{existing}\n\n{summary}"));
+    assert!(combined.starts_with(existing), "{combined:?}");
+
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT assessment FROM encounter_notes WHERE encounter_id = $1::uuid")
+            .bind(&enc)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.as_deref(), Some(combined));
+
+    // A whitespace-only assessment is treated as empty: the summary stands
+    // alone rather than being glued to blank lines.
+    let (_, enc2) = start_encounter(&state).await;
+    let (st, saved) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc2}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Cough", "assessment": "  \n" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{saved}");
+    let (st, draft) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc2}/ai-draft"),
+        "dev-dr.garcia",
+        Some(json!({ "language": "en" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    let (st, accepted) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc2}/ai-draft/accept"),
+        "dev-dr.garcia",
+        Some(json!({
+            "artifact_id": draft["id"],
+            "version": 1,
+            "reason_for_encounter": "Cough",
+            "assessment": "  \n",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["note"]["assessment"], draft["output"]["summary"]);
+}
+
 /// Saving a draft whose sections all equal the stored note changes nothing:
 /// the version stays put, a current dMind draft stays reviewable and no save
 /// event is recorded — so a duplicate or clean-editor save cannot invalidate
@@ -1208,6 +1310,111 @@ async fn documentation_writes_racing_cancellation_conflict() {
     .await;
     assert_eq!(st, StatusCode::CONFLICT, "{err}");
     assert_eq!(err["error"]["code"], json!("encounter_not_active"));
+}
+
+/// Every field of a workspace payload must describe the same instant: the
+/// serialized status and the capability hints derived from it may never
+/// disagree, even while sign/cancel transitions commit under concurrent reads.
+fn assert_workspace_consistent(ws: &Value) {
+    let status = ws["encounter"]["status"].as_str().unwrap();
+    let caps = &ws["capabilities"];
+    let active = status == "in_progress";
+    assert_eq!(caps["can_document"], json!(active), "{ws}");
+    assert_eq!(caps["can_order_lab"], json!(active), "{ws}");
+    let note_signed = ws["note"]["status"] == json!("signed");
+    assert_eq!(caps["can_sign"], json!(active && !note_signed), "{ws}");
+    assert_eq!(caps["can_add_addendum"], json!(note_signed), "{ws}");
+    if status == "completed" {
+        assert!(note_signed, "{ws}");
+        assert!(!ws["encounter"]["completed_at"].is_null(), "{ws}");
+    }
+    if status == "cancelled" {
+        assert!(!note_signed, "{ws}");
+    }
+    if ws["ai_draft"]["status"] == json!("awaiting_review") {
+        assert!(
+            active,
+            "an awaiting draft can only exist on an active encounter: {ws}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn workspace_reads_are_consistent_under_concurrent_lifecycle_transitions() {
+    let state = test_state().await;
+
+    for transition in ["sign", "cancel"] {
+        let (_, enc) = start_encounter(&state).await;
+        let (st, note) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/note"),
+            "dev-dr.garcia",
+            Some(json!({ "reason_for_encounter": "Cough", "assessment": "Viral URTI" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{note}");
+        let (st, draft) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/ai-draft"),
+            "dev-dr.garcia",
+            Some(json!({ "language": "en" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{draft}");
+
+        let ws_path = format!("/api/v1/encounters/{enc}");
+        let readers: Vec<_> = (0..24)
+            .map(|_| {
+                let st = state.clone();
+                let path = ws_path.clone();
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    for _ in 0..8 {
+                        let (status, ws) = call(&st, "GET", &path, "dev-dr.garcia", None).await;
+                        assert_eq!(status, StatusCode::OK, "{ws}");
+                        assert_workspace_consistent(&ws);
+                        seen.push(ws["encounter"]["status"].as_str().unwrap().to_string());
+                    }
+                    seen
+                })
+            })
+            .collect();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let body = (transition == "sign").then(|| json!({ "version": 1 }));
+        let (st, res) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/encounters/{enc}/{transition}"),
+            "dev-dr.garcia",
+            body,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{res}");
+
+        let mut statuses = std::collections::BTreeSet::new();
+        for reader in readers {
+            statuses.extend(reader.await.unwrap());
+        }
+        let closed = if transition == "sign" {
+            "completed"
+        } else {
+            "cancelled"
+        };
+        assert!(
+            statuses.iter().all(|s| s == "in_progress" || s == closed),
+            "{statuses:?}"
+        );
+
+        // After the transition every read is closed and non-editable.
+        let (st, ws) = call(&state, "GET", &ws_path, "dev-dr.garcia", None).await;
+        assert_eq!(st, StatusCode::OK, "{ws}");
+        assert_eq!(ws["encounter"]["status"], json!(closed));
+        assert_workspace_consistent(&ws);
+        assert_eq!(ws["ai_draft"]["status"], json!("superseded"), "{ws}");
+    }
 }
 
 #[tokio::test]

@@ -31,23 +31,49 @@ struct EncounterCtx {
     encounter_type: String,
 }
 
+impl EncounterCtx {
+    fn from_row(row: &sqlx::postgres::PgRow) -> Self {
+        Self {
+            tenant_id: row.get("tenant_id"),
+            patient_id: row.get("patient_id"),
+            facility_id: row.get("facility_id"),
+            practitioner_id: row.get("practitioner_id"),
+            status: row.get("status"),
+            encounter_type: row.get("encounter_type"),
+        }
+    }
+}
+
+const ENCOUNTER_CTX_SQL: &str =
+    "SELECT tenant_id, patient_id, facility_id, practitioner_id, status, encounter_type
+     FROM encounters WHERE id = $1";
+
 async fn load_encounter(state: &AppState, id: Uuid) -> Result<EncounterCtx, ApiError> {
-    let row = sqlx::query(
-        "SELECT tenant_id, patient_id, facility_id, practitioner_id, status, encounter_type
-         FROM encounters WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(ApiError::not_found)?;
-    Ok(EncounterCtx {
-        tenant_id: row.get("tenant_id"),
-        patient_id: row.get("patient_id"),
-        facility_id: row.get("facility_id"),
-        practitioner_id: row.get("practitioner_id"),
-        status: row.get("status"),
-        encounter_type: row.get("encounter_type"),
-    })
+    let row = sqlx::query(ENCOUNTER_CTX_SQL)
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok(EncounterCtx::from_row(&row))
+}
+
+/// Begin a read-only `REPEATABLE READ` transaction so every query of a
+/// multi-statement read sees the same committed snapshot, and return the
+/// encounter as of that snapshot.
+async fn snapshot_encounter(
+    state: &AppState,
+    id: Uuid,
+) -> Result<(sqlx::Transaction<'static, sqlx::Postgres>, EncounterCtx), ApiError> {
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let row = sqlx::query(ENCOUNTER_CTX_SQL)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok((tx, EncounterCtx::from_row(&row)))
 }
 
 fn resource_ctx(enc: &EncounterCtx) -> ResourceCtx {
@@ -65,22 +91,12 @@ async fn lock_encounter(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
 ) -> Result<EncounterCtx, ApiError> {
-    let row = sqlx::query(
-        "SELECT tenant_id, patient_id, facility_id, practitioner_id, status, encounter_type
-         FROM encounters WHERE id = $1 FOR UPDATE",
-    )
-    .bind(id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(ApiError::not_found)?;
-    Ok(EncounterCtx {
-        tenant_id: row.get("tenant_id"),
-        patient_id: row.get("patient_id"),
-        facility_id: row.get("facility_id"),
-        practitioner_id: row.get("practitioner_id"),
-        status: row.get("status"),
-        encounter_type: row.get("encounter_type"),
-    })
+    let row = sqlx::query(&format!("{ENCOUNTER_CTX_SQL} FOR UPDATE"))
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok(EncounterCtx::from_row(&row))
 }
 
 /// Documentation writes attach to the practitioner's own active consultation.
@@ -167,8 +183,13 @@ pub async fn workspace(
     .record_on_pool(&state, &ctx)
     .await?;
 
+    // Status, note, drafts and the capability hints derived from them must
+    // describe one instant: a sign or cancellation committing between two
+    // reads would otherwise report a closed encounter with editing enabled.
+    let (mut tx, enc) = snapshot_encounter(&state, id).await?;
+
     let row = sqlx::query(
-        "SELECT e.status, e.encounter_type, e.started_at, e.completed_at,
+        "SELECT e.started_at, e.completed_at,
                 u.display_name AS practitioner, f.name AS facility_name,
                 p.family_name, p.given_name, p.birth_date, p.sex, p.identifier
          FROM encounters e
@@ -178,7 +199,7 @@ pub async fn workspace(
          WHERE e.id = $1",
     )
     .bind(id)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await?;
 
     let note = sqlx::query(
@@ -193,7 +214,7 @@ pub async fn workspace(
     )
     .bind(enc.tenant_id)
     .bind(id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *tx)
     .await?;
     let (note_json, note_id) = match &note {
         Some(n) => {
@@ -230,7 +251,7 @@ pub async fn workspace(
         )
         .bind(enc.tenant_id)
         .bind(nid)
-        .fetch_all(&state.pool)
+        .fetch_all(&mut *tx)
         .await?
         .iter()
         .map(|r| {
@@ -266,7 +287,7 @@ pub async fn workspace(
     )
     .bind(enc.tenant_id)
     .bind(id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?
     .iter()
     .map(&vitals_row)
@@ -279,7 +300,7 @@ pub async fn workspace(
     .bind(enc.tenant_id)
     .bind(enc.patient_id)
     .bind(id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?
     .iter()
     .map(&vitals_row)
@@ -292,7 +313,7 @@ pub async fn workspace(
     )
     .bind(enc.tenant_id)
     .bind(enc.patient_id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?
     .iter()
     .map(|r| {
@@ -313,7 +334,7 @@ pub async fn workspace(
     )
     .bind(enc.tenant_id)
     .bind(enc.patient_id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?
     .iter()
     .map(|r| {
@@ -330,7 +351,7 @@ pub async fn workspace(
     )
     .bind(enc.tenant_id)
     .bind(enc.patient_id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?
     .iter()
     .map(|r| {
@@ -348,7 +369,7 @@ pub async fn workspace(
     )
     .bind(enc.tenant_id)
     .bind(enc.patient_id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?
     .iter()
     .map(|r| {
@@ -366,7 +387,7 @@ pub async fn workspace(
     )
     .bind(enc.tenant_id)
     .bind(id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?
     .iter()
     .map(|r| {
@@ -394,7 +415,7 @@ pub async fn workspace(
     )
     .bind(enc.tenant_id)
     .bind(id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *tx)
     .await?
     .map(|r| {
         let note_version: Option<i64> = r.get("note_version");
@@ -433,11 +454,13 @@ pub async fn workspace(
         "can_order_lab": own && active && covers(actions::SERVICE_REQUEST_CREATE),
     });
 
+    tx.commit().await?;
+
     Ok(Json(json!({
         "encounter": {
             "id": id,
-            "status": row.get::<String,_>("status"),
-            "encounter_type": row.get::<String,_>("encounter_type"),
+            "status": enc.status,
+            "encounter_type": enc.encounter_type,
             "started_at": row.get::<chrono::DateTime<chrono::Utc>,_>("started_at"),
             "completed_at": row.get::<Option<chrono::DateTime<chrono::Utc>>,_>("completed_at"),
             "practitioner": row.get::<String,_>("practitioner"),
@@ -1602,8 +1625,8 @@ pub async fn accept_ai_draft(
         .ok_or_else(|| ApiError::internal("artifact has no summary text"))?
         .to_owned();
 
-    let assessment = match body.note.assessment.as_deref().map(str::trim) {
-        Some(existing) if !existing.is_empty() => format!("{existing}\n\n{summary}"),
+    let assessment = match body.note.assessment.as_deref() {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{summary}"),
         _ => summary,
     };
     if exceeds_chars(&assessment, NOTE_SECTION_MAX_CHARS) {
