@@ -1108,6 +1108,117 @@ describe("encounter documentation workspace", () => {
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
   });
 
+  it("keeps an awaiting dMind draft reviewable when a save changes nothing", async () => {
+    const user = userEvent.setup();
+    const saves: Record<string, unknown>[] = [];
+    setup(workspace({ note: { ...DRAFT_NOTE }, ai_draft: AWAITING_DRAFT }), {
+      "/api/v1/encounters/e1/note": (body) => {
+        saves.push(body as Record<string, unknown>);
+        // Identical sections: the server returns the current version.
+        return jsonResponse({ id: "n1", status: "draft", version: 1 });
+      },
+    });
+    expect(
+      await screen.findByRole("button", {
+        name: "Accept and copy into assessment",
+      }),
+    ).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].version).toBe(1);
+
+    // Nothing the draft summarised changed, so it is still reviewable.
+    expect(
+      screen.getByRole("button", { name: "Accept and copy into assessment" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByText(/The note changed after this draft was generated/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("saves the note before generating a dMind draft so it summarises the visible text", async () => {
+    const user = userEvent.setup();
+    const posts: string[] = [];
+    let savedPlan: unknown = null;
+    setup(workspace({ note: { ...DRAFT_NOTE } }), {
+      "/api/v1/encounters/e1/note": (body) => {
+        posts.push("note");
+        savedPlan = (body as { plan?: unknown }).plan;
+        return jsonResponse({ id: "n1", status: "draft", version: 2 });
+      },
+      "/api/v1/encounters/e1/ai-draft": () => {
+        posts.push("ai-draft");
+        return jsonResponse({ ...AWAITING_DRAFT, note_version: 2 });
+      },
+    });
+    const plan = await screen.findByLabelText(/^Plan/);
+    await user.type(plan, "Rest");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Generate draft summary" }),
+    );
+    await waitFor(() => expect(posts).toEqual(["note", "ai-draft"]));
+    expect(savedPlan).toBe("Rest");
+    await waitFor(() =>
+      expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("does not generate a dMind draft when the note cannot be saved first", async () => {
+    const user = userEvent.setup();
+    const posts: string[] = [];
+    setup(workspace({ note: { ...DRAFT_NOTE } }), {
+      "/api/v1/encounters/e1/note": () => {
+        posts.push("note");
+        return apiError(409, "version_conflict", "changed elsewhere");
+      },
+      "/api/v1/encounters/e1/ai-draft": () => {
+        posts.push("ai-draft");
+        return jsonResponse(AWAITING_DRAFT);
+      },
+    });
+    const plan = await screen.findByLabelText(/^Plan/);
+    await user.type(plan, "Rest");
+    await user.click(
+      screen.getByRole("button", { name: "Generate draft summary" }),
+    );
+    expect(
+      await screen.findByText(/The note must be saved before a draft/),
+    ).toBeInTheDocument();
+    expect(posts).toEqual(["note"]);
+    expect(plan).toHaveValue("Rest");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+  });
+
+  it("withholds dMind acceptance while the note has edits the draft never summarised", async () => {
+    const user = userEvent.setup();
+    const accepts: unknown[] = [];
+    setup(workspace({ note: { ...DRAFT_NOTE }, ai_draft: AWAITING_DRAFT }), {
+      "/api/v1/encounters/e1/ai-draft/accept": (body) => {
+        accepts.push(body);
+        return jsonResponse({ note: { version: 2, assessment: "x" } });
+      },
+    });
+    expect(
+      await screen.findByRole("button", {
+        name: "Accept and copy into assessment",
+      }),
+    ).toBeEnabled();
+
+    await user.type(screen.getByLabelText(/^Plan/), "Rest");
+    expect(
+      screen.queryByRole("button", { name: "Accept and copy into assessment" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/unsaved edits this draft does not cover/),
+    ).toBeInTheDocument();
+    expect(accepts).toHaveLength(0);
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+  });
+
   it("ignores a post-save workspace read that resolves after a later save", async () => {
     const user = userEvent.setup();
     const saves: Record<string, unknown>[] = [];

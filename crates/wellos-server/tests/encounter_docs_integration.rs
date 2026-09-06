@@ -729,23 +729,6 @@ async fn ai_acceptance_is_atomic_with_the_note() {
     assert_eq!(st, StatusCode::CONFLICT, "{err}");
     assert_eq!(err["error"]["code"], json!("version_conflict"));
 
-    // Assessment that would exceed the section limit: same outcome.
-    let (st, err) = call(
-        &state,
-        "POST",
-        &accept_path,
-        "dev-dr.garcia",
-        Some(json!({
-            "artifact_id": artifact,
-            "version": 1,
-            "reason_for_encounter": "Cough",
-            "assessment": "a".repeat(20_000 - summary.chars().count() + 1),
-        })),
-    )
-    .await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "{err}");
-    assert_eq!(err["error"]["code"], json!("assessment_limit_exceeded"));
-
     let (st, ws) = call(
         &state,
         "GET",
@@ -759,8 +742,10 @@ async fn ai_acceptance_is_atomic_with_the_note() {
     assert_eq!(ws["note"]["version"], json!(1));
     assert_eq!(ws["note"]["assessment"], Value::Null);
 
-    // Acceptance carries the clinician's unsaved edits along with the summary.
-    let (st, accepted) = call(
+    // Unsaved edits the artifact never summarised (a dirty editor at the
+    // right version) are refused: the approved summary may only be recorded
+    // beside the exact text it was generated from.
+    let (st, err) = call(
         &state,
         "POST",
         &accept_path,
@@ -769,6 +754,37 @@ async fn ai_acceptance_is_atomic_with_the_note() {
             "artifact_id": artifact,
             "version": 1,
             "reason_for_encounter": "Cough for two weeks",
+            "plan": "Rest",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("unsummarized_edits"));
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(ws["ai_draft"]["status"], json!("awaiting_review"), "{ws}");
+    assert_eq!(ws["note"]["version"], json!(1));
+    assert_eq!(ws["note"]["reason_for_encounter"], json!("Cough"));
+
+    // The same draft, submitted exactly as stored (absent and empty sections
+    // are equivalent), is accepted.
+    let (st, accepted) = call(
+        &state,
+        "POST",
+        &accept_path,
+        "dev-dr.garcia",
+        Some(json!({
+            "artifact_id": artifact,
+            "version": 1,
+            "reason_for_encounter": "Cough",
+            "assessment": "",
             "plan": "Rest",
         })),
     )
@@ -786,10 +802,7 @@ async fn ai_acceptance_is_atomic_with_the_note() {
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(ws["ai_draft"]["status"], json!("approved"), "{ws}");
-    assert_eq!(
-        ws["note"]["reason_for_encounter"],
-        json!("Cough for two weeks")
-    );
+    assert_eq!(ws["note"]["reason_for_encounter"], json!("Cough"));
     assert_eq!(ws["note"]["assessment"], json!(summary));
 
     // Re-acceptance is refused; the note is untouched.
@@ -820,6 +833,170 @@ async fn ai_acceptance_is_atomic_with_the_note() {
     for (text, assessment) in rows {
         assert!(assessment.unwrap_or_default().contains(&text));
     }
+
+    // An assessment the summary would push past the section limit: refused
+    // with nothing recorded.
+    let (_, enc2) = start_encounter(&state).await;
+    let (st, saved) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc2}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Cough", "assessment": "a".repeat(19_990) })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{saved}");
+    let (st, draft) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc2}/ai-draft"),
+        "dev-dr.garcia",
+        Some(json!({ "language": "en" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    assert!(draft["output"]["summary"].as_str().unwrap().chars().count() > 10);
+    let (st, err) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc2}/ai-draft/accept"),
+        "dev-dr.garcia",
+        Some(json!({
+            "artifact_id": draft["id"],
+            "version": 1,
+            "reason_for_encounter": "Cough",
+            "assessment": "a".repeat(19_990),
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], json!("assessment_limit_exceeded"));
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc2}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(ws["ai_draft"]["status"], json!("awaiting_review"), "{ws}");
+    assert_eq!(ws["note"]["version"], json!(1));
+}
+
+/// Saving a draft whose sections all equal the stored note changes nothing:
+/// the version stays put, a current dMind draft stays reviewable and no save
+/// event is recorded — so a duplicate or clean-editor save cannot invalidate
+/// the summary the clinician is about to review.
+#[tokio::test]
+async fn unchanged_save_is_a_no_op_and_keeps_ai_draft_current() {
+    let state = test_state().await;
+    let (_, enc) = start_encounter(&state).await;
+    let note_path = format!("/api/v1/encounters/{enc}/note");
+    let (st, first) = call(
+        &state,
+        "POST",
+        &note_path,
+        "dev-dr.garcia",
+        Some(json!({ "reason_for_encounter": "Fever", "assessment": "Viral illness" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{first}");
+    assert_eq!(first["version"], json!(1));
+    let (st, draft) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/ai-draft"),
+        "dev-dr.garcia",
+        Some(json!({ "language": "en" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    let artifact = draft["id"].as_str().unwrap().to_string();
+    let saved_events = |state: &AppState| {
+        let pool = state.pool.clone();
+        let enc = enc.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM outbox_events WHERE event_type = 'encounter.note.saved'
+                   AND resource_refs->>'encounter_id' = $1",
+            )
+            .bind(enc)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let baseline = saved_events(&state).await;
+
+    // Identical content (with the absent section sent as empty text) twice.
+    for _ in 0..2 {
+        let (st, again) = call(
+            &state,
+            "POST",
+            &note_path,
+            "dev-dr.garcia",
+            Some(json!({
+                "version": 1,
+                "reason_for_encounter": "Fever",
+                "assessment": "Viral illness",
+                "plan": "",
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{again}");
+        assert_eq!(again["id"], first["id"]);
+        assert_eq!(again["version"], json!(1));
+    }
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(ws["note"]["version"], json!(1), "{ws}");
+    assert_eq!(ws["ai_draft"]["id"], json!(artifact));
+    assert_eq!(ws["ai_draft"]["status"], json!("awaiting_review"));
+    assert_eq!(ws["ai_draft"]["stale"], json!(false));
+    assert_eq!(saved_events(&state).await, baseline);
+
+    // The draft generated before the no-op saves is still acceptable.
+    let (st, accepted) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/ai-draft/accept"),
+        "dev-dr.garcia",
+        Some(json!({
+            "artifact_id": artifact,
+            "version": 1,
+            "reason_for_encounter": "Fever",
+            "assessment": "Viral illness",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["note"]["version"], json!(2));
+
+    // A genuine change still advances the version and is recorded.
+    let (st, changed) = call(
+        &state,
+        "POST",
+        &note_path,
+        "dev-dr.garcia",
+        Some(json!({
+            "version": 2,
+            "reason_for_encounter": "Fever",
+            "assessment": accepted["note"]["assessment"],
+            "plan": "Fluids",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{changed}");
+    assert_eq!(changed["version"], json!(3));
+    assert_eq!(saved_events(&state).await, baseline + 2);
 }
 
 /// Signing or cancelling ends the encounter; a summary still awaiting review

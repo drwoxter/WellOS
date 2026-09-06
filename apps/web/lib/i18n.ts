@@ -274,6 +274,10 @@ const dict = {
     openOrders: "Open orders",
     aiDraftStale:
       "The note changed after this draft was generated. Generate a new draft before reviewing.",
+    aiDraftUnsavedEdits:
+      "Your note has unsaved edits this draft does not cover. Save the note and generate a new draft before accepting.",
+    aiGenerateNeedsSave:
+      "The note must be saved before a draft can be generated. Resolve the save error and try again.",
     noteVersion: "Note version",
     draftBadge: "Draft",
     signedBadge: "Signed",
@@ -630,6 +634,10 @@ const dict = {
     openOrders: "Abrir órdenes",
     aiDraftStale:
       "La nota cambió después de generar este borrador. Genere un borrador nuevo antes de revisarlo.",
+    aiDraftUnsavedEdits:
+      "Su nota tiene cambios sin guardar que este borrador no incluye. Guarde la nota y genere un borrador nuevo antes de aceptarlo.",
+    aiGenerateNeedsSave:
+      "La nota debe guardarse antes de generar un borrador. Resuelva el error de guardado e inténtelo de nuevo.",
     noteVersion: "Versión de la nota",
     draftBadge: "Borrador",
     signedBadge: "Firmada",

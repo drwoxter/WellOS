@@ -35,6 +35,28 @@ function withMark(state: unknown, mark: GuardMark): Record<string, unknown> {
 // them as user navigation.
 const cleanupPops = new WeakSet<Event>();
 
+type ActiveGuard = {
+  confirm: () => boolean;
+  leave: () => void;
+  stay: () => void;
+};
+const activeGuards = new Set<ActiveGuard>();
+
+/**
+ * Asks the active guards before a side effect that ends the current screen
+ * without going through the router first (sign-out revokes the session before
+ * navigating). Returns `null` when declined — nothing has happened and the
+ * screen is untouched. When accepted, the guards stand down for the exit that
+ * follows and a `stay` callback is returned to re-arm them if that exit is
+ * abandoned (for example, the sign-out request failed).
+ */
+export function confirmLeaveUnsaved(): (() => void) | null {
+  const guards = [...activeGuards];
+  if (!guards.every((g) => g.confirm())) return null;
+  guards.forEach((g) => g.leave());
+  return () => guards.forEach((g) => g.stay());
+}
+
 function dropTrapEntry() {
   const unsubscribe = onHistoryTraversal((e) => {
     cleanupPops.add(e);
@@ -61,6 +83,8 @@ function dropTrapEntry() {
  *   travels back by the exact distance recorded by `history-index`, accepting
  *   lets the router proceed.
  * - Reload, tab close and other full unloads: `beforeunload`.
+ * - Exits that act before navigating (sign-out): callers ask through
+ *   `confirmLeaveUnsaved()` first.
  *
  * Accepting a navigation stands the guard down for that navigation only, so
  * a single confirmation is ever shown. Deactivating (saved / signed /
@@ -89,6 +113,15 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
     let afterPop: ((e: PopStateEvent) => void) | null = null;
 
     const confirmLeave = () => leaving || window.confirm(messageRef.current);
+    const registration: ActiveGuard = {
+      confirm: confirmLeave,
+      leave: () => {
+        leaving = true;
+      },
+      stay: () => {
+        leaving = false;
+      },
+    };
 
     const armTrap = () => {
       window.history.pushState(
@@ -168,9 +201,13 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
         const go = () => original[method].call(router, href, options);
         if (trapped && pos === 1) {
           // Drop the duplicate entry first so the destination does not sit
-          // on top of two entries for this screen.
+          // on top of two entries for this screen. The router must not see
+          // that popstate: its restore of this URL would outrun the push.
           trapped = false;
-          afterPop = go;
+          afterPop = (e) => {
+            e.stopImmediatePropagation();
+            go();
+          };
           window.history.back();
         } else {
           go();
@@ -195,12 +232,24 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
     window.addEventListener("beforeunload", onBeforeUnload);
     router.push = guarded("push");
     router.replace = guarded("replace");
+    activeGuards.add(registration);
 
     return () => {
+      activeGuards.delete(registration);
       stopTraversals();
       window.removeEventListener("beforeunload", onBeforeUnload);
       router.push = original.push;
       router.replace = original.replace;
+      if (afterPop) {
+        // An accepted navigation is still waiting for its trap-drop popstate
+        // (the screen unmounted first, e.g. sign-out ended the session).
+        const pending = afterPop;
+        afterPop = null;
+        const unsubscribe = onHistoryTraversal((e) => {
+          unsubscribe();
+          pending(e);
+        }, true);
+      }
       if (
         trapped &&
         pos === 1 &&

@@ -117,6 +117,96 @@ test("browser Back is confirmed while a note has unsaved edits", async ({
   expect(dialogs).toBe(1);
 });
 
+test("an internal link is confirmed while a note has unsaved edits and proceeds when accepted", async ({
+  page,
+}) => {
+  await signInAs(page, "dr.garcia");
+  await openChart(page, "SYN-0001");
+  await page.getByRole("link", { name: /Resume consultation/ }).click();
+  await expect(page).toHaveURL(/\/encounters\//);
+  const encounterUrl = page.url();
+
+  const history = page.getByLabel(/History of presenting complaint/);
+  const typed = `${await history.inputValue()} Unsaved before a link (synthetic).`;
+  await history.fill(typed);
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+  const patientsLink = page.getByRole("link", { name: "Patients" }).first();
+
+  // Decline: same URL, same text, still dirty.
+  page.once("dialog", (d) => void d.dismiss());
+  await patientsLink.click();
+  await expect(page).toHaveURL(encounterUrl);
+  await expect(history).toHaveValue(typed);
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+
+  // Accept: the link's destination is reached, with one dialog.
+  let dialogs = 0;
+  page.on("dialog", (d) => {
+    dialogs += 1;
+    void d.accept();
+  });
+  await patientsLink.click();
+  await expect(page).toHaveURL(/\/patients$/);
+  await expect(page.getByLabel("Search patients")).toBeVisible();
+  expect(dialogs).toBe(1);
+  // Back returns to the encounter directly: no duplicate entry was left.
+  await page.goBack({ waitUntil: "commit" });
+  await expect(page).toHaveURL(encounterUrl);
+});
+
+test("sign-out is confirmed before the session is revoked while a note has unsaved edits", async ({
+  page,
+}) => {
+  await signInAs(page, "dr.garcia");
+  await openChart(page, "SYN-0001");
+  await page.getByRole("link", { name: /Resume consultation/ }).click();
+  await expect(page).toHaveURL(/\/encounters\//);
+  const encounterUrl = page.url();
+
+  const history = page.getByLabel(/History of presenting complaint/);
+  const typed = `${await history.inputValue()} Unsaved before sign-out (synthetic).`;
+  await history.fill(typed);
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+
+  let revocations = 0;
+  page.on("request", (req) => {
+    if (req.method() === "DELETE" && req.url().endsWith("/api/session"))
+      revocations += 1;
+  });
+  const signOut = page
+    .locator(".topbar")
+    .getByRole("button", { name: "Sign out" });
+
+  // Decline: still signed in, on the same screen, with the same text.
+  const messages: string[] = [];
+  page.once("dialog", (d) => {
+    messages.push(d.message());
+    void d.dismiss();
+  });
+  await signOut.click();
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toMatch(/unsaved documentation/i);
+  await expect(page).toHaveURL(encounterUrl);
+  await expect(history).toHaveValue(typed);
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+  expect(revocations).toBe(0);
+  expect(await (await page.request.get("/api/session")).json()).toEqual({
+    authenticated: true,
+  });
+
+  // Accept: one dialog, then signed out.
+  let dialogs = 0;
+  page.on("dialog", (d) => {
+    dialogs += 1;
+    void d.accept();
+  });
+  await signOut.click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: /Sign out/ })).toHaveCount(0);
+  expect(revocations).toBe(1);
+  expect(dialogs).toBe(1);
+});
+
 test("browser Forward that stays on the screen never asks and leaves the guard armed", async ({
   page,
 }) => {

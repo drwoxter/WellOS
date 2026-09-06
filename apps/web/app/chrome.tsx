@@ -5,11 +5,26 @@ import { usePathname, useRouter } from "next/navigation";
 import { t } from "@/lib/i18n";
 import { useSession } from "@/lib/session";
 import { canReadWorklist, canSearchPatients } from "@/lib/clinical";
+import { confirmLeaveUnsaved } from "@/lib/unsaved-guard";
+
+/** Sign-out confirmed against unsaved documentation before the session is
+ *  revoked; declining leaves session and editor untouched. */
+function useGuardedSignOut() {
+  const { signOut } = useSession();
+  const router = useRouter();
+  return () => {
+    const stay = confirmLeaveUnsaved();
+    if (!stay) return;
+    void signOut().then(
+      () => router.push("/"),
+      () => stay(),
+    );
+  };
+}
 
 export function AppHeader({ subtitle }: { subtitle?: string }) {
-  const { lang, setLang, theme, setTheme, authenticated, signOut } =
-    useSession();
-  const router = useRouter();
+  const { lang, setLang, theme, setTheme, authenticated } = useSession();
+  const signOut = useGuardedSignOut();
   return (
     <header className="app">
       <h1>
@@ -38,12 +53,7 @@ export function AppHeader({ subtitle }: { subtitle?: string }) {
         </select>
       </label>
       {authenticated ? (
-        <button
-          className="primary"
-          onClick={() => {
-            void signOut().then(() => router.push("/"));
-          }}
-        >
+        <button className="primary" onClick={signOut}>
           {t(lang, "signOut")}
         </button>
       ) : null}
@@ -99,9 +109,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     meta,
     metaError,
     reloadMeta,
-    signOut,
   } = useSession();
-  const router = useRouter();
+  const signOut = useGuardedSignOut();
 
   if (authenticated === null) {
     return (
@@ -215,12 +224,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <option value="south">Sur</option>
             </select>
           </label>
-          <button
-            className="secondary"
-            onClick={() => {
-              void signOut().then(() => router.push("/"));
-            }}
-          >
+          <button className="secondary" onClick={signOut}>
             {t(lang, "signOut")}
           </button>
         </div>

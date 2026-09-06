@@ -497,6 +497,21 @@ impl SaveNote {
             &self.follow_up,
         ]
     }
+
+    /// True when every submitted section equals the stored note row (an
+    /// absent section and an empty one are the same documentation). A missing
+    /// row is an empty note.
+    fn matches_stored(&self, stored: Option<&sqlx::postgres::PgRow>) -> bool {
+        NOTE_SECTIONS
+            .iter()
+            .zip(self.sections())
+            .all(|(column, submitted)| {
+                let stored = stored
+                    .and_then(|row| row.get::<Option<String>, _>(*column))
+                    .unwrap_or_default();
+                submitted.as_deref().unwrap_or_default() == stored
+            })
+    }
 }
 
 /// Documented text limits count Unicode characters, not UTF-8 bytes.
@@ -552,7 +567,9 @@ pub async fn save_note(
 
 /// Create or update the draft note inside the caller's transaction (the
 /// encounter row must already be locked), supersede unreviewed dMind drafts
-/// that cited the previous version, and audit the write.
+/// that cited the previous version, and audit the write. A save whose
+/// sections all equal the stored draft is a no-op: the current id/version are
+/// returned and nothing — version, artifacts, audit trail — changes.
 async fn write_draft_note(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     state: &AppState,
@@ -562,7 +579,9 @@ async fn write_draft_note(
     body: &SaveNote,
 ) -> Result<(Uuid, i64), ApiError> {
     let existing = sqlx::query(
-        "SELECT id, status, version FROM encounter_notes
+        "SELECT id, status, version, reason_for_encounter, history_present_illness,
+                medical_history, review_of_systems, physical_exam, assessment, plan, follow_up
+         FROM encounter_notes
          WHERE tenant_id = $1 AND encounter_id = $2 FOR UPDATE",
     )
     .bind(enc.tenant_id)
@@ -618,6 +637,9 @@ async fn write_draft_note(
                     "version_conflict",
                     "the note was updated by someone else; reload before saving",
                 ));
+            }
+            if body.matches_stored(Some(&row)) {
+                return Ok((note_id, current));
             }
             sqlx::query(
                 "UPDATE encounter_notes SET version = version + 1, updated_at = now(),
@@ -1466,16 +1488,17 @@ pub async fn ai_draft(
 #[derive(Deserialize)]
 pub struct AcceptAiDraft {
     pub artifact_id: Uuid,
-    /// The clinician's current draft; the accepted summary is appended to its
-    /// assessment so unsaved edits and the acceptance persist together.
+    /// The clinician's current draft, which must equal the stored note the
+    /// artifact summarised; the accepted summary is appended to its assessment.
     #[serde(flatten)]
     pub note: SaveNote,
 }
 
 /// Acceptance of a dMind encounter summary is one transaction: the artifact
-/// must still await review against the current note version, the summary is
-/// appended (within the section limit) to the assessment of the submitted
-/// draft, the note version advances, and the approval is recorded. Either all
+/// must still await review against the current note version, the submitted
+/// draft must equal the stored text that version summarised, the summary is
+/// appended (within the section limit) to the assessment, the note version
+/// advances, and the approval is recorded. Either all
 /// of it persists or none of it does — an approved artifact whose text is
 /// absent from the note cannot exist. Rejection stays decision-only via the
 /// generic review endpoint.
@@ -1530,17 +1553,44 @@ pub async fn accept_ai_draft(
             format!("cannot approve an artifact in state {}", status.as_str()),
         ));
     }
-    let current_note_version: Option<i64> = sqlx::query_scalar(
-        "SELECT version FROM encounter_notes WHERE tenant_id = $1 AND encounter_id = $2",
+    let stored_note = sqlx::query(
+        "SELECT version, reason_for_encounter, history_present_illness, medical_history,
+                review_of_systems, physical_exam, assessment, plan, follow_up
+         FROM encounter_notes WHERE tenant_id = $1 AND encounter_id = $2",
     )
     .bind(enc.tenant_id)
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
+    let current_note_version: Option<i64> = stored_note.as_ref().map(|n| n.get("version"));
     if artifact.get::<Option<i64>, _>("note_version") != current_note_version {
         return Err(ApiError::conflict(
             "artifact_stale",
             "the draft was generated from an older note version; request a new draft",
+        ));
+    }
+    match (body.note.version, current_note_version) {
+        (None, Some(_)) => {
+            return Err(ApiError::conflict(
+                "version_required",
+                "the note already exists; provide its current version",
+            ));
+        }
+        (expected, current) if expected != current => {
+            return Err(ApiError::conflict(
+                "version_conflict",
+                "the note was updated by someone else; reload before saving",
+            ));
+        }
+        _ => {}
+    }
+    // The artifact summarised the note exactly as stored at that version; the
+    // draft submitted alongside the acceptance must be that same text, or the
+    // approved summary would be recorded beside facts it never saw.
+    if !body.note.matches_stored(stored_note.as_ref()) {
+        return Err(ApiError::conflict(
+            "unsummarized_edits",
+            "the submitted note differs from the text this draft summarised; save the note and request a new draft",
         ));
     }
     let summary = artifact

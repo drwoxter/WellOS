@@ -623,6 +623,8 @@ function AiDocAid({
   draft,
   canDocument,
   locked,
+  dirty,
+  onPersistNote,
   onAccepted,
   onChanged,
 }: {
@@ -632,6 +634,11 @@ function AiDocAid({
   canDocument: boolean;
   /** The parent note is being finalised; no review may start or apply. */
   locked: boolean;
+  /** The note has edits the server — and so any draft — has not seen. */
+  dirty: boolean;
+  /** Saves a dirty note so generation summarises exactly what the clinician
+   *  sees; resolves false when it could not be saved. */
+  onPersistNote: () => Promise<boolean>;
   /** Persists the accepted summary into the draft note atomically with the
    *  approval; resolves false when another mutation is running. */
   onAccepted: (artifactId: string, summary: string) => Promise<boolean>;
@@ -648,12 +655,19 @@ function AiDocAid({
     draft !== null &&
     !draft.review_decision &&
     (draft.stale || draft.status === "superseded");
+  // Unsaved edits are facts the draft never summarised: it cannot be accepted
+  // beside them (the server refuses too); saving retires it.
+  const uncovered = awaiting && dirty;
 
   async function generate() {
     setBusy(true);
     setError(null);
     setMessage(null);
     try {
+      if (!(await onPersistNote())) {
+        setError(t(lang, "aiGenerateNeedsSave"));
+        return;
+      }
       await apiFetch(`/api/v1/encounters/${encounterId}/ai-draft`, {
         method: "POST",
         body: JSON.stringify({ language: lang }),
@@ -667,7 +681,7 @@ function AiDocAid({
   }
 
   async function review(decision: "approved" | "rejected") {
-    if (!draft || locked) return;
+    if (!draft || locked || (decision === "approved" && dirty)) return;
     setBusy(true);
     setError(null);
     setMessage(null);
@@ -697,6 +711,11 @@ function AiDocAid({
         err.code === "artifact_stale"
       ) {
         setError(t(lang, "aiDraftStale"));
+      } else if (
+        err instanceof ApiRequestError &&
+        err.code === "unsummarized_edits"
+      ) {
+        setError(t(lang, "aiDraftUnsavedEdits"));
       } else {
         setError(errMessage(err));
       }
@@ -770,7 +789,11 @@ function AiDocAid({
               ))}
             </ul>
           </details>
-          {canDocument ? (
+          {uncovered ? (
+            <p className="muted" role="status">
+              {t(lang, "aiDraftUnsavedEdits")}
+            </p>
+          ) : canDocument ? (
             <p style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
               <button
                 className="primary"
@@ -1133,12 +1156,15 @@ function EncounterWorkspace({ id }: { id: string }) {
       };
       setSavedRevision(snapshot.revision);
       // The server retires any unreviewed dMind draft whose cited note
-      // version this save just replaced.
-      setWs((prev) =>
-        prev?.ai_draft?.status === "awaiting_review"
-          ? { ...prev, ai_draft: { ...prev.ai_draft, stale: true } }
-          : prev,
-      );
+      // version this save replaced; an unchanged save keeps the version and
+      // the draft.
+      if (res.version !== snapshot.version) {
+        setWs((prev) =>
+          prev?.ai_draft?.status === "awaiting_review"
+            ? { ...prev, ai_draft: { ...prev.ai_draft, stale: true } }
+            : prev,
+        );
+      }
       setSaveMessage(
         local.current.revision === snapshot.revision
           ? t(lang, "draftSaved")
@@ -1168,6 +1194,19 @@ function EncounterWorkspace({ id }: { id: string }) {
     }
     if (saved) load();
   }, [beginMutation, load, submitDraft]);
+
+  // dMind summarises persisted facts only, so a dirty note is saved before a
+  // draft is requested; the draft then covers exactly the visible text.
+  const persistForAi = useCallback(async (): Promise<boolean> => {
+    if (local.current.revision === local.current.savedRevision) return true;
+    if (mutationRef.current !== "idle") return false;
+    beginMutation("saving");
+    try {
+      return (await submitDraft()) !== null;
+    } finally {
+      beginMutation("idle");
+    }
+  }, [beginMutation, submitDraft]);
 
   // A confirmed lifecycle transition closes the workspace locally before the
   // server state is re-read, so a failed refresh can never leave mutation
@@ -1591,6 +1630,8 @@ function EncounterWorkspace({ id }: { id: string }) {
               draft={ws.ai_draft}
               canDocument={ws.capabilities.can_document}
               locked={busy}
+              dirty={dirty}
+              onPersistNote={persistForAi}
               onAccepted={acceptAiDraft}
               onChanged={load}
             />
