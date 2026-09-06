@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef } from "react";
 
+import { onHistoryTraversal, readHistoryIndex } from "@/lib/history-index";
+
 type AppRouter = ReturnType<typeof useRouter>;
 type NavigateMethod = "push" | "replace";
 
@@ -34,11 +36,10 @@ function withMark(state: unknown, mark: GuardMark): Record<string, unknown> {
 const cleanupPops = new WeakSet<Event>();
 
 function dropTrapEntry() {
-  const settle = (e: PopStateEvent) => {
+  const unsubscribe = onHistoryTraversal((e) => {
     cleanupPops.add(e);
-    window.removeEventListener("popstate", settle);
-  };
-  window.addEventListener("popstate", settle);
+    unsubscribe();
+  }, true);
   window.history.back();
 }
 
@@ -54,13 +55,17 @@ function dropTrapEntry() {
  *   (nothing unmounts) and can be confirmed — continuing backward — or
  *   undone. Traversals that stay on this screen (Forward onto a duplicate
  *   entry) never ask and never stand the guard down.
+ * - Multi-entry jumps (history menu): traversals arrive through
+ *   `onHistoryTraversal`, ahead of the App Router, so the question is asked
+ *   while this screen is still mounted; declining swallows the event and
+ *   travels back by the exact distance recorded by `history-index`, accepting
+ *   lets the router proceed.
  * - Reload, tab close and other full unloads: `beforeunload`.
  *
  * Accepting a navigation stands the guard down for that navigation only, so
  * a single confirmation is ever shown. Deactivating (saved / signed /
  * cancelled) or unmounting restores the router methods, removes listeners and
- * drops the duplicate history entry. A multi-entry jump (history menu) is
- * confirmed but cannot be undone once declined.
+ * drops the duplicate history entry.
  */
 export function useUnsavedChangesGuard(active: boolean, message: string) {
   const router = useRouter();
@@ -80,7 +85,8 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
     let trapped = false;
     let pos: 0 | 1 = 0;
     let leaving = false;
-    let afterPop: (() => void) | null = null;
+    let trapIndex: number | null = null;
+    let afterPop: ((e: PopStateEvent) => void) | null = null;
 
     const confirmLeave = () => leaving || window.confirm(messageRef.current);
 
@@ -92,13 +98,14 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
       );
       trapped = true;
       pos = 1;
+      trapIndex = readHistoryIndex(window.history.state);
     };
 
     const onPopState = (e: PopStateEvent) => {
       if (afterPop) {
         const run = afterPop;
         afterPop = null;
-        run();
+        run(e);
         return;
       }
       const mark = readMark(e.state, id);
@@ -130,9 +137,17 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
         // A stale duplicate of this screen; still here, keep guarding.
         return;
       }
-      // Jumped several entries at once: the browser has already moved.
-      trapped = false;
-      leaving = confirmLeave();
+      // Jumped several entries at once. The router has not seen this
+      // popstate yet, so the screen is still mounted while asking.
+      const landed = readHistoryIndex(e.state);
+      if (confirmLeave() || landed === null || trapIndex === null) {
+        trapped = false;
+        leaving = true;
+        return;
+      }
+      e.stopImmediatePropagation();
+      afterPop = (back) => back.stopImmediatePropagation();
+      window.history.go(trapIndex - landed);
     };
 
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -167,6 +182,7 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
       // right after a save, before the previous guard's cleanup settled).
       trapped = true;
       pos = 1;
+      trapIndex = readHistoryIndex(window.history.state);
     } else {
       window.history.replaceState(
         withMark(window.history.state, { id, pos: 0 }),
@@ -175,13 +191,13 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
       );
       armTrap();
     }
-    window.addEventListener("popstate", onPopState);
+    const stopTraversals = onHistoryTraversal(onPopState);
     window.addEventListener("beforeunload", onBeforeUnload);
     router.push = guarded("push");
     router.replace = guarded("replace");
 
     return () => {
-      window.removeEventListener("popstate", onPopState);
+      stopTraversals();
       window.removeEventListener("beforeunload", onBeforeUnload);
       router.push = original.push;
       router.replace = original.replace;

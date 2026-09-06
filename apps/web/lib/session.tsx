@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { installHistoryIndex } from "./history-index";
 import type { Lang } from "./i18n";
 
 export type Theme = "north" | "south";
@@ -75,6 +76,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         if (metaGeneration.current === generation) setMetaError(true);
       });
   }, []);
+
+  useEffect(installHistoryIndex, []);
 
   useEffect(() => {
     if (!authenticated) {

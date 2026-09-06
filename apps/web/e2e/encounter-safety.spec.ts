@@ -162,6 +162,50 @@ test("browser Forward that stays on the screen never asks and leaves the guard a
   expect(dialogs).toBe(1);
 });
 
+test("a declined multi-entry history jump returns to the encounter with the draft intact", async ({
+  page,
+}) => {
+  await signInAs(page, "dr.garcia");
+  await openChart(page, "SYN-0001");
+  await page.getByRole("link", { name: /Resume consultation/ }).click();
+  await expect(page).toHaveURL(/\/encounters\//);
+  const encounterUrl = page.url();
+
+  const history = page.getByLabel(/History of presenting complaint/);
+  const before = await history.inputValue();
+  const typed = `${before} Unsaved jump edit (synthetic).`;
+  await history.fill(typed);
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+
+  // Jump three entries back at once (history menu): over the guard's
+  // duplicate entry and the patient chart, straight to the directory.
+  const declined = page.waitForEvent("dialog");
+  await page.evaluate(() => window.history.go(-3));
+  const dialog = await declined;
+  expect(dialog.message()).toMatch(/unsaved documentation/i);
+  await dialog.dismiss();
+  await expect(page).toHaveURL(encounterUrl);
+  await expect(history).toHaveValue(typed);
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+
+  // Still guarded: a plain Back asks again and, declined, stays put.
+  const declinedAgain = page.waitForEvent("dialog");
+  await page.goBack({ waitUntil: "commit" });
+  await (await declinedAgain).dismiss();
+  await expect(page).toHaveURL(encounterUrl);
+  await expect(history).toHaveValue(typed);
+
+  // Accepting the same jump lands on the directory with one dialog.
+  let dialogs = 0;
+  page.on("dialog", (d) => {
+    dialogs += 1;
+    void d.accept();
+  });
+  await page.evaluate(() => window.history.go(-3));
+  await expect(page).toHaveURL(/\/patients$/);
+  expect(dialogs).toBe(1);
+});
+
 test("historical order-only encounters are laboratory contexts, not resumable consultations", async ({
   page,
 }) => {

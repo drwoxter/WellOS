@@ -650,6 +650,46 @@ describe("encounter documentation workspace", () => {
     backSpy.mockRestore();
   });
 
+  it("returns to the screen when a multi-entry history jump is declined", async () => {
+    const user = userEvent.setup();
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+    setup(workspace());
+    const reason = await screen.findByLabelText(/Reason for consultation/);
+    // Two earlier screens behind the encounter, as a history menu would show.
+    window.history.pushState(null, "", "/patients");
+    window.history.pushState(null, "", "/patients/p1");
+    window.history.pushState(null, "", "/encounters/e1");
+    await user.type(reason, "Chest pain");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    const href = window.location.href;
+    expect(href).toContain("/encounters/e1");
+
+    // Jump straight over the duplicate and the screen's own entry.
+    window.history.go(-3);
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(window.location.href).toBe(href));
+    await settleHistory();
+    expect(window.location.href).toBe(href);
+    expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue(
+      "Chest pain",
+    );
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    // The guard is still armed: a plain Back asks again.
+    window.history.back();
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(2));
+    await settleHistory();
+    expect(window.location.href).toBe(href);
+
+    // Accepting a jump lets the browser stay where it landed.
+    confirmMock.mockReturnValue(true);
+    window.history.go(-2);
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(3));
+    await settleHistory();
+    expect(window.location.href).toContain("/patients/p1");
+  });
+
   it("re-arms Back when the note is edited again right after a save", async () => {
     const user = userEvent.setup();
     const confirmMock = vi.fn(() => false);
