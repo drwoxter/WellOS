@@ -9,7 +9,9 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine;
-use dmind_gateway::scribe::FakeTranscription;
+use dmind_gateway::scribe::{
+    FakeTranscription, ScribeError, Transcription, TranscriptionProvider, TranscriptionRequest,
+};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -581,6 +583,116 @@ async fn provider_failure_is_safe_bounded_and_retryable() {
     // The browser keeps the recording; a retry after recovery succeeds.
     fake.set_unavailable(false);
     let (st, draft) = transcribe(&state, &enc, "dev-dr.garcia").await;
+    assert_eq!(st, StatusCode::OK, "{draft}");
+}
+
+/// Provider that signals when it has been called and waits to be released,
+/// so a test can act on the database while "the provider is running".
+struct GatedTranscription {
+    inner: FakeTranscription,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl TranscriptionProvider for GatedTranscription {
+    fn info(&self) -> wellos_domain::ai::ProviderInfo {
+        self.inner.info()
+    }
+    async fn transcribe(&self, req: &TranscriptionRequest) -> Result<Transcription, ScribeError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        self.inner.transcribe(req).await
+    }
+}
+
+/// Consent withdrawn while the provider is still working: the transcript
+/// must be discarded, not persisted against an encounter that no longer has
+/// consent. The persistence transaction re-reads consent under the same
+/// encounter lock the consent route writes through.
+#[tokio::test]
+async fn consent_withdrawn_during_transcription_discards_the_transcript() {
+    let (mut state, _) = test_state().await;
+    let gate = Arc::new(GatedTranscription {
+        inner: FakeTranscription::new(),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    state.scribe = gate.clone();
+    let (_, enc) = start_consultation(&state).await;
+    grant_consent(&state, &enc).await;
+
+    let in_flight = {
+        let state = state.clone();
+        let enc = enc.clone();
+        tokio::spawn(async move { transcribe(&state, &enc, "dev-dr.garcia").await })
+    };
+    gate.started.notified().await;
+
+    // The patient withdraws consent while the audio is with the provider.
+    let (st, body) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/recording-consent"),
+        "dev-dr.garcia",
+        Some(json!({ "granted": false })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["granted"], json!(false));
+
+    gate.release.notify_one();
+    let (st, err) = in_flight.await.unwrap();
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("consent_required"));
+
+    let artifacts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ai_artifacts WHERE encounter_id = $1::uuid AND artifact_type = 'scribe_draft'",
+    )
+    .bind(&enc)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(artifacts, 0);
+    let transcribed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox_events WHERE event_type = 'encounter.scribe.transcribed'
+           AND resource_refs->>'encounter_id' = $1",
+    )
+    .bind(&enc)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(transcribed, 0);
+    let failures: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox_events WHERE event_type = 'ai.generation.failed'
+           AND resource_refs->>'encounter_id' = $1",
+    )
+    .bind(&enc)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(failures, 1);
+    let (_, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(ws["recording_consent"]["granted"], json!(false));
+    assert_eq!(ws["scribe_draft"], Value::Null);
+
+    // Once consent is granted again, a new recording is stored as usual.
+    grant_consent(&state, &enc).await;
+    let in_flight = {
+        let state = state.clone();
+        let enc = enc.clone();
+        tokio::spawn(async move { transcribe(&state, &enc, "dev-dr.garcia").await })
+    };
+    gate.started.notified().await;
+    gate.release.notify_one();
+    let (st, draft) = in_flight.await.unwrap();
     assert_eq!(st, StatusCode::OK, "{draft}");
 }
 

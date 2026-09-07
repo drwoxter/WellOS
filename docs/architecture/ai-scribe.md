@@ -25,7 +25,7 @@ finish ──────────────────────▶ POS
                                  ◀──────────────────────────── transcript segments
                                  extract sections + flags (deterministic)
                                  validate ScribeDraftV1
-                                 lock encounter, read note version
+                                 lock encounter, re-check consent, read note version
                                  supersede earlier awaiting drafts
                                  INSERT ai_artifacts (scribe_draft, A1, awaiting_review)
                                  audit + provenance events
@@ -45,7 +45,14 @@ insert / append / dismiss ────▶ POST /encounters/:id/scribe/:artifact/
   treating practitioner (`encounter_recording_consents`, append-only;
   withdrawal is a new row with `granted = false`). The consent is audited as
   `encounter.recording.consent_recorded` and transcription is refused with
-  `409 consent_required` without a current grant.
+  `409 consent_required` without a current grant. The current decision is
+  the newest row by `(recorded_at, id)`. Consent is checked before the audio
+  is sent to the provider and **again inside the persistence transaction,
+  under the same encounter lock the consent route writes through**: a
+  withdrawal that commits while the provider is running causes the returned
+  transcript to be discarded (`409 consent_required`, `ai.generation.failed`
+  with stage `consent_withdrawn`) — no artifact, transcript or
+  `encounter.scribe.transcribed` event is persisted.
 - The browser holds the recording in memory only (`BlobPart[]`); nothing is
   written to `localStorage`, IndexedDB or a file. Discarding releases the
   chunks and the microphone tracks.

@@ -240,8 +240,11 @@ fn validate_request(
     Ok((language, mime, audio))
 }
 
-async fn has_recording_consent(
-    pool: &sqlx::PgPool,
+/// Whether the practitioner's latest recorded consent decision for this
+/// encounter is a grant. Consent rows are append-only, so the newest row
+/// (by `recorded_at`, then the time-ordered `id`) is the current decision.
+async fn has_recording_consent<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     tenant_id: Uuid,
     encounter_id: Uuid,
     practitioner_id: Uuid,
@@ -249,14 +252,21 @@ async fn has_recording_consent(
     let latest: Option<bool> = sqlx::query_scalar(
         "SELECT granted FROM encounter_recording_consents
          WHERE tenant_id = $1 AND encounter_id = $2 AND practitioner_id = $3
-         ORDER BY recorded_at DESC LIMIT 1",
+         ORDER BY recorded_at DESC, id DESC LIMIT 1",
     )
     .bind(tenant_id)
     .bind(encounter_id)
     .bind(practitioner_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     Ok(latest == Some(true))
+}
+
+fn consent_required() -> ApiError {
+    ApiError::conflict(
+        "consent_required",
+        "record the patient's consent before transcribing a consultation",
+    )
 }
 
 async fn record_generation_failure(
@@ -300,10 +310,7 @@ pub async fn transcribe(
     .await?;
     require_own_active(&enc, &ctx)?;
     if !has_recording_consent(&state.pool, enc.tenant_id, id, ctx.user_id).await? {
-        return Err(ApiError::conflict(
-            "consent_required",
-            "record the patient's consent before transcribing a consultation",
-        ));
+        return Err(consent_required());
     }
 
     // Provenance for the recording without retaining it: a one-way hash.
@@ -356,6 +363,14 @@ pub async fn transcribe(
     let mut tx = state.pool.begin().await?;
     let enc = lock_encounter(&mut tx, id).await?;
     require_own_active(&enc, &ctx)?;
+    // Consent decisions are written under the same encounter lock, so a
+    // withdrawal that committed while the provider was running is visible
+    // here; the transcript is then discarded and nothing is persisted.
+    if !has_recording_consent(&mut *tx, enc.tenant_id, id, ctx.user_id).await? {
+        drop(tx);
+        record_generation_failure(&state, &ctx, id, "consent_withdrawn").await?;
+        return Err(consent_required());
+    }
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     let note_version: Option<i64> = sqlx::query_scalar(
         "SELECT version FROM encounter_notes WHERE tenant_id = $1 AND encounter_id = $2",

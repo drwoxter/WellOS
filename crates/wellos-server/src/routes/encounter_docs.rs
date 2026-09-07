@@ -486,7 +486,7 @@ pub async fn workspace(
     let recording_consent = sqlx::query(
         "SELECT granted, recorded_at FROM encounter_recording_consents
          WHERE tenant_id = $1 AND encounter_id = $2 AND practitioner_id = $3
-         ORDER BY recorded_at DESC LIMIT 1",
+         ORDER BY recorded_at DESC, id DESC LIMIT 1",
     )
     .bind(enc.tenant_id)
     .bind(id)
