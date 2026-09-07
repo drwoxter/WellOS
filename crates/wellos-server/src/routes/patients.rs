@@ -160,7 +160,13 @@ pub async fn search(
                         EXISTS (SELECT 1 FROM encounters e
                                 WHERE e.tenant_id = patients.tenant_id
                                   AND e.patient_id = patients.id
-                                  AND e.practitioner_id = $3) AS has_relationship
+                                  AND e.practitioner_id = $3) AS has_relationship,
+                        (SELECT e.id FROM encounters e
+                         WHERE e.tenant_id = patients.tenant_id
+                           AND e.patient_id = patients.id
+                           AND e.practitioner_id = $3 AND e.status = 'in_progress'
+                           AND e.encounter_type = 'consultation'
+                         ORDER BY e.started_at DESC LIMIT 1) AS open_consultation_id
                  FROM patients
                  WHERE tenant_id = $1
                    AND (family_name ILIKE $2 OR given_name ILIKE $2 OR identifier ILIKE $2)
@@ -179,7 +185,13 @@ pub async fn search(
                         EXISTS (SELECT 1 FROM encounters e
                                 WHERE e.tenant_id = patients.tenant_id
                                   AND e.patient_id = patients.id
-                                  AND e.practitioner_id = $4) AS has_relationship
+                                  AND e.practitioner_id = $4) AS has_relationship,
+                        (SELECT e.id FROM encounters e
+                         WHERE e.tenant_id = patients.tenant_id
+                           AND e.patient_id = patients.id
+                           AND e.practitioner_id = $4 AND e.status = 'in_progress'
+                           AND e.encounter_type = 'consultation'
+                         ORDER BY e.started_at DESC LIMIT 1) AS open_consultation_id
                  FROM patients
                  WHERE tenant_id = $1 AND facility_id = ANY($3)
                    AND (family_name ILIKE $2 OR given_name ILIKE $2 OR identifier ILIKE $2)
@@ -218,6 +230,7 @@ pub async fn search(
                 "can_open_chart": !chart_needs_relationship
                     || r.get::<bool, _>("has_relationship"),
                 "can_start_encounter": can_start_encounter,
+                "open_consultation_id": r.get::<Option<Uuid>, _>("open_consultation_id"),
             })
         })
         .collect();

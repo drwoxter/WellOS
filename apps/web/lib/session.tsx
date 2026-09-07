@@ -149,11 +149,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setThemeState(th);
   }, []);
 
+  // Metadata is only ever exposed for an authenticated session; the effect
+  // above clears it a tick later, and no consumer may observe the gap.
   const value = useMemo(
     () => ({
       authenticated,
-      meta,
-      metaError,
+      meta: authenticated === true ? meta : null,
+      metaError: authenticated === true && metaError,
       reloadMeta,
       lang,
       theme,

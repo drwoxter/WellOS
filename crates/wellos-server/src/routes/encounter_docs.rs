@@ -12,7 +12,7 @@ use crate::error::ApiError;
 use crate::policy::{actions, facility_scope, ResourceCtx};
 use crate::routes::guard;
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use dmind_gateway::SummaryRequest;
 use rust_decimal::Decimal;
@@ -22,13 +22,13 @@ use sqlx::Row;
 use uuid::Uuid;
 use wellos_domain::ai::ArtifactStatus;
 
-struct EncounterCtx {
-    tenant_id: Uuid,
-    patient_id: Uuid,
-    facility_id: Uuid,
-    practitioner_id: Uuid,
-    status: String,
-    encounter_type: String,
+pub(crate) struct EncounterCtx {
+    pub(crate) tenant_id: Uuid,
+    pub(crate) patient_id: Uuid,
+    pub(crate) facility_id: Uuid,
+    pub(crate) practitioner_id: Uuid,
+    pub(crate) status: String,
+    pub(crate) encounter_type: String,
 }
 
 impl EncounterCtx {
@@ -48,7 +48,7 @@ const ENCOUNTER_CTX_SQL: &str =
     "SELECT tenant_id, patient_id, facility_id, practitioner_id, status, encounter_type
      FROM encounters WHERE id = $1";
 
-async fn load_encounter(state: &AppState, id: Uuid) -> Result<EncounterCtx, ApiError> {
+pub(crate) async fn load_encounter(state: &AppState, id: Uuid) -> Result<EncounterCtx, ApiError> {
     let row = sqlx::query(ENCOUNTER_CTX_SQL)
         .bind(id)
         .fetch_optional(&state.pool)
@@ -76,7 +76,7 @@ async fn snapshot_encounter(
     Ok((tx, EncounterCtx::from_row(&row)))
 }
 
-fn resource_ctx(enc: &EncounterCtx) -> ResourceCtx {
+pub(crate) fn resource_ctx(enc: &EncounterCtx) -> ResourceCtx {
     ResourceCtx {
         tenant_id: enc.tenant_id,
         patient_id: Some(enc.patient_id),
@@ -87,7 +87,7 @@ fn resource_ctx(enc: &EncounterCtx) -> ResourceCtx {
 /// Lock the encounter row for the duration of a mutation transaction so
 /// concurrent lifecycle transitions (sign, cancel) serialize, and return the
 /// row's state as of the lock.
-async fn lock_encounter(
+pub(crate) async fn lock_encounter(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
 ) -> Result<EncounterCtx, ApiError> {
@@ -102,7 +102,7 @@ async fn lock_encounter(
 /// Documentation writes attach to the practitioner's own active consultation.
 /// Order-only encounters exist purely as laboratory-order contexts and never
 /// accept clinical documentation.
-fn require_own_active(enc: &EncounterCtx, ctx: &AuthContext) -> Result<(), ApiError> {
+pub(crate) fn require_own_active(enc: &EncounterCtx, ctx: &AuthContext) -> Result<(), ApiError> {
     if enc.practitioner_id != ctx.user_id {
         return Err(ApiError::forbidden(
             "documentation requires the practitioner's own encounter",
@@ -132,7 +132,7 @@ fn require_consultation(enc: &EncounterCtx) -> Result<(), ApiError> {
 /// generated from (note version, vitals, diagnoses). Any mutation of those
 /// source facts supersedes them in the same transaction rather than leaving
 /// them awaiting review against a record that no longer matches.
-async fn supersede_awaiting_drafts(
+pub(crate) async fn supersede_awaiting_drafts(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
     encounter_id: Uuid,
@@ -166,11 +166,23 @@ const NOTE_SECTIONS: &[&str] = &[
 // GET /api/v1/encounters/:id — consultation workspace payload
 // ---------------------------------------------------------------------------
 
+#[derive(Deserialize, Default)]
+pub struct WorkspaceParams {
+    /// Language for dMind commentary text ("en" default, "es").
+    #[serde(default)]
+    pub lang: Option<String>,
+}
+
 pub async fn workspace(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
+    params: Option<Query<WorkspaceParams>>,
 ) -> Result<Json<Value>, ApiError> {
+    let lang = params
+        .and_then(|Query(p)| p.lang)
+        .filter(|l| l == "es")
+        .unwrap_or_else(|| "en".to_string());
     let enc = load_encounter(&state, id).await?;
     guard(
         &state,
@@ -435,6 +447,64 @@ pub async fn workspace(
     })
     .unwrap_or(Value::Null);
 
+    // Latest consultation-scribe draft (transcript + proposed sections). It is
+    // bound to the note version it was proposed against, advanced by its own
+    // section applications; any other note write leaves it stale and the
+    // review route refuses to apply it (`artifact_stale`).
+    let scribe_draft = sqlx::query(
+        "SELECT id, status, output, limitations, model, model_version, route,
+                generated_at, review_decision, review_detail, note_version
+         FROM ai_artifacts
+         WHERE tenant_id = $1 AND encounter_id = $2 AND artifact_type = 'scribe_draft'
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(enc.tenant_id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .map(|r| {
+        let note_version: Option<i64> = r.get("note_version");
+        let review_detail: Value = r.get("review_detail");
+        let stale = crate::routes::scribe::bound_note_version(note_version, &review_detail)
+            != current_note_version;
+        json!({
+            "id": r.get::<Uuid,_>("id"),
+            "status": r.get::<String,_>("status"),
+            "output": r.get::<Option<Value>,_>("output"),
+            "limitations": r.get::<Value,_>("limitations"),
+            "model": r.get::<Option<String>,_>("model"),
+            "model_version": r.get::<Option<String>,_>("model_version"),
+            "route": r.get::<Option<String>,_>("route"),
+            "generated_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("generated_at"),
+            "review_decision": r.get::<Option<String>,_>("review_decision"),
+            "review_detail": review_detail,
+            "note_version": note_version,
+            "stale": stale,
+        })
+    })
+    .unwrap_or(Value::Null);
+    let recording_consent = sqlx::query(
+        "SELECT granted, recorded_at FROM encounter_recording_consents
+         WHERE tenant_id = $1 AND encounter_id = $2 AND practitioner_id = $3
+         ORDER BY recorded_at DESC, id DESC LIMIT 1",
+    )
+    .bind(enc.tenant_id)
+    .bind(id)
+    .bind(ctx.user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .map(|r| {
+        json!({
+            "granted": r.get::<bool,_>("granted"),
+            "recorded_at": r.get::<chrono::DateTime<chrono::Utc>,_>("recorded_at"),
+        })
+    })
+    .unwrap_or(Value::Null);
+
+    let brief = super::brief::patient_brief(&mut tx, enc.tenant_id, enc.patient_id, id).await?;
+    let diagnostics =
+        super::brief::diagnostic_history(&mut tx, enc.tenant_id, enc.patient_id, &lang).await?;
+
     // Display-only capability hints mirroring central policy semantics; the
     // backend guards remain authoritative for every write.
     let covers = |action: &str| match facility_scope(&ctx, action) {
@@ -452,6 +522,8 @@ pub async fn workspace(
         "can_sign": own && active && consultation && !note_signed && covers(actions::ENCOUNTER_SIGN),
         "can_add_addendum": own && consultation && note_signed && covers(actions::ENCOUNTER_DOCUMENT),
         "can_order_lab": own && active && covers(actions::SERVICE_REQUEST_CREATE),
+        "can_record": own && active && consultation && covers(actions::ENCOUNTER_DOCUMENT)
+            && covers(actions::AI_REVIEW),
     });
 
     tx.commit().await?;
@@ -485,6 +557,10 @@ pub async fn workspace(
         "diagnoses": diagnoses,
         "service_requests": service_requests,
         "ai_draft": ai_draft,
+        "scribe_draft": scribe_draft,
+        "recording_consent": recording_consent,
+        "brief": brief,
+        "diagnostics": diagnostics,
         "capabilities": capabilities,
     })))
 }
@@ -508,7 +584,7 @@ pub struct SaveNote {
 }
 
 impl SaveNote {
-    fn sections(&self) -> [&Option<String>; 8] {
+    pub(crate) fn sections(&self) -> [&Option<String>; 8] {
         [
             &self.reason_for_encounter,
             &self.history_present_illness,
@@ -538,13 +614,13 @@ impl SaveNote {
 }
 
 /// Documented text limits count Unicode characters, not UTF-8 bytes.
-fn exceeds_chars(text: &str, max: usize) -> bool {
+pub(crate) fn exceeds_chars(text: &str, max: usize) -> bool {
     text.chars().nth(max).is_some()
 }
 
-const NOTE_SECTION_MAX_CHARS: usize = 20_000;
+pub(crate) const NOTE_SECTION_MAX_CHARS: usize = 20_000;
 
-fn validate_sections(body: &SaveNote) -> Result<(), ApiError> {
+pub(crate) fn validate_sections(body: &SaveNote) -> Result<(), ApiError> {
     for (name, value) in NOTE_SECTIONS.iter().zip(body.sections()) {
         if value
             .as_deref()
@@ -593,7 +669,7 @@ pub async fn save_note(
 /// that cited the previous version, and audit the write. A save whose
 /// sections all equal the stored draft is a no-op: the current id/version are
 /// returned and nothing — version, artifacts, audit trail — changes.
-async fn write_draft_note(
+pub(crate) async fn write_draft_note(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     state: &AppState,
     ctx: &AuthContext,
@@ -789,9 +865,11 @@ pub async fn sign(
             "this encounter is no longer in progress",
         ));
     }
-    // The signed record is immutable, so a draft still awaiting review could
-    // never be applied to it; it is retired with the transition.
+    // The signed record is immutable, so a draft still awaiting review (or
+    // only partially applied) could never be applied to it; it is retired
+    // with the transition.
     supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
+    crate::routes::scribe::supersede_applicable_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,
@@ -1234,6 +1312,7 @@ pub async fn cancel(
         ));
     }
     supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
+    crate::routes::scribe::supersede_applicable_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,

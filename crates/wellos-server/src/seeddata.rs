@@ -406,6 +406,8 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Option<Seeded>> {
 /// notified=4, closed=5).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DemoStage {
+    /// Ordered, no result yet (pending in the diagnostic history).
+    Ordered,
     Received,
     Reviewed,
     Notified,
@@ -415,6 +417,7 @@ enum DemoStage {
 impl DemoStage {
     fn loop_state(self) -> &'static str {
         match self {
+            DemoStage::Ordered => "ordered",
             DemoStage::Received => "received",
             DemoStage::Reviewed => "reviewed",
             DemoStage::Notified => "notified",
@@ -424,6 +427,7 @@ impl DemoStage {
 
     fn version(self) -> i64 {
         match self {
+            DemoStage::Ordered => 1,
             DemoStage::Received => 2,
             DemoStage::Reviewed => 3,
             DemoStage::Notified => 4,
@@ -588,6 +592,70 @@ async fn seed_demo_states(
             reference_range: "70-99 mg/dL",
             stage: DemoStage::Closed,
             hours_ago: 168,
+        },
+        // Carlos: rising, above-range (non-critical) glucose series for the
+        // diagnostic trend view, plus a repeat glucose still pending.
+        DemoLoopSpec {
+            patient_id: carlos,
+            code_loinc: "2345-7",
+            display: "Glucose [Mass/volume] in Serum",
+            value: Decimal::new(118, 0),
+            unit: "mg/dL",
+            reference_range: "70-99 mg/dL",
+            stage: DemoStage::Closed,
+            hours_ago: 24 * 30,
+        },
+        DemoLoopSpec {
+            patient_id: carlos,
+            code_loinc: "2345-7",
+            display: "Glucose [Mass/volume] in Serum",
+            value: Decimal::new(126, 0),
+            unit: "mg/dL",
+            reference_range: "70-99 mg/dL",
+            stage: DemoStage::Closed,
+            hours_ago: 24 * 14,
+        },
+        DemoLoopSpec {
+            patient_id: carlos,
+            code_loinc: "2345-7",
+            display: "Glucose [Mass/volume] in Serum",
+            value: Decimal::new(134, 0),
+            unit: "mg/dL",
+            reference_range: "70-99 mg/dL",
+            stage: DemoStage::Closed,
+            hours_ago: 24 * 7,
+        },
+        DemoLoopSpec {
+            patient_id: carlos,
+            code_loinc: "2345-7",
+            display: "Glucose [Mass/volume] in Serum",
+            value: Decimal::ZERO,
+            unit: "mg/dL",
+            reference_range: "70-99 mg/dL",
+            stage: DemoStage::Ordered,
+            hours_ago: 20,
+        },
+        // Jonás: two earlier normal potassium values so the closed critical
+        // result above reads as a rising series.
+        DemoLoopSpec {
+            patient_id: jonas,
+            code_loinc: "2823-3",
+            display: "Potassium [Moles/volume] in Serum",
+            value: Decimal::new(44, 1),
+            unit: "mmol/L",
+            reference_range: "3.5-5.1 mmol/L",
+            stage: DemoStage::Closed,
+            hours_ago: 24 * 60,
+        },
+        DemoLoopSpec {
+            patient_id: jonas,
+            code_loinc: "2823-3",
+            display: "Potassium [Moles/volume] in Serum",
+            value: Decimal::new(49, 1),
+            unit: "mmol/L",
+            reference_range: "3.5-5.1 mmol/L",
+            stage: DemoStage::Closed,
+            hours_ago: 24 * 20,
         },
     ];
 
@@ -880,6 +948,9 @@ async fn seed_demo_loop(
     .bind(started)
     .execute(&mut *tx)
     .await?;
+    if spec.stage == DemoStage::Ordered {
+        return Ok(());
+    }
 
     let effective = started + chrono::Duration::minutes(30);
     let obs_id = Uuid::now_v7();

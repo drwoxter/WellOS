@@ -104,6 +104,152 @@ pub struct ResultSummaryV1 {
     pub suggested_next_step_categories: Vec<String>,
 }
 
+/// The eight structured consultation-note sections, in documentation order.
+/// Scribe output may only target these.
+pub const NOTE_SECTIONS: &[&str] = &[
+    "reason_for_encounter",
+    "history_present_illness",
+    "medical_history",
+    "review_of_systems",
+    "physical_exam",
+    "assessment",
+    "plan",
+    "follow_up",
+];
+
+/// Coarse confidence attached to transcript segments and extracted sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
+/// One transcript segment with timecodes relative to the recording start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptSegment {
+    pub index: u32,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// Optional diarization label, e.g. "clinician" or "patient".
+    pub speaker: Option<String>,
+    pub text: String,
+    pub confidence: Confidence,
+}
+
+/// A proposed note section extracted from the transcript. The text is a
+/// draft for clinician review; `segments` link it back to its timecodes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScribeSection {
+    pub section: String,
+    pub text: String,
+    pub confidence: Confidence,
+    pub review_needed: bool,
+    /// Human-readable reasons review is needed (uncertain source,
+    /// contradiction, medication mention, clinical impression restated).
+    pub reasons: Vec<String>,
+    pub segments: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScribeFlagKind {
+    Contradiction,
+    Uncertain,
+}
+
+/// Content the clinician must look at: contradictory statements within the
+/// conversation or passages the transcription could not resolve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScribeFlag {
+    pub kind: ScribeFlagKind,
+    pub message: String,
+    pub segments: Vec<u32>,
+    pub sections: Vec<String>,
+}
+
+/// Provider identification recorded for provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    pub provider: String,
+    pub model: String,
+    pub model_version: String,
+}
+
+/// Structured output of the A1 consultation scribe: transcript plus proposed
+/// note sections, bound to the encounter and the exact note version it was
+/// produced against. It is a draft; nothing in it enters the record without
+/// explicit clinician action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScribeDraftV1 {
+    pub schema_version: String,
+    pub encounter_id: uuid::Uuid,
+    pub source_note_version: Option<i64>,
+    pub language: String,
+    pub transcript: Vec<TranscriptSegment>,
+    pub sections: Vec<ScribeSection>,
+    pub flags: Vec<ScribeFlag>,
+    pub transcription: ProviderInfo,
+    pub extraction: ProviderInfo,
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub limitations: Vec<String>,
+}
+
+pub const SCRIBE_DRAFT_SCHEMA: &str = "scribe-draft.v1";
+
+impl ScribeDraftV1 {
+    /// Structural validation before persistence: known, unique, non-empty
+    /// sections; every segment reference resolves; timecodes are ordered.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != SCRIBE_DRAFT_SCHEMA {
+            return Err(format!("unexpected schema {}", self.schema_version));
+        }
+        let mut last_end = 0u64;
+        for (i, seg) in self.transcript.iter().enumerate() {
+            if seg.index as usize != i {
+                return Err(format!("segment index {} out of order", seg.index));
+            }
+            if seg.end_ms < seg.start_ms || seg.start_ms < last_end {
+                return Err(format!("segment {} has non-monotonic timecodes", seg.index));
+            }
+            if seg.text.trim().is_empty() {
+                return Err(format!("segment {} is empty", seg.index));
+            }
+            last_end = seg.end_ms;
+        }
+        let n = self.transcript.len() as u32;
+        let mut seen: Vec<&str> = Vec::new();
+        for s in &self.sections {
+            if !NOTE_SECTIONS.contains(&s.section.as_str()) {
+                return Err(format!("unknown note section {}", s.section));
+            }
+            if seen.contains(&s.section.as_str()) {
+                return Err(format!("duplicate note section {}", s.section));
+            }
+            seen.push(&s.section);
+            if s.text.trim().is_empty() {
+                return Err(format!("section {} is empty", s.section));
+            }
+            if s.segments.iter().any(|r| *r >= n) {
+                return Err(format!(
+                    "section {} references a missing segment",
+                    s.section
+                ));
+            }
+        }
+        for f in &self.flags {
+            if f.segments.iter().any(|r| *r >= n) {
+                return Err("flag references a missing segment".into());
+            }
+            if f.sections.iter().any(|s| !seen.contains(&s.as_str())) {
+                return Err("flag references a section not in the draft".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

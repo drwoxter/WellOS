@@ -84,6 +84,14 @@ pub async fn review_artifact(
             "encounter summaries are accepted via /encounters/:id/ai-draft/accept",
         ));
     }
+    // Scribe drafts are reviewed per section through the encounter route,
+    // which also records which sections were applied.
+    if row.get::<String, _>("artifact_type") == "scribe_draft" {
+        return Err(ApiError::conflict(
+            "use_encounter_scribe_review",
+            "scribe drafts are reviewed via /encounters/:id/scribe/:artifact_id/review",
+        ));
+    }
 
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;

@@ -63,10 +63,10 @@ token needs to be typed.
 
 | URL | Screen |
 | --- | --- |
-| `/dashboard` | Home: facility context, workload counts, prioritized pending results, quick actions |
+| `/dashboard` | Consultation cockpit: prominent **Start consultation** (patient search → create or resume), customizable widgets for draft consultations, patients needing attention, critical/pending results, pending tasks and recent dMind activity (show/hide, reorder, density; layout-only browser storage) |
 | `/patients` | Patient directory: search by name or identifier, register a patient |
 | `/patients/[id]` | Patient workspace: demographics, allergies/alerts, tabs, clinical timeline, recent vital trends, start/resume consultation, order laboratory test |
-| `/encounters/[id]` | Consultation workspace: patient safety header, vital signs (validated, BMI), structured clinical note, diagnoses, laboratory order, dMind documentation aid, draft save, sign-and-complete, addenda on signed notes |
+| `/encounters/[id]` | Consultation workspace: patient safety header, sticky recording dock (consent → record → pause/resume → finish/discard → transcript + structured dMind scribe draft), Patient Brief, vital signs (validated, BMI), structured clinical note, diagnoses, laboratory order, dMind documentation aid, diagnostic history with deterministic trend commentary, draft save, sign-and-complete, addenda on signed notes |
 | `/results` | Results worklist: priority-first, criticality/state filters, patient search (`/worklist` redirects here) |
 | `/requests/[id]` | Result detail: workflow stepper, critical banner, deterministic rule evaluation, advisory dMind summary, review → notification → closure |
 
@@ -126,6 +126,33 @@ search, credential administration and general API traffic
 (`WELLOS_RATE_*_PER_MIN`). See `SECURITY.md` and
 `docs/operations/runbook.md`.
 
+### AI scribe demo (deterministic, offline)
+
+1. Sign in as **Dr. García**, click **Start consultation** on the dashboard,
+   search “Jonás” and choose **Start consultation** (or **Resume
+   consultation** if a draft already exists).
+2. In the recording dock, press **Record consultation**, confirm **Patient
+   consented — start recording** (the consent is audited) and grant the
+   browser microphone permission. Pause/resume as you like, then **Finish**.
+   What you say is irrelevant: with the default `WELLOS_SCRIBE_PROVIDER=fake`
+   the server returns the same synthetic transcript for any recording of a
+   given duration and language, so the demo is reproducible and no audio
+   ever leaves the machine.
+3. Review the transcript (timecoded, with speaker labels and per-segment
+   confidence) and the structured draft mapped to the note sections, each
+   with confidence, review-needed reasons and contradiction / uncertainty
+   flags.
+4. **Insert into empty section** per section, or **Insert all into empty
+   sections**; text already typed is never overwritten — the only
+   alternative for a filled section is an explicit **Append below my text**.
+   Edit, save and sign through the normal note lifecycle. Every applied
+   artifact is bound to the exact note version it was reviewed against.
+
+Raw audio is held in server memory only for the duration of the request;
+only a hash, size, MIME type and duration are persisted. See
+`docs/architecture/ai-scribe.md` for the provider configuration, privacy
+boundaries, structured-output contract and failure recovery.
+
 ## Tests
 
 ```bash
@@ -151,13 +178,23 @@ npm run test:e2e   # browser tests (Playwright; requires Postgres, seeds mutated
 - This remains a development system: no production deployment, compliance or
   clinical claims.
 - The FHIR R4 endpoints are a minimal read-only facade, not a FHIR server.
-- The AI provider is a deterministic offline fake; no external AI calls.
+- The AI provider is a deterministic offline fake; no external AI calls by
+  default. The optional OpenAI-compatible transcription adapter is opt-in and
+  not exercised in CI (a mocked HTTP server covers its contract).
+- The AI scribe is an assistive drafting aid: it cannot diagnose, prescribe,
+  order, sign or alter signed records, and its output requires explicit
+  clinician review. Speaker labels and confidence come from the provider and
+  are not clinically validated.
 - No claims of HIPAA/GDPR compliance, clinical validation, or device
   certification are made or implied.
 - Not production-deployable: no TLS termination, HA, or backup automation here.
-- The workspace UI covers the closed-loop result slice only; scheduling,
-  documentation, orders beyond the two seeded laboratory tests, and care-team
-  based notification permissions are future work.
+- The workspace UI covers the diagnostic-result loop and consultation
+  documentation; scheduling, arrival/triage, orders beyond the two seeded
+  laboratory tests, and care-team based notification permissions are future
+  work.
+- The dashboard cockpit stores only widget layout (order, hidden, density)
+  in the browser; no patient or clinical data is ever placed in browser
+  storage.
 - Completing the demo workflow mutates the seed data; use `make reset` to
   restore the demo states.
 

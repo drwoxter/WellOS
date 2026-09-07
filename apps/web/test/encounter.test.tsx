@@ -135,7 +135,7 @@ function setup(
       }
       return Promise.resolve(jsonResponse({}));
     }
-    if (url === "/api/v1/encounters/e1")
+    if (url.startsWith("/api/v1/encounters/e1?"))
       return Promise.resolve(getWorkspace ? getWorkspace() : jsonResponse(ws));
     return Promise.resolve(jsonResponse({}));
   });
@@ -433,7 +433,7 @@ describe("encounter documentation workspace", () => {
         });
         return Promise.resolve(jsonResponse({ id: "v1", bmi: null }));
       }
-      if (url === "/api/v1/encounters/e1")
+      if (url.startsWith("/api/v1/encounters/e1?"))
         return Promise.resolve(jsonResponse(currentWs));
       return Promise.resolve(jsonResponse({}));
     });
@@ -1084,7 +1084,8 @@ describe("encounter documentation workspace", () => {
     const workspaceReads = () =>
       fetchMock.mock.calls.filter(
         ([input, init]) =>
-          String(input) === "/api/v1/encounters/e1" && init?.method !== "POST",
+          String(input).startsWith("/api/v1/encounters/e1?") &&
+          init?.method !== "POST",
       ).length;
     const readsBefore = workspaceReads();
 

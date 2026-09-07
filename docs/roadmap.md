@@ -68,6 +68,30 @@ consultation, timeline links to encounter summaries, addenda counts, recent
 vital trends); seeded draft/signed/addendum demo encounters; backend
 integration, component, Playwright journey, accessibility and 390px coverage.
 
+Smart Consultation Cockpit and AI Scribe MVP: `/dashboard` consultation
+cockpit (prominent Start consultation with synthetic patient search and
+create-or-resume, role-aware widgets for draft consultations, patients
+needing attention, critical/pending results, pending tasks and recent dMind
+activity, show/hide, ordering, density and restore-default with layout-only
+browser storage); consultation recording dock (audited recording consent,
+microphone permission states, start/pause/resume/finish/discard, retry with
+in-memory audio retention, typed text preserved while requests are pending);
+provider-neutral speech-to-text behind the dMind gateway (deterministic
+offline fake by default, opt-in bounded OpenAI-compatible adapter with
+server-side credentials, mocked in tests); validated audio payloads (MIME,
+size, duration, language, dedicated rate-limit family) processed in memory
+only — raw audio is never persisted; a versioned structured output contract
+(`scribe-draft.v1`: timecoded transcript segments with speaker/confidence,
+note sections with confidence/review-needed reasons/source segments,
+contradiction and uncertainty flags) validated server-side and bound to the
+exact note version; clinician review UI (per-section insert, insert-all into
+empty sections, explicit append, never overwrite, dismiss) applied
+atomically with the note write and refused on stale versions or closed
+encounters; Patient Brief and grouped diagnostic history with deterministic
+trend commentary; backend integration (including no-sensitive-logging),
+component, Playwright journey (fake microphone), keyboard, accessibility and
+390px coverage.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
@@ -92,7 +116,9 @@ integration, component, Playwright journey, accessibility and 390px coverage.
 9. **Object storage abstraction** (S3-compatible) for large artifacts, with
    per-tenant encryption context.
 10. **Real model provider adapter** behind the gateway with redaction,
-   evaluation harness, and shadow-mode comparison against the fake provider.
+   evaluation harness, and shadow-mode comparison against the fake provider;
+   streaming/chunked transcription and speaker diarization quality
+   evaluation for the scribe once a real provider is enabled.
 11. **Backup/restore automation** and load smoke tests in CI against a
     disposable environment.
 

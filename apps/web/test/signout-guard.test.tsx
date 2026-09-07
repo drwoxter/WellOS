@@ -98,7 +98,7 @@ function setup(
       }
       if (url === "/api/v1/meta/tenant")
         return Promise.resolve(jsonResponse(META));
-      if (url === "/api/v1/encounters/e1")
+      if (url.startsWith("/api/v1/encounters/e1?"))
         return Promise.resolve(jsonResponse(WORKSPACE));
       return Promise.resolve(jsonResponse({}));
     }),

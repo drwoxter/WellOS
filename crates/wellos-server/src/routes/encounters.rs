@@ -18,6 +18,10 @@ pub struct StartEncounter {
     /// `order_only` is a laboratory-order context that never holds a note.
     #[serde(default)]
     pub encounter_type: Option<String>,
+    /// When true, an existing in-progress consultation of the caller with
+    /// this patient is returned instead of opening a second one.
+    #[serde(default)]
+    pub resume: bool,
 }
 
 pub async fn start(
@@ -60,6 +64,29 @@ pub async fn start(
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
+    if body.resume && encounter_type == "consultation" {
+        // The patient row lock serializes concurrent create-or-resume calls
+        // so two clicks cannot open two consultations.
+        sqlx::query("SELECT id FROM patients WHERE id = $1 FOR UPDATE")
+            .bind(body.patient_id)
+            .execute(&mut *tx)
+            .await?;
+        let existing: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM encounters
+             WHERE tenant_id = $1 AND patient_id = $2 AND practitioner_id = $3
+               AND status = 'in_progress' AND encounter_type = 'consultation'
+             ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(ctx.tenant_id)
+        .bind(body.patient_id)
+        .bind(ctx.user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing {
+            tx.commit().await?;
+            return Ok(Json(json!({ "id": existing, "resumed": true })));
+        }
+    }
     sqlx::query(
         "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id, encounter_type)
          VALUES ($1,$2,$3,$4,$5,$6)",
@@ -87,7 +114,7 @@ pub async fn start(
     .await
     .map_err(ApiError::internal)?;
     tx.commit().await?;
-    Ok(Json(json!({ "id": id })))
+    Ok(Json(json!({ "id": id, "resumed": false })))
 }
 
 fn require_order_context(

@@ -300,7 +300,7 @@ test("historical order-only encounters are laboratory contexts, not resumable co
   page,
 }) => {
   await signInAs(page, "dr.garcia");
-  // Carlos only has the seeded result-loop encounter.
+  // Carlos only has seeded result-loop (order-only) encounters.
   await openChart(page, "SYN-0003");
   await expect(
     page.getByRole("button", { name: "Start consultation" }),
@@ -309,7 +309,9 @@ test("historical order-only encounters are laboratory contexts, not resumable co
     page.getByRole("link", { name: /Resume consultation/ }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("link", { name: /Laboratory orders: Dr\. Gabriel García/ }),
+    page
+      .getByRole("link", { name: /Laboratory orders: Dr\. Gabriel García/ })
+      .first(),
   ).toBeVisible();
 
   await page.getByRole("tab", { name: /Encounters/ }).click();
