@@ -16,6 +16,9 @@ import {
   loopStateShortLabel,
   patientName,
 } from "@/lib/clinical";
+import type { VisitItem } from "@/lib/visits";
+import { NewVisit } from "../../access/new-visit";
+import { VisitCard, useVisitActions } from "../../access/visit-card";
 
 type Chart = {
   patient: {
@@ -48,6 +51,8 @@ type Chart = {
   encounters: ChartEncounter[];
   consents: { purpose: string; status: string }[];
   alerts: { severity: string; message: string; created_at: string }[];
+  visit: VisitItem | null;
+  can_manage_visit: boolean;
   vitals: {
     id: string;
     encounter_id: string | null;
@@ -205,6 +210,78 @@ function Timeline({ chart, lang }: { chart: Chart; lang: Lang }) {
   );
 }
 
+/** The patient's open visit or next appointment, with the same
+ *  server-authorized actions as the access board; registration staff can
+ *  register an arrival from here when there is none. */
+function TodaysVisit({
+  chart,
+  lang,
+  onChanged,
+}: {
+  chart: Chart;
+  lang: Lang;
+  onChanged: () => Promise<unknown>;
+}) {
+  const actions = useVisitActions(lang, onChanged);
+  const [registering, setRegistering] = useState(false);
+  const v = chart.visit;
+  if (!v && !chart.can_manage_visit) return null;
+  return (
+    <section className="card" aria-labelledby="visit-h">
+      <h2 id="visit-h">{t(lang, "todaysVisit")}</h2>
+      {actions.message ? (
+        <p
+          role={actions.message.kind === "error" ? "alert" : "status"}
+          className={actions.message.kind === "error" ? "error" : "success"}
+        >
+          {actions.message.text}
+        </p>
+      ) : null}
+      {v ? (
+        <ul className="result-list">
+          <VisitCard
+            lang={lang}
+            visit={v}
+            busy={actions.busy}
+            onAction={(visit, action) => void actions.run(visit, action)}
+          />
+        </ul>
+      ) : (
+        <p className="muted">{t(lang, "noVisitToday")}</p>
+      )}
+      {!v && chart.can_manage_visit ? (
+        registering ? (
+          <NewVisit
+            lang={lang}
+            headingId="chart-new-visit-h"
+            fixedPatient={{
+              id: chart.patient.id,
+              family_name: chart.patient.family_name,
+              given_name: chart.patient.given_name,
+              identifier: chart.patient.identifier,
+              birth_date: chart.patient.birth_date,
+            }}
+            onCreated={async () => {
+              setRegistering(false);
+              await onChanged();
+            }}
+          />
+        ) : (
+          <p style={{ marginBottom: 0 }}>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => setRegistering(true)}
+            >
+              {t(lang, "registerArrival")}
+            </button>
+          </p>
+        )
+      ) : null}
+    </section>
+  );
+}
+
 function Actions({
   chart,
   lang,
@@ -223,6 +300,11 @@ function Actions({
   const router = useRouter();
 
   const resumable = chart.encounters.find(isResumableConsultation);
+  // When today's visit already offers start/resume, that card is the way in
+  // so the consultation stays linked to the visit and its triage handoff.
+  const visitStarts =
+    chart.visit?.capabilities.can_start_consultation ||
+    chart.visit?.capabilities.can_resume_consultation;
 
   async function startEncounter() {
     setBusy(true);
@@ -295,14 +377,16 @@ function Actions({
         </p>
       ) : null}
       <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
-        <button
-          className="primary"
-          disabled={busy}
-          onClick={() => void startEncounter()}
-        >
-          {t(lang, "startConsultation")}
-        </button>
-        {resumable ? (
+        {!visitStarts ? (
+          <button
+            className="primary"
+            disabled={busy}
+            onClick={() => void startEncounter()}
+          >
+            {t(lang, "startConsultation")}
+          </button>
+        ) : null}
+        {resumable && !visitStarts ? (
           <Link className="navlink" href={`/encounters/${resumable.id}`}>
             {t(lang, "resumeConsultation")} —{" "}
             {formatDateTime(lang, resumable.started_at)}
@@ -361,15 +445,17 @@ function PatientWorkspace({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState("overview");
 
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     setError(null);
-    apiFetch<Chart>(`/api/v1/patients/${id}`)
-      .then(setChart)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    try {
+      setChart(await apiFetch<Chart>(`/api/v1/patients/${id}`));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }, [id]);
 
   useEffect(() => {
-    if (authenticated) load();
+    if (authenticated) void load();
   }, [authenticated, load]);
 
   if (error) {
@@ -379,7 +465,7 @@ function PatientWorkspace({ id }: { id: string }) {
         <p role="alert" className="error">
           {denied ? t(lang, "notAuthorized") : error}
         </p>
-        <button className="secondary" onClick={load}>
+        <button className="secondary" onClick={() => void load()}>
           {t(lang, "retry")}
         </button>
       </div>
@@ -436,9 +522,11 @@ function PatientWorkspace({ id }: { id: string }) {
         )}
       </div>
 
+      <TodaysVisit chart={chart} lang={lang} onChanged={load} />
+
       {meta &&
       canActClinicallyAt(meta.facilities, chart.patient.facility_id) ? (
-        <Actions chart={chart} lang={lang} onChanged={load} />
+        <Actions chart={chart} lang={lang} onChanged={() => void load()} />
       ) : null}
 
       <div className="card">

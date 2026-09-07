@@ -21,6 +21,16 @@ import {
   loopStateShortLabel,
   patientName,
 } from "@/lib/clinical";
+import {
+  arrivalKindLabel,
+  concernLabel,
+  priorityBadge,
+  priorityLabel,
+  redFlagLabel,
+  safetyRuleLabel,
+  serviceLabel,
+  visitStatusLabel,
+} from "@/lib/visits";
 
 type VitalSet = {
   id: string;
@@ -74,6 +84,29 @@ type AiDraft = {
   stale: boolean;
 };
 
+type VisitHandoff = {
+  id: string;
+  status: string;
+  arrival_kind: string;
+  service: string;
+  reason: string | null;
+  arrived_at: string | null;
+  ready_at: string | null;
+  priority: string | null;
+  handoff_summary: string | null;
+  triage: {
+    concerns: string[];
+    red_flags: string[];
+    onset: string | null;
+    note: string | null;
+    safety_floor: string;
+    safety_rules: { rule: string; priority: string }[];
+    rules_version: string;
+    completed_at: string | null;
+    author_name: string;
+  } | null;
+};
+
 type Workspace = {
   encounter: {
     id: string;
@@ -119,6 +152,7 @@ type Workspace = {
   recording_consent: { granted: boolean; recorded_at: string } | null;
   brief: Brief | null;
   diagnostics: Diagnostics | null;
+  visit: VisitHandoff | null;
   capabilities: {
     can_document: boolean;
     can_sign: boolean;
@@ -202,6 +236,111 @@ function markDraftsStale(ws: Workspace): Workspace {
       ? { ...ws.scribe_draft, stale: true }
       : ws.scribe_draft;
   return { ...ws, ai_draft, scribe_draft };
+}
+
+/** Arrival and triage context handed over from the access workflow. Read
+ *  only: the visit is already in consultation, so the facts are frozen. */
+function HandoffCard({ v, lang }: { v: VisitHandoff; lang: Lang }) {
+  const tr = v.triage;
+  return (
+    <section className="card handoff-card" aria-labelledby="handoff-h">
+      <div className="patient-header">
+        <h2 id="handoff-h">{t(lang, "handoffTitle")}</h2>
+        {v.priority ? (
+          <span className={`badge ${priorityBadge(v.priority)}`}>
+            {priorityLabel(lang, v.priority)}
+          </span>
+        ) : null}
+        <span className="badge neutral">
+          {arrivalKindLabel(lang, v.arrival_kind)}
+        </span>
+        <span className="badge neutral">{serviceLabel(lang, v.service)}</span>
+        <span className="muted">{visitStatusLabel(lang, v.status)}</span>
+      </div>
+      <p className="muted" style={{ margin: "0.4rem 0 0" }}>
+        {v.arrived_at
+          ? `${t(lang, "arrivedLabel")}: ${formatDateTime(lang, v.arrived_at)}`
+          : null}
+        {v.arrived_at && tr?.completed_at ? " · " : null}
+        {tr?.completed_at
+          ? `${t(lang, "triagedBy")} ${tr.author_name} · ${formatDateTime(lang, tr.completed_at)}`
+          : null}
+      </p>
+      {v.reason ? (
+        <p style={{ margin: "0.5rem 0 0" }}>
+          <strong>{t(lang, "reasonForVisit")}:</strong> {v.reason}
+        </p>
+      ) : null}
+      {tr ? (
+        <dl className="kv">
+          {tr.concerns.length > 0 ? (
+            <>
+              <dt>{t(lang, "concerns")}</dt>
+              <dd>
+                {tr.concerns.map((c) => concernLabel(lang, c)).join(", ")}
+              </dd>
+            </>
+          ) : null}
+          {tr.red_flags.length > 0 ? (
+            <>
+              <dt>{t(lang, "redFlags")}</dt>
+              <dd>
+                {tr.red_flags.map((f) => (
+                  <span
+                    key={f}
+                    className="badge critical"
+                    style={{ marginRight: "0.4rem" }}
+                  >
+                    {redFlagLabel(lang, f)}
+                  </span>
+                ))}
+              </dd>
+            </>
+          ) : null}
+          {tr.onset ? (
+            <>
+              <dt>{t(lang, "onset")}</dt>
+              <dd>{tr.onset}</dd>
+            </>
+          ) : null}
+          <dt>{t(lang, "safetyFloor")}</dt>
+          <dd>
+            <span className={`badge ${priorityBadge(tr.safety_floor)}`}>
+              {priorityLabel(lang, tr.safety_floor)}
+            </span>
+            {tr.safety_rules.length > 0 ? (
+              <ul className="muted" style={{ margin: "0.3rem 0 0" }}>
+                {tr.safety_rules.map((r) => (
+                  <li key={r.rule}>
+                    {safetyRuleLabel(lang, r.rule)} →{" "}
+                    {priorityLabel(lang, r.priority)}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </dd>
+          {tr.note ? (
+            <>
+              <dt>{t(lang, "triageNote")}</dt>
+              <dd style={{ whiteSpace: "pre-wrap" }}>{tr.note}</dd>
+            </>
+          ) : null}
+        </dl>
+      ) : (
+        <p className="muted" style={{ margin: "0.5rem 0 0" }}>
+          {t(lang, "noTriageRecorded")}
+        </p>
+      )}
+      {v.handoff_summary ? (
+        <details style={{ marginTop: "0.5rem" }}>
+          <summary>{t(lang, "handoffSummary")}</summary>
+          <p style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+            {v.handoff_summary}
+          </p>
+        </details>
+      ) : null}
+    </section>
+  );
 }
 
 function SafetyHeader({ ws, lang }: { ws: Workspace; lang: Lang }) {
@@ -1652,6 +1791,7 @@ function EncounterWorkspace({ id }: { id: string }) {
 
       <div className="encounter-layout">
         <div className="encounter-main">
+          {ws.visit ? <HandoffCard v={ws.visit} lang={lang} /> : null}
           {!orderOnly && editable ? (
             <RecordingDock
               encounterId={id}

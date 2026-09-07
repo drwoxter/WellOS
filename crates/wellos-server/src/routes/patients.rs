@@ -428,6 +428,9 @@ pub async fn chart(
     )
     .await?;
 
+    let visit = super::visits::current_for_patient(&state, &ctx, ctx.tenant_id, id).await?;
+    let can_manage_visit = super::visits::can_manage_visits_at(&ctx, patient_facility);
+
     Ok(Json(json!({
         "patient": {
             "id": patient.get::<Uuid,_>("id"),
@@ -447,6 +450,8 @@ pub async fn chart(
         "vitals": vitals,
         "consents": consents,
         "alerts": alerts,
+        "visit": visit,
+        "can_manage_visit": can_manage_visit,
     })))
 }
 

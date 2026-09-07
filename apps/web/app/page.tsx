@@ -29,7 +29,7 @@ const DEMO_USERS: {
     username: "reg.rivera",
     roleKey: "roleRegistration",
     descriptionKey: "demoRegistration",
-    home: "/patients",
+    home: "/access",
   },
   {
     username: "privacy.wolf",

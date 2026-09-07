@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import PatientPage from "@/app/patients/[id]/page";
 import { SessionProvider } from "@/lib/session";
 
+const push = vi.fn();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push, replace: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => "/patients/p1",
 }));
 
@@ -62,15 +63,63 @@ function encounter(overrides: Record<string, unknown>) {
   };
 }
 
-function setup(facilities: unknown[], chart: unknown = CHART) {
+const VISIT = {
+  id: "v1",
+  status: "scheduled",
+  arrival_kind: "scheduled",
+  service: "general_medicine",
+  reason: "Annual review",
+  scheduled_at: "2026-08-29T10:30:00Z",
+  arrived_at: null,
+  ready_at: null,
+  consultation_started_at: null,
+  wait_minutes: null,
+  priority: null,
+  handoff_summary: null,
+  encounter_id: null,
+  version: 2,
+  updated_at: "2026-08-29T08:00:00Z",
+  facility: { id: "facility-b", name: "Annex Clinic" },
+  patient: {
+    id: "p1",
+    family_name: "Demopatient",
+    given_name: "Carlos",
+    identifier: "SYN-0003",
+    age_years: 46,
+    alert_count: 0,
+    allergy_count: 0,
+  },
+  assignment: null,
+  open_alerts: 0,
+  capabilities: {
+    can_arrive: false,
+    can_cancel: false,
+    can_no_show: false,
+    can_triage: false,
+    can_assign: false,
+    can_start_consultation: false,
+    can_resume_consultation: false,
+    assigned_to_other: false,
+  },
+};
+
+function setup(
+  facilities: unknown[],
+  chart: unknown = CHART,
+  roles: string[] = ["physician"],
+) {
+  const posts: { url: string; body: unknown }[] = [];
+  let chartLoads = 0;
   vi.stubGlobal(
     "fetch",
-    vi.fn((input: RequestInfo | URL) => {
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/session")
         return Promise.resolve(jsonResponse({ authenticated: true }));
-      if (url === "/api/v1/patients/p1")
+      if (url === "/api/v1/patients/p1") {
+        chartLoads += 1;
         return Promise.resolve(jsonResponse(chart));
+      }
       if (url === "/api/v1/meta/tenant")
         return Promise.resolve(
           jsonResponse({
@@ -78,11 +127,20 @@ function setup(facilities: unknown[], chart: unknown = CHART) {
             user: {
               username: "dr.garcia",
               display_name: "Dr. García",
-              roles: ["physician"],
+              roles,
             },
             facilities,
           }),
         );
+      if (init?.method === "POST") {
+        posts.push({
+          url,
+          body: init.body ? JSON.parse(String(init.body)) : null,
+        });
+        if (url.endsWith("/start-consultation"))
+          return Promise.resolve(jsonResponse({ encounter_id: "enc-visit" }));
+        return Promise.resolve(jsonResponse({ id: "created" }));
+      }
       return Promise.resolve(jsonResponse({}));
     }),
   );
@@ -91,6 +149,7 @@ function setup(facilities: unknown[], chart: unknown = CHART) {
       <PatientPage params={{ id: "p1" }} />
     </SessionProvider>,
   );
+  return { posts, chartLoads: () => chartLoads };
 }
 
 describe("patient chart clinical actions", () => {
@@ -200,5 +259,136 @@ describe("patient chart clinical actions", () => {
       "href",
       "/encounters/e-orders",
     );
+  });
+
+  it("does not show a visit card when there is no visit and the user cannot register one", async () => {
+    setup(CLINICAL_FACILITY, {
+      ...CHART,
+      visit: null,
+      can_manage_visit: false,
+    });
+    await screen.findByRole("button", { name: "Start consultation" });
+    expect(screen.queryByRole("region", { name: "Today's visit" })).toBeNull();
+  });
+
+  it("lets registration staff mark a scheduled visit as arrived with its current version", async () => {
+    const user = userEvent.setup();
+    const registration = [
+      { ...CLINICAL_FACILITY[0], can_act_clinically: false },
+    ];
+    const { posts, chartLoads } = setup(
+      registration,
+      {
+        ...CHART,
+        visit: {
+          ...VISIT,
+          capabilities: { ...VISIT.capabilities, can_arrive: true },
+        },
+        can_manage_visit: true,
+      },
+      ["registration_staff"],
+    );
+    const card = await screen.findByRole("region", { name: "Today's visit" });
+    expect(within(card).getByText("Annual review")).toBeInTheDocument();
+    expect(within(card).getByText("Scheduled")).toBeInTheDocument();
+    // A visit already exists: no second registration form.
+    expect(
+      within(card).queryByRole("button", { name: "Register arrival" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Start consultation" }),
+    ).toBeNull();
+    await user.click(
+      within(card).getByRole("button", { name: "Mark arrived" }),
+    );
+    await waitFor(() =>
+      expect(posts).toEqual([
+        { url: "/api/v1/visits/v1/arrive", body: { version: 2 } },
+      ]),
+    );
+    await waitFor(() => expect(chartLoads()).toBe(2));
+  });
+
+  it("registers an arrival for this patient from the chart without a patient search", async () => {
+    const user = userEvent.setup();
+    const registration = [
+      { ...CLINICAL_FACILITY[0], can_act_clinically: false },
+    ];
+    const { posts, chartLoads } = setup(
+      registration,
+      { ...CHART, visit: null, can_manage_visit: true },
+      ["registration_staff"],
+    );
+    const card = await screen.findByRole("region", { name: "Today's visit" });
+    expect(within(card).getByText("No visit today.")).toBeInTheDocument();
+    await user.click(
+      within(card).getByRole("button", { name: "Register arrival" }),
+    );
+    // The patient is fixed: no search box, no change-patient control.
+    expect(within(card).queryByLabelText("Find the patient")).toBeNull();
+    expect(
+      within(card).queryByRole("button", { name: "Change patient" }),
+    ).toBeNull();
+    expect(within(card).getByText("Carlos Demopatient")).toBeInTheDocument();
+    await user.click(within(card).getByRole("radio", { name: "Urgent" }));
+    await user.type(
+      within(card).getByLabelText(/Reason for visit/),
+      "Chest pain since this morning",
+    );
+    await user.click(within(card).getByRole("button", { name: "Register" }));
+    await waitFor(() =>
+      expect(posts).toEqual([
+        {
+          url: "/api/v1/visits",
+          body: {
+            patient_id: "p1",
+            arrival_kind: "urgent",
+            service: "general_medicine",
+            reason: "Chest pain since this morning",
+            scheduled_at: null,
+          },
+        },
+      ]),
+    );
+    await waitFor(() => expect(chartLoads()).toBe(2));
+  });
+
+  it("starts the consultation from the ready visit so it stays linked to the handoff", async () => {
+    const user = userEvent.setup();
+    const { posts } = setup(CLINICAL_FACILITY, {
+      ...CHART,
+      visit: {
+        ...VISIT,
+        status: "ready_for_consultation",
+        arrival_kind: "walk_in",
+        arrived_at: "2026-08-29T08:00:00Z",
+        ready_at: "2026-08-29T08:20:00Z",
+        priority: "urgent",
+        capabilities: {
+          ...VISIT.capabilities,
+          can_start_consultation: true,
+        },
+      },
+      can_manage_visit: false,
+    });
+    const card = await screen.findByRole("region", { name: "Today's visit" });
+    expect(within(card).getByText("Urgent")).toBeInTheDocument();
+    // Exactly one way to start: through the visit, not a detached encounter.
+    expect(
+      screen.getAllByRole("button", { name: "Start consultation" }),
+    ).toHaveLength(1);
+    await user.click(
+      within(card).getByRole("button", { name: "Start consultation" }),
+    );
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith("/encounters/enc-visit"),
+    );
+    expect(posts).toEqual([
+      { url: "/api/v1/visits/v1/start-consultation", body: { version: 2 } },
+    ]);
+    // Laboratory ordering stays available for clinicians.
+    expect(
+      screen.getByRole("button", { name: "Order laboratory test" }),
+    ).toBeInTheDocument();
   });
 });

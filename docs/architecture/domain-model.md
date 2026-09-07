@@ -25,6 +25,11 @@
 - **DataQualityIssue** — recorded when unsafe evaluation is refused
   (e.g. unit mismatch).
 - **AuditEvent / BreakGlassEvent / OutboxEvent** — provenance backbone.
+- **Visit / ServiceQueue / CareTeamAssignment / TriageAssessment /
+  InternalAlert** — patient access, arrival, triage, care-team routing and
+  internal professional alerts; see
+  [patient-access-and-triage.md](patient-access-and-triage.md) for the visit
+  state machine, the deterministic safety floor and the dMind review boundary.
 
 ## Result loop state machine
 

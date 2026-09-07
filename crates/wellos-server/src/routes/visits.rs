@@ -2421,6 +2421,94 @@ pub async fn start_consultation(
     })))
 }
 
+/// Handoff context for the consultation workspace: the visit that led into
+/// this encounter with its triage summary, so the clinician sees why the
+/// patient is here without opening the triage screen.
+pub async fn handoff_for_encounter(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    encounter_id: Uuid,
+) -> Result<Value, ApiError> {
+    let row = sqlx::query(
+        "SELECT v.id, v.status, v.arrival_kind, v.service, v.reason, v.arrived_at, v.ready_at,
+                v.priority, v.handoff_summary,
+                t.concerns, t.red_flags, t.safety_floor, t.safety_rules, t.rules_version,
+                t.onset, t.note AS triage_note, t.completed_at AS triage_completed_at,
+                tu.display_name AS triage_author
+         FROM visits v
+         LEFT JOIN triage_assessments t ON t.tenant_id = v.tenant_id AND t.visit_id = v.id
+         LEFT JOIN users tu ON tu.id = t.author_id
+         WHERE v.tenant_id = $1 AND v.encounter_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row
+        .map(|r| {
+            let has_triage = r.get::<Option<String>, _>("safety_floor").is_some();
+            json!({
+                "id": r.get::<Uuid,_>("id"),
+                "status": r.get::<String,_>("status"),
+                "arrival_kind": r.get::<String,_>("arrival_kind"),
+                "service": r.get::<String,_>("service"),
+                "reason": r.get::<Option<String>,_>("reason"),
+                "arrived_at": r.get::<Option<DateTime<Utc>>,_>("arrived_at"),
+                "ready_at": r.get::<Option<DateTime<Utc>>,_>("ready_at"),
+                "priority": r.get::<Option<String>,_>("priority"),
+                "handoff_summary": r.get::<Option<String>,_>("handoff_summary"),
+                "triage": if has_triage {
+                    json!({
+                        "concerns": r.get::<Value,_>("concerns"),
+                        "red_flags": r.get::<Value,_>("red_flags"),
+                        "onset": r.get::<Option<String>,_>("onset"),
+                        "note": r.get::<Option<String>,_>("triage_note"),
+                        "safety_floor": r.get::<Option<String>,_>("safety_floor"),
+                        "safety_rules": r.get::<Value,_>("safety_rules"),
+                        "rules_version": r.get::<Option<String>,_>("rules_version"),
+                        "completed_at": r.get::<Option<DateTime<Utc>>,_>("triage_completed_at"),
+                        "author_name": r.get::<Option<String>,_>("triage_author"),
+                    })
+                } else {
+                    Value::Null
+                },
+            })
+        })
+        .unwrap_or(Value::Null))
+}
+
+/// The patient's current visit for the chart: the open visit, or else the
+/// nearest upcoming appointment. Display-only capabilities as in the list.
+pub async fn current_for_patient(
+    state: &AppState,
+    ctx: &AuthContext,
+    tenant_id: Uuid,
+    patient_id: Uuid,
+) -> Result<Value, ApiError> {
+    let row = sqlx::query(&format!(
+        "{VISIT_LIST_SQL}
+         WHERE v.tenant_id = $1 AND v.patient_id = $2
+           AND v.status IN ('scheduled','arrived','triage_in_progress','ready_for_consultation','in_consultation')
+           AND (v.status <> 'scheduled' OR v.scheduled_at >= now() - interval '1 day')
+         ORDER BY CASE WHEN v.status = 'scheduled' THEN 1 ELSE 0 END, v.scheduled_at ASC NULLS LAST, v.id
+         LIMIT 1"
+    ))
+    .bind(tenant_id)
+    .bind(patient_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    match row {
+        Some(r) => visit_item(ctx, &r),
+        None => Ok(Value::Null),
+    }
+}
+
+/// Whether the caller may register arrivals/appointments for a patient at
+/// this facility (display hint; the create route re-authorizes).
+pub fn can_manage_visits_at(ctx: &AuthContext, facility_id: Uuid) -> bool {
+    caps_for(ctx, facility_id).manage
+}
+
 /// Called inside the encounter sign transaction: the visit that handed off
 /// into this encounter is completed with it.
 pub async fn complete_for_encounter(

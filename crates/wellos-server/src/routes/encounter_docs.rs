@@ -505,6 +505,7 @@ pub async fn workspace(
     let brief = super::brief::patient_brief(&mut tx, enc.tenant_id, enc.patient_id, id).await?;
     let diagnostics =
         super::brief::diagnostic_history(&mut tx, enc.tenant_id, enc.patient_id, &lang).await?;
+    let visit = super::visits::handoff_for_encounter(&mut tx, enc.tenant_id, id).await?;
 
     // Display-only capability hints mirroring central policy semantics; the
     // backend guards remain authoritative for every write.
@@ -562,6 +563,7 @@ pub async fn workspace(
         "recording_consent": recording_consent,
         "brief": brief,
         "diagnostics": diagnostics,
+        "visit": visit,
         "capabilities": capabilities,
     })))
 }

@@ -3,6 +3,10 @@
 // results or any other clinical data.
 
 export const COCKPIT_WIDGETS = [
+  "ready",
+  "alerts",
+  "triage",
+  "access",
   "drafts",
   "attention",
   "results",
@@ -19,20 +23,87 @@ export type CockpitConfig = {
   density: Density;
 };
 
-export const COCKPIT_STORAGE_ITEM = "wellos.cockpit.v1";
+/** Widgets fed by the visit/alert API (access board) versus the diagnostic
+ *  worklist API; a role only gets the widgets whose data it may read. */
+export const VISIT_WIDGETS: readonly CockpitWidget[] = [
+  "ready",
+  "alerts",
+  "triage",
+  "access",
+];
+export const WORKLIST_WIDGETS: readonly CockpitWidget[] = [
+  "drafts",
+  "attention",
+  "results",
+  "tasks",
+  "ai",
+];
+
+export const COCKPIT_STORAGE_ITEM = "wellos.cockpit.v2";
 
 export function defaultConfig(roles: string[]): CockpitConfig {
-  const physician = roles.includes("physician");
-  if (physician) {
+  if (roles.includes("physician")) {
     return {
-      order: ["drafts", "attention", "results", "tasks", "ai"],
-      hidden: [],
+      order: [
+        "ready",
+        "alerts",
+        "drafts",
+        "attention",
+        "results",
+        "tasks",
+        "ai",
+        "triage",
+        "access",
+      ],
+      hidden: ["triage", "access"],
       density: "expanded",
     };
   }
-  if (roles.includes("laboratory_professional") || roles.includes("nurse")) {
+  if (roles.includes("nurse")) {
     return {
-      order: ["results", "tasks", "attention", "ai", "drafts"],
+      order: [
+        "triage",
+        "alerts",
+        "access",
+        "ready",
+        "results",
+        "tasks",
+        "attention",
+        "ai",
+        "drafts",
+      ],
+      hidden: ["access", "drafts", "ai"],
+      density: "compact",
+    };
+  }
+  if (roles.includes("registration_staff")) {
+    return {
+      order: [...COCKPIT_WIDGETS],
+      hidden: [
+        "ready",
+        "triage",
+        "drafts",
+        "attention",
+        "results",
+        "tasks",
+        "ai",
+      ],
+      density: "expanded",
+    };
+  }
+  if (roles.includes("laboratory_professional")) {
+    return {
+      order: [
+        "results",
+        "tasks",
+        "attention",
+        "ai",
+        "drafts",
+        "ready",
+        "alerts",
+        "triage",
+        "access",
+      ],
       hidden: ["drafts"],
       density: "compact",
     };
@@ -135,6 +206,21 @@ export function setDensity(
   return { ...config, density };
 }
 
-export function visibleWidgets(config: CockpitConfig): CockpitWidget[] {
-  return config.order.filter((w) => !config.hidden.includes(w));
+/** Widgets the signed-in role can actually populate. */
+export function availableWidgets(
+  canReadVisits: boolean,
+  canReadWorklist: boolean,
+): CockpitWidget[] {
+  return COCKPIT_WIDGETS.filter((w) =>
+    VISIT_WIDGETS.includes(w) ? canReadVisits : canReadWorklist,
+  );
+}
+
+export function visibleWidgets(
+  config: CockpitConfig,
+  available: readonly CockpitWidget[] = COCKPIT_WIDGETS,
+): CockpitWidget[] {
+  return config.order.filter(
+    (w) => !config.hidden.includes(w) && available.includes(w),
+  );
 }

@@ -11,7 +11,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use wellos_domain::ai::Confidence;
 use wellos_domain::triage::{
-    is_service, ArrivalKind, Priority, TriageProposalV1, TriageVitals, TRIAGE_PROPOSAL_SCHEMA,
+    is_service, safety_floor, ArrivalKind, Priority, TriageProposalV1, TriageVitals,
+    TRIAGE_PROPOSAL_SCHEMA,
 };
 
 pub const TRIAGE_TEMPLATE: &str = "triage-proposal@1.0.0";
@@ -153,6 +154,22 @@ pub fn propose(req: &TriageRequest) -> Result<TriageResponse, GatewayError> {
             "Llegada registrada como urgente.".into()
         } else {
             "Arrival was registered as urgent.".into()
+        });
+    }
+    // The same deterministic rules the server enforces: the proposal's
+    // wording must agree with the priority it will be clamped to.
+    let (floor, hits) = safety_floor(req.arrival_kind, &req.red_flags, &req.vitals);
+    if !hits.is_empty() {
+        priority = priority.max(floor);
+        let rules = hits
+            .iter()
+            .map(|h| h.rule.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        rationale.push(if es {
+            format!("Reglas de seguridad activadas: {rules}.")
+        } else {
+            format!("Safety rules triggered: {rules}.")
         });
     }
 
@@ -373,6 +390,20 @@ mod tests {
         assert_eq!(a.output.proposed_service, "general_medicine");
         assert_eq!(a.output.confidence, Confidence::High);
         assert!(!a.output.limitations.is_empty());
+    }
+
+    #[test]
+    fn vital_sign_rules_raise_the_proposal_and_its_wording() {
+        let mut r = req();
+        r.vitals.spo2_percent = Some(Decimal::from(88));
+        let a = propose(&r).unwrap();
+        assert_eq!(a.output.proposed_priority, Priority::Immediate);
+        assert!(a.output.handoff_summary.contains("priority: immediate"));
+        assert!(a
+            .output
+            .rationale
+            .iter()
+            .any(|x| x.contains("vitals:spo2_below_90")));
     }
 
     #[test]

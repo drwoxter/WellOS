@@ -34,6 +34,19 @@ auditable state.
 5. **Reconstructable history**
    - Append-only observations and audit; provenance links; idempotent
      ingestion prevents duplicate clinical objects.
+6. **Safe operational triage (access → arrival → triage → consultation)**
+   - Deterministic, versioned safety floor from explicit red flags, urgent
+     arrival and abnormal vitals; priorities below the floor are refused
+     server-side; dMind triage proposals are clamped to the floor, bound to the
+     exact triage version and applied only after explicit human review.
+   - Internal alerts are directed to the assigned professional or the facility
+     service queue, re-raised on re-routing and resolved when the consultation
+     starts; visit transitions are locked and version-checked.
+   - Evidence: `wellos-domain::triage` unit tests; `access_triage_integration`
+     tests (floor enforcement, stale proposal refusal, routing, authorization);
+     Playwright golden path. Not a validated triage scale — see
+     `docs/architecture/patient-access-and-triage.md` for the governance work
+     required before real use.
 
 ## Out of scope of this outline
 
