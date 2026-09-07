@@ -1150,6 +1150,103 @@ async fn sparse_vitals_updates_cannot_lower_the_safety_floor() {
 }
 
 #[tokio::test]
+async fn proposal_cites_the_source_row_of_every_effective_vital() {
+    let (state, _) = test_state().await;
+    let (_, visit, _) = create_visit(&state, "walk_in", "general_medicine").await;
+    let (st, first) = save_triage(
+        &state,
+        &visit,
+        json!({ "vitals": { "spo2_percent": 88, "heart_rate_bpm": 96 } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{first}");
+    let spo2_row = first["vital_signs_id"].as_str().unwrap().to_string();
+    let (st, second) = save_triage(
+        &state,
+        &visit,
+        json!({ "vitals": { "temperature_c": 37.1 } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{second}");
+    let temp_row = second["vital_signs_id"].as_str().unwrap().to_string();
+    assert_ne!(spo2_row, temp_row);
+
+    // The effective SpO₂ 88 % that drives the floor was carried forward from
+    // the older row, so the proposal must cite that row — not just the latest
+    // (temperature-only) recording.
+    let (st, p) = propose(&state, &visit).await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["output"]["safety_floor"], json!("immediate"));
+    assert_eq!(p["output"]["proposed_priority"], json!("immediate"));
+    let cited: Vec<String> = p["output"]["cited_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        cited.contains(&format!("vital_signs:{spo2_row}:spo2_percent")),
+        "{cited:?}"
+    );
+    assert!(
+        cited.contains(&format!("vital_signs:{spo2_row}:heart_rate_bpm")),
+        "{cited:?}"
+    );
+    assert!(
+        cited.contains(&format!("vital_signs:{temp_row}:temperature_c")),
+        "{cited:?}"
+    );
+    assert!(
+        !cited.iter().any(|c| c.starts_with("vital_signs:")
+            && !c.ends_with(":spo2_percent")
+            && !c.ends_with(":heart_rate_bpm")
+            && !c.ends_with(":temperature_c")),
+        "unrecorded measurements are not cited: {cited:?}"
+    );
+    assert!(
+        !cited.contains(&format!("vital_signs:{temp_row}:spo2_percent")),
+        "the sparse row did not supply the SpO₂: {cited:?}"
+    );
+
+    // The same references are persisted with the artifact.
+    let persisted: Value = sqlx::query_scalar("SELECT citations FROM ai_artifacts WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(p["id"].as_str().unwrap()).unwrap())
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(persisted, json!(cited));
+    let (_, d) = detail(&state, &visit, NURSE).await;
+    assert_eq!(d["proposal"]["citations"], json!(cited), "{d}");
+
+    // A newer SpO₂ reading takes over as the cited source for that measurement.
+    let (st, third) =
+        save_triage(&state, &visit, json!({ "vitals": { "spo2_percent": 97 } })).await;
+    assert_eq!(st, StatusCode::OK, "{third}");
+    let new_spo2_row = third["vital_signs_id"].as_str().unwrap().to_string();
+    let (st, p) = propose(&state, &visit).await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["output"]["safety_floor"], json!("non_urgent"));
+    let cited: Vec<String> = p["output"]["cited_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        cited.contains(&format!("vital_signs:{new_spo2_row}:spo2_percent")),
+        "{cited:?}"
+    );
+    assert!(
+        !cited.contains(&format!("vital_signs:{spo2_row}:spo2_percent")),
+        "{cited:?}"
+    );
+    assert!(
+        cited.contains(&format!("vital_signs:{spo2_row}:heart_rate_bpm")),
+        "{cited:?}"
+    );
+}
+
+#[tokio::test]
 async fn urgent_arrival_raises_queue_alert_and_floor() {
     let (state, _) = test_state().await;
     let (_, visit, _) = create_visit(&state, "urgent", "general_medicine").await;
@@ -1914,6 +2011,191 @@ async fn cancelling_the_encounter_releases_the_visit() {
     assert_eq!(st, StatusCode::OK, "{s2}");
     assert_eq!(s2["resumed"], json!(false));
     assert_ne!(s2["encounter_id"], json!(encounter));
+}
+
+/// No visit in consultation may point at an encounter that is not in progress
+/// (scoped to the visits under test: the database is shared and persistent).
+async fn open_visits_on_closed_encounters(state: &AppState, visits: &[&str]) -> i64 {
+    let ids: Vec<uuid::Uuid> = visits
+        .iter()
+        .map(|v| uuid::Uuid::parse_str(v).unwrap())
+        .collect();
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM visits v JOIN encounters e ON e.id = v.encounter_id
+         WHERE v.id = ANY($1) AND v.status = 'in_consultation'
+           AND e.status <> 'in_progress'",
+    )
+    .bind(&ids)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap()
+}
+
+async fn encounter_status(state: &AppState, id: &str) -> String {
+    sqlx::query_scalar("SELECT status FROM encounters WHERE id = $1::uuid")
+        .bind(uuid::Uuid::parse_str(id).unwrap())
+        .fetch_one(&state.pool)
+        .await
+        .unwrap()
+}
+
+/// García already has a draft consultation for a patient who is now ready
+/// for consultation; returns (draft encounter id, visit id).
+async fn ready_visit_with_draft(state: &AppState, note: bool) -> (String, String) {
+    let (patient, visit, _) = create_visit(state, "walk_in", "general_medicine").await;
+    let (st, enc) = call(
+        state,
+        "POST",
+        "/api/v1/encounters",
+        GARCIA,
+        Some(json!({ "patient_id": patient })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{enc}");
+    let draft = enc["id"].as_str().unwrap().to_string();
+    if note {
+        let (st, n) = call(
+            state,
+            "POST",
+            &format!("/api/v1/encounters/{draft}/note"),
+            GARCIA,
+            Some(json!({ "reason_for_encounter": "Follow-up", "assessment": "Stable" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{n}");
+    }
+    let (st, _) = save_triage(state, &visit, json!({})).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, c) = complete_triage(state, &visit, json!({})).await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    (draft, visit)
+}
+
+#[tokio::test]
+async fn resuming_a_draft_serializes_with_encounter_sign_and_cancel() {
+    let (state, _) = test_state().await;
+    let settle = || tokio::time::sleep(std::time::Duration::from_millis(400));
+
+    // --- Sign commits first -------------------------------------------------
+    // The real sign route holds the encounter lock and is parked on the note
+    // row (held by this test) just before it completes the encounter.
+    let (draft, visit) = ready_visit_with_draft(&state, true).await;
+    let mut hold = state.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM encounter_notes WHERE encounter_id = $1::uuid FOR UPDATE")
+        .bind(uuid::Uuid::parse_str(&draft).unwrap())
+        .execute(&mut *hold)
+        .await
+        .unwrap();
+    let sign = {
+        let (state, draft) = (state.clone(), draft.clone());
+        tokio::spawn(async move {
+            call(
+                &state,
+                "POST",
+                &format!("/api/v1/encounters/{draft}/sign"),
+                GARCIA,
+                Some(json!({ "version": 1 })),
+            )
+            .await
+        })
+    };
+    settle().await;
+    assert_eq!(encounter_status(&state, &draft).await, "in_progress");
+
+    // The handoff must wait for the sign instead of linking the draft.
+    let start = {
+        let (state, visit) = (state.clone(), visit.clone());
+        tokio::spawn(async move { start_consultation(&state, &visit, GARCIA).await })
+    };
+    settle().await;
+    assert!(
+        !start.is_finished(),
+        "handoff linked an encounter being signed"
+    );
+    let (_, d) = detail(&state, &visit, GARCIA).await;
+    assert_eq!(d["status"], json!("ready_for_consultation"), "{d}");
+    assert!(d["encounter_id"].is_null(), "{d}");
+
+    hold.commit().await.unwrap();
+    let (st, signed) = sign.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{signed}");
+    let (st, s) = start.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{s}");
+    // The signed draft was not reused: a fresh consultation carries the visit.
+    assert_eq!(s["resumed"], json!(false));
+    assert_ne!(s["encounter_id"], json!(draft));
+    let fresh = s["encounter_id"].as_str().unwrap().to_string();
+    assert_eq!(encounter_status(&state, &draft).await, "completed");
+    assert_eq!(encounter_status(&state, &fresh).await, "in_progress");
+    let (_, d) = detail(&state, &visit, GARCIA).await;
+    assert_eq!(d["status"], json!("in_consultation"));
+    assert_eq!(d["encounter_id"], json!(fresh));
+    let sign_visit = visit;
+
+    // --- Cancel commits first -----------------------------------------------
+    // Cancellation's critical section (encounter lock, then status update) is
+    // replayed inside a held transaction so the handoff races its commit.
+    let (draft, visit) = ready_visit_with_draft(&state, false).await;
+    let mut cancel = state.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM encounters WHERE id = $1::uuid FOR UPDATE")
+        .bind(uuid::Uuid::parse_str(&draft).unwrap())
+        .execute(&mut *cancel)
+        .await
+        .unwrap();
+    let start = {
+        let (state, visit) = (state.clone(), visit.clone());
+        tokio::spawn(async move { start_consultation(&state, &visit, GARCIA).await })
+    };
+    settle().await;
+    assert!(
+        !start.is_finished(),
+        "handoff linked an encounter being cancelled"
+    );
+    let (_, d) = detail(&state, &visit, GARCIA).await;
+    assert_eq!(d["status"], json!("ready_for_consultation"), "{d}");
+    sqlx::query(
+        "UPDATE encounters SET status = 'cancelled', completed_at = now()
+         WHERE id = $1::uuid AND status = 'in_progress'",
+    )
+    .bind(uuid::Uuid::parse_str(&draft).unwrap())
+    .execute(&mut *cancel)
+    .await
+    .unwrap();
+    cancel.commit().await.unwrap();
+
+    let (st, s) = start.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{s}");
+    assert_eq!(s["resumed"], json!(false));
+    assert_ne!(s["encounter_id"], json!(draft));
+    let fresh = s["encounter_id"].as_str().unwrap().to_string();
+    assert_eq!(encounter_status(&state, &draft).await, "cancelled");
+    assert_eq!(encounter_status(&state, &fresh).await, "in_progress");
+    let (_, d) = detail(&state, &visit, GARCIA).await;
+    assert_eq!(d["status"], json!("in_consultation"));
+    assert_eq!(d["encounter_id"], json!(fresh));
+    let cancel_visit = visit;
+
+    // --- Handoff commits first ----------------------------------------------
+    // With the draft linked, signing it completes the visit as well.
+    let (draft, visit) = ready_visit_with_draft(&state, true).await;
+    let (st, s) = start_consultation(&state, &visit, GARCIA).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    assert_eq!(s["resumed"], json!(true));
+    let (st, signed) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{draft}/sign"),
+        GARCIA,
+        Some(json!({ "version": 1 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{signed}");
+    let (_, d) = detail(&state, &visit, GARCIA).await;
+    assert_eq!(d["status"], json!("completed"));
+    assert_eq!(
+        open_visits_on_closed_encounters(&state, &[&sign_visit, &cancel_visit, &visit]).await,
+        0
+    );
 }
 
 #[tokio::test]

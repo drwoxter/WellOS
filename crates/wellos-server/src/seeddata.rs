@@ -1,6 +1,7 @@
 //! Synthetic development seed data. All names, identifiers, and clinical
 //! values are clearly synthetic. No real PHI anywhere.
 
+use crate::routes::visits::single_row_vital_facts;
 use dmind_gateway::triage::TRIAGE_TEMPLATE;
 use dmind_gateway::{ModelGateway, SummaryRequest, TriageRequest};
 use rand::RngCore;
@@ -1373,14 +1374,16 @@ async fn seed_access_triage(tx: &mut PgConnection, s: AccessSeed) -> anyhow::Res
             concerns: diego_concerns,
             onset: Some("2 days".to_string()),
             red_flags: vec![],
-            vitals: diego_triage_vitals,
             allergies: vec![],
             requested_service: Some("general_medicine".to_string()),
-            facts: vec![
-                ("visit.arrival_kind".into(), "walk_in".into()),
-                ("triage.version".into(), "1".into()),
-                ("vital_signs.id".into(), diego_vitals.to_string()),
-            ],
+            facts: [
+                ("visit.arrival_kind".to_string(), "walk_in".to_string()),
+                ("triage.version".to_string(), "1".to_string()),
+            ]
+            .into_iter()
+            .chain(single_row_vital_facts(diego_vitals, &diego_triage_vitals))
+            .collect(),
+            vitals: diego_triage_vitals,
         },
         1,
         None,
@@ -1497,14 +1500,16 @@ async fn seed_access_triage(tx: &mut PgConnection, s: AccessSeed) -> anyhow::Res
             concerns: jonas_concerns.clone(),
             onset: Some("1 week".to_string()),
             red_flags: jonas_flags.clone(),
-            vitals: jonas_triage_vitals,
             allergies: vec![],
             requested_service: Some("general_medicine".to_string()),
-            facts: vec![
-                ("visit.arrival_kind".into(), "scheduled".into()),
-                ("triage.version".into(), "1".into()),
-                ("vital_signs.id".into(), jonas_vitals.to_string()),
-            ],
+            facts: [
+                ("visit.arrival_kind".to_string(), "scheduled".to_string()),
+                ("triage.version".to_string(), "1".to_string()),
+            ]
+            .into_iter()
+            .chain(single_row_vital_facts(jonas_vitals, &jonas_triage_vitals))
+            .collect(),
+            vitals: jonas_triage_vitals,
         },
         1,
         Some((

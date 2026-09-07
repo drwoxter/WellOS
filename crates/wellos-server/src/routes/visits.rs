@@ -1530,7 +1530,7 @@ pub async fn save_triage(
     // The safety floor is computed from every measurement on record for this
     // visit, so a partial re-measurement can never drop an earlier abnormal
     // value out of the rules.
-    let floor_vitals = load_visit_vitals(&mut tx, v.tenant_id, id).await?;
+    let floor_vitals = load_visit_vitals(&mut tx, v.tenant_id, id).await?.vitals;
     let (floor, hits) = safety_floor(v.arrival_kind, &red_flags, &floor_vitals);
     if let Some(p) = priority {
         if p < floor {
@@ -1621,6 +1621,57 @@ pub async fn save_triage(
     })))
 }
 
+/// The measurements the safety rules consider, in citation order.
+const SAFETY_VITALS: [&str; 5] = [
+    "systolic_mmhg",
+    "heart_rate_bpm",
+    "respiratory_rate_bpm",
+    "temperature_c",
+    "spo2_percent",
+];
+
+/// Effective vital-sign snapshot of a visit together with the row each
+/// value was taken from, so provenance can name the measurement's source
+/// rather than whichever row happened to be recorded last.
+struct EffectiveVitals {
+    vitals: TriageVitals,
+    /// `(measurement, value, source row)` for every non-null effective value.
+    sources: Vec<(&'static str, Decimal, Uuid)>,
+}
+
+/// `(reference, statement)` fact for one effective measurement, citing the
+/// vital-sign row it was taken from: `vital_signs:<row id>:<measurement>`.
+pub(crate) fn vital_fact(measurement: &str, value: Decimal, source: Uuid) -> (String, String) {
+    (
+        format!("vital_signs:{source}:{measurement}"),
+        format!("{measurement} {}", value.normalize()),
+    )
+}
+
+/// Facts for a snapshot recorded entirely in one vital-sign row.
+pub(crate) fn single_row_vital_facts(source: Uuid, v: &TriageVitals) -> Vec<(String, String)> {
+    [
+        ("systolic_mmhg", v.systolic_mmhg),
+        ("heart_rate_bpm", v.heart_rate_bpm),
+        ("respiratory_rate_bpm", v.respiratory_rate_bpm),
+        ("temperature_c", v.temperature_c),
+        ("spo2_percent", v.spo2_percent),
+    ]
+    .into_iter()
+    .filter_map(|(m, value)| value.map(|value| vital_fact(m, value, source)))
+    .collect()
+}
+
+impl EffectiveVitals {
+    /// Facts naming the source row of every effective value.
+    fn facts(&self) -> Vec<(String, String)> {
+        self.sources
+            .iter()
+            .map(|(m, value, source)| vital_fact(m, *value, *source))
+            .collect()
+    }
+}
+
 /// The vitals the safety rules see: for each measurement, the most recently
 /// recorded non-null value among all vital-sign rows of the visit. Rows stay
 /// append-only records of what was measured when; the effective view carries
@@ -1630,34 +1681,44 @@ async fn load_visit_vitals(
     conn: &mut PgConnection,
     tenant_id: Uuid,
     visit_id: Uuid,
-) -> Result<TriageVitals, ApiError> {
-    let r = sqlx::query(
-        "WITH vs AS (
-            SELECT * FROM vital_signs WHERE tenant_id = $1 AND visit_id = $2
-         )
-         SELECT
-           (SELECT systolic_mmhg FROM vs WHERE systolic_mmhg IS NOT NULL
-              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS systolic_mmhg,
-           (SELECT heart_rate_bpm FROM vs WHERE heart_rate_bpm IS NOT NULL
-              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS heart_rate_bpm,
-           (SELECT respiratory_rate_bpm FROM vs WHERE respiratory_rate_bpm IS NOT NULL
-              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS respiratory_rate_bpm,
-           (SELECT temperature_c FROM vs WHERE temperature_c IS NOT NULL
-              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS temperature_c,
-           (SELECT spo2_percent FROM vs WHERE spo2_percent IS NOT NULL
-              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS spo2_percent",
-    )
+) -> Result<EffectiveVitals, ApiError> {
+    // One row per measurement: the value and the id of the row it came from.
+    let latest = SAFETY_VITALS
+        .iter()
+        .map(|m| {
+            format!(
+                "(SELECT '{m}'::text AS measurement, {m} AS value, id AS source FROM vs
+                  WHERE {m} IS NOT NULL ORDER BY recorded_at DESC, id DESC LIMIT 1)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    let rows = sqlx::query(&format!(
+        "WITH vs AS (SELECT * FROM vital_signs WHERE tenant_id = $1 AND visit_id = $2)
+         SELECT measurement, value, source FROM ({latest}) effective"
+    ))
     .bind(tenant_id)
     .bind(visit_id)
-    .fetch_one(&mut *conn)
+    .fetch_all(&mut *conn)
     .await?;
-    Ok(TriageVitals {
-        systolic_mmhg: r.get("systolic_mmhg"),
-        heart_rate_bpm: r.get("heart_rate_bpm"),
-        respiratory_rate_bpm: r.get("respiratory_rate_bpm"),
-        temperature_c: r.get("temperature_c"),
-        spo2_percent: r.get("spo2_percent"),
-    })
+    let mut vitals = TriageVitals::default();
+    let mut sources = Vec::with_capacity(rows.len());
+    for m in SAFETY_VITALS {
+        let Some(r) = rows.iter().find(|r| r.get::<String, _>("measurement") == m) else {
+            continue;
+        };
+        let value: Decimal = r.get("value");
+        let slot = match m {
+            "systolic_mmhg" => &mut vitals.systolic_mmhg,
+            "heart_rate_bpm" => &mut vitals.heart_rate_bpm,
+            "respiratory_rate_bpm" => &mut vitals.respiratory_rate_bpm,
+            "temperature_c" => &mut vitals.temperature_c,
+            _ => &mut vitals.spo2_percent,
+        };
+        *slot = Some(value);
+        sources.push((m, value, r.get("source")));
+    }
+    Ok(EffectiveVitals { vitals, sources })
 }
 
 // ---------------------------------------------------------------------------
@@ -1717,8 +1778,7 @@ pub async fn propose(
         serde_json::from_value(a.get::<Value, _>("concerns")).unwrap_or_default();
     let red_flags: Vec<String> =
         serde_json::from_value(a.get::<Value, _>("red_flags")).unwrap_or_default();
-    let vitals_id: Option<Uuid> = a.get("vital_signs_id");
-    let vitals = load_visit_vitals(&mut tx, v.tenant_id, id).await?;
+    let effective = load_visit_vitals(&mut tx, v.tenant_id, id).await?;
     let allergies: Vec<String> = sqlx::query_scalar(
         "SELECT substance FROM allergies WHERE tenant_id = $1 AND patient_id = $2 ORDER BY substance",
     )
@@ -1733,9 +1793,9 @@ pub async fn propose(
         ),
         ("triage.version".into(), triage_version.to_string()),
     ];
-    if let Some(vid) = vitals_id {
-        facts.push(("vital_signs.id".into(), vid.to_string()));
-    }
+    // Every effective measurement cites the row it was carried forward from,
+    // not just the latest (possibly sparse) recording.
+    facts.extend(effective.facts());
     let req = TriageRequest {
         template: TRIAGE_TEMPLATE.to_string(),
         language,
@@ -1745,7 +1805,7 @@ pub async fn propose(
         concerns,
         onset: a.get("onset"),
         red_flags,
-        vitals,
+        vitals: effective.vitals,
         allergies,
         requested_service: a.get("requested_service"),
         facts,
@@ -2388,12 +2448,19 @@ pub async fn start_consultation(
     }
 
     // Create-or-resume the caller's consultation for this patient (same rule
-    // as POST /encounters with resume=true).
+    // as POST /encounters with resume=true). The draft is locked with the
+    // same row lock encounter sign and cancel take, and the predicate is
+    // re-evaluated once the lock is held: a draft closed by a transaction
+    // that committed first is not returned, and one returned stays
+    // `in_progress` until this handoff commits. Lock order stays
+    // patient → visit → encounter; sign/cancel lock the encounter and then
+    // the visit *already linked* to it, which is never the one held here.
     let existing: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM encounters
          WHERE tenant_id = $1 AND patient_id = $2 AND practitioner_id = $3
            AND status = 'in_progress' AND encounter_type = 'consultation'
-         ORDER BY started_at DESC LIMIT 1",
+         ORDER BY started_at DESC LIMIT 1
+         FOR UPDATE",
     )
     .bind(v.tenant_id)
     .bind(v.patient_id)

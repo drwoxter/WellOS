@@ -411,6 +411,49 @@ describe("triage workspace", () => {
     );
   });
 
+  it("names the recorded measurement behind each cited vital-sign source, including carried-forward rows", async () => {
+    const older = {
+      id: "vs0",
+      visit_id: "v1",
+      encounter_id: null,
+      systolic_mmhg: null,
+      diastolic_mmhg: null,
+      heart_rate_bpm: null,
+      respiratory_rate_bpm: null,
+      temperature_c: null,
+      spo2_percent: "88",
+      weight_kg: null,
+      height_cm: null,
+      bmi: null,
+      recorded_at: "2026-08-29T07:50:00Z",
+    };
+    const base = detail();
+    setup(
+      detail({
+        vitals: [base.vitals[0], older],
+        proposal: {
+          ...PROPOSAL,
+          output: {
+            ...PROPOSAL.output,
+            cited_sources: [
+              "triage.concerns",
+              "vital_signs:vs0:spo2_percent",
+              "vital_signs:vs1:temperature_c",
+            ],
+          },
+        },
+      }),
+    );
+    const panel = await screen.findByRole("region", {
+      name: "dMind triage suggestion",
+    });
+    const facts = within(panel).getByText(/Facts used:/);
+    expect(facts).toHaveTextContent(/Oxygen saturation 88 % \(/);
+    expect(facts).toHaveTextContent(/Temperature 38\.2 °C \(/);
+    expect(facts).toHaveTextContent("triage.concerns");
+    expect(facts).not.toHaveTextContent("vital_signs:");
+  });
+
   it("marks a proposal stale when the triage moved past the version it cited", async () => {
     setup(
       detail({

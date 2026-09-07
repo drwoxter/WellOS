@@ -223,6 +223,24 @@ function SafetyHeader({ lang, d }: { lang: Lang; d: Detail }) {
   );
 }
 
+// A cited source in clinician terms. Vital-sign references
+// (`vital_signs:<row>:<measurement>`) name the measurement, its value and
+// when the source row was recorded; other references are shown as-is.
+function citationLabel(lang: Lang, ref: string, vitals: VitalSet[]): string {
+  const m = /^vital_signs:([^:]+):([a-z0-9_]+)$/.exec(ref);
+  if (!m) return ref;
+  const field = VITAL_FIELDS.find((f) => f.field === m[2]);
+  if (!field) return ref;
+  const row = vitals.find((v) => v.id === m[1]);
+  const value = row?.[field.field];
+  const measured = value
+    ? `${t(lang, field.labelKey)} ${value} ${field.unit}`
+    : t(lang, field.labelKey);
+  return row
+    ? `${measured} (${formatDateTime(lang, row.recorded_at)})`
+    : measured;
+}
+
 function ProposalPanel({
   lang,
   d,
@@ -347,8 +365,11 @@ function ProposalPanel({
             ))}
           </ul>
           <p className="muted">
-            {t(lang, "factsUsed")}: {out.cited_sources.join(", ")} ·{" "}
-            {p.model ?? "—"} {p.model_version ?? ""}
+            {t(lang, "factsUsed")}:{" "}
+            {out.cited_sources
+              .map((c) => citationLabel(lang, c, d.vitals))
+              .join(", ")}{" "}
+            · {p.model ?? "—"} {p.model_version ?? ""}
             {p.generated_at ? ` · ${formatDateTime(lang, p.generated_at)}` : ""}
           </p>
           {awaiting ? (
