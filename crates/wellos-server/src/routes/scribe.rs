@@ -79,6 +79,22 @@ pub(crate) async fn supersede_applicable_scribe_drafts(
     Ok(())
 }
 
+/// The note version a scribe draft is currently bound to: the version read
+/// under the encounter lock when it was proposed, advanced by each of its own
+/// applications (which bump the note). Any other write to the note leaves the
+/// draft bound to a version that no longer exists, so it can no longer be
+/// applied.
+pub(crate) fn bound_note_version(
+    source_note_version: Option<i64>,
+    review_detail: &Value,
+) -> Option<i64> {
+    review_detail["applied"]
+        .as_array()
+        .and_then(|applied| applied.last())
+        .and_then(|last| last["note_version"].as_i64())
+        .map_or(source_note_version, Some)
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/v1/encounters/:id/recording-consent
 // ---------------------------------------------------------------------------
@@ -601,7 +617,7 @@ pub async fn review(
     ai_review.record(&mut tx, &ctx, &state.cell).await?;
 
     let artifact = sqlx::query(
-        "SELECT status, output, review_detail FROM ai_artifacts
+        "SELECT status, output, review_detail, note_version FROM ai_artifacts
          WHERE id = $1 AND tenant_id = $2 AND encounter_id = $3 AND artifact_type = 'scribe_draft'
          FOR UPDATE",
     )
@@ -657,6 +673,13 @@ pub async fn review(
                 ));
             }
             _ => {}
+        }
+        let source_note_version: Option<i64> = artifact.get("note_version");
+        if bound_note_version(source_note_version, &review_detail) != current_note_version {
+            return Err(ApiError::conflict(
+                "artifact_stale",
+                "the note changed since this draft was prepared; record again for a new draft",
+            ));
         }
         let output: Value = artifact
             .get::<Option<Value>, _>("output")

@@ -1015,12 +1015,125 @@ describe("scribe review in the encounter workspace", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows a stale notice and disables actions when the artifact is stale", async () => {
+  it("shows a stale notice and disables insertion (not dismissal) when the artifact is stale", async () => {
     setupPage(workspace({ scribe_draft: artifact({ stale: true }) }));
     await screen.findByText("dMind scribe draft");
     expect(
       screen.getAllByText(/note changed since this draft/i).length,
     ).toBeGreaterThan(0);
+    for (const b of screen.getAllByRole("button", {
+      name: /Insert into empty section|Append to section|Insert all/,
+    })) {
+      expect(b).toBeDisabled();
+    }
+    expect(screen.getByRole("button", { name: "Dismiss draft" })).toBeEnabled();
+  });
+
+  it("a save that advances the note version makes the draft stale locally", async () => {
+    const user = userEvent.setup();
+    // The post-save reload is held back so the assertion sees the local
+    // transition, not the server's recomputed flag.
+    let releaseReload: () => void = () => {};
+    const reloadGate = new Promise<void>((r) => (releaseReload = r));
+    let saved = false;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/session")
+          return jsonResponse({ authenticated: true });
+        if (url === "/api/v1/meta/tenant") return jsonResponse(META);
+        if (init?.method === "POST" && url === "/api/v1/encounters/e1/note") {
+          saved = true;
+          return jsonResponse({ version: 2 });
+        }
+        if (url.startsWith("/api/v1/encounters/e1?")) {
+          if (!saved) return jsonResponse(workspace());
+          await reloadGate;
+          return jsonResponse(
+            workspace({
+              note: { ...DRAFT_NOTE, version: 2, plan: "Rest and fluids." },
+              scribe_draft: artifact({ stale: true }),
+            }),
+          );
+        }
+        return jsonResponse({});
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <SessionProvider>
+        <EncounterPage params={{ id: "e1" }} />
+      </SessionProvider>,
+    );
+    const insert = (
+      await screen.findAllByRole("button", {
+        name: "Insert into empty section",
+      })
+    )[0];
+    expect(insert).toBeEnabled();
+    await user.type(screen.getByLabelText(/^Plan/), "Rest and fluids.");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() =>
+      expect(
+        screen.getAllByText(/note changed since this draft/i).length,
+      ).toBeGreaterThan(0),
+    );
+    for (const b of screen.getAllByRole("button", {
+      name: /Insert into empty section|Append to section|Insert all/,
+    })) {
+      expect(b).toBeDisabled();
+    }
+    releaseReload();
+    await waitFor(() =>
+      expect(screen.getByText("Draft saved.")).toBeInTheDocument(),
+    );
+    for (const b of screen.getAllByRole("button", {
+      name: /Insert into empty section|Append to section|Insert all/,
+    })) {
+      expect(b).toBeDisabled();
+    }
+  });
+
+  it("treats a server artifact_stale refusal as stale and reloads", async () => {
+    const user = userEvent.setup();
+    let loads = 0;
+    const fetchMock = setupPage(
+      () => {
+        loads += 1;
+        return loads === 1
+          ? workspace()
+          : workspace({ scribe_draft: artifact({ stale: true }) });
+      },
+      {
+        "/api/v1/encounters/e1/scribe/a1/review": () =>
+          apiError(409, "artifact_stale", "stale"),
+      },
+    );
+    const insert = (
+      await screen.findAllByRole("button", {
+        name: "Insert into empty section",
+      })
+    )[0];
+    await user.click(insert);
+    const alerts = await screen.findAllByRole("alert");
+    expect(
+      alerts.some((a) =>
+        /note changed since this draft/i.test(a.textContent ?? ""),
+      ),
+    ).toBe(true);
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter((c) =>
+          String(c[0]).startsWith("/api/v1/encounters/e1?"),
+        ).length,
+      ).toBeGreaterThan(1),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: "Insert into empty section" })[0],
+      ).toBeDisabled(),
+    );
+    expect(screen.getByLabelText(/Reason for consultation/)).toHaveValue("");
   });
 
   it("hides the dock and review once the note is signed", async () => {

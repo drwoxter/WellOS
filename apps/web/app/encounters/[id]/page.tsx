@@ -187,6 +187,22 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// Drafts bound to the note version a write just replaced can no longer be
+// accepted or inserted; the server refuses them (`artifact_stale`).
+function markDraftsStale(ws: Workspace): Workspace {
+  const ai_draft =
+    ws.ai_draft?.status === "awaiting_review"
+      ? { ...ws.ai_draft, stale: true }
+      : ws.ai_draft;
+  const scribe_draft =
+    ws.scribe_draft &&
+    (ws.scribe_draft.status === "awaiting_review" ||
+      ws.scribe_draft.status === "approved")
+      ? { ...ws.scribe_draft, stale: true }
+      : ws.scribe_draft;
+  return { ...ws, ai_draft, scribe_draft };
+}
+
 function SafetyHeader({ ws, lang }: { ws: Workspace; lang: Lang }) {
   const p = ws.patient;
   const age = ageYears(p.birth_date);
@@ -1179,14 +1195,10 @@ function EncounterWorkspace({ id }: { id: string }) {
       };
       setSavedRevision(snapshot.revision);
       // The server retires any unreviewed dMind draft whose cited note
-      // version this save replaced; an unchanged save keeps the version and
-      // the draft.
+      // version this save replaced and refuses a scribe draft bound to it;
+      // an unchanged save keeps the version and the drafts.
       if (res.version !== snapshot.version) {
-        setWs((prev) =>
-          prev?.ai_draft?.status === "awaiting_review"
-            ? { ...prev, ai_draft: { ...prev.ai_draft, stale: true } }
-            : prev,
-        );
+        setWs((prev) => (prev ? markDraftsStale(prev) : prev));
       }
       setSaveMessage(
         local.current.revision === snapshot.revision
@@ -1271,15 +1283,10 @@ function EncounterWorkspace({ id }: { id: string }) {
             version: signed.version ?? base.version,
           };
         }
-        const ai_draft =
-          prev.ai_draft?.status === "awaiting_review"
-            ? { ...prev.ai_draft, stale: true }
-            : prev.ai_draft;
         return {
-          ...prev,
+          ...markDraftsStale(prev),
           encounter: { ...prev.encounter, status },
           note,
-          ai_draft,
           capabilities: {
             can_document: false,
             can_sign: false,
@@ -1551,6 +1558,7 @@ function EncounterWorkspace({ id }: { id: string }) {
             case "section_not_empty":
             case "section_already_applied":
               return "conflict";
+            case "artifact_stale":
             case "artifact_not_reviewable":
             case "review_conflict":
               load();

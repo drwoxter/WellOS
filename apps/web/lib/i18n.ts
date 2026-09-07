@@ -421,7 +421,7 @@ const dict = {
     scribeApplied: "Inserted into the note. Review and save when ready.",
     scribeDismissed: "Draft dismissed.",
     scribeStale:
-      "The note changed since this draft was prepared; check each section before inserting.",
+      "The note changed since this draft was prepared, so its sections can no longer be inserted. Record again for a new draft; the transcript stays available to read.",
     sectionNotEmpty: "This section already contains your text; append instead.",
     sectionAlreadyApplied: "This suggestion was already inserted.",
     flagsTitle: "Check these",
@@ -928,7 +928,7 @@ const dict = {
     scribeApplied: "Insertado en la nota. Revise y guarde cuando esté listo.",
     scribeDismissed: "Borrador descartado.",
     scribeStale:
-      "La nota cambió desde que se preparó este borrador; revise cada sección antes de insertar.",
+      "La nota cambió desde que se preparó este borrador, por lo que sus secciones ya no pueden insertarse. Grabe de nuevo para un borrador nuevo; la transcripción sigue disponible para leer.",
     sectionNotEmpty: "Esta sección ya contiene su texto; añada en su lugar.",
     sectionAlreadyApplied: "Esta sugerencia ya se insertó.",
     flagsTitle: "Revise esto",

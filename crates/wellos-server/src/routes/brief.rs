@@ -389,43 +389,7 @@ pub(crate) async fn patient_brief(
     })
     .collect::<Vec<_>>();
 
-    // Recent results outside their reference range (latest non-superseded
-    // row per request), for the brief's "recent abnormal results" list.
-    let abnormal = sqlx::query(
-        "SELECT o.id, o.code_loinc, sr.display, o.value_num, o.unit, o.reference_range,
-                o.effective_at, sr.id AS service_request_id,
-                EXISTS (SELECT 1 FROM rule_evaluations re
-                        WHERE re.observation_id = o.id
-                          AND re.outcome->>'outcome' = 'critical') AS critical
-         FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
-         WHERE o.tenant_id = $1 AND o.patient_id = $2
-           AND NOT EXISTS (SELECT 1 FROM observations x WHERE x.amends = o.id)
-         ORDER BY o.effective_at DESC LIMIT 20",
-    )
-    .bind(tenant_id)
-    .bind(patient_id)
-    .fetch_all(&mut *tx)
-    .await?
-    .iter()
-    .filter_map(|r| {
-        let value: Decimal = r.get("value_num");
-        let range: Option<String> = r.get("reference_range");
-        let flag = abnormal_flag(value, range.as_deref())?;
-        Some(json!({
-            "id": r.get::<Uuid,_>("id"),
-            "service_request_id": r.get::<Uuid,_>("service_request_id"),
-            "code": r.get::<String,_>("code_loinc"),
-            "display": r.get::<String,_>("display"),
-            "value": value,
-            "unit": r.get::<String,_>("unit"),
-            "reference_range": range,
-            "abnormal": flag,
-            "critical": r.get::<bool,_>("critical"),
-            "effective_at": r.get::<chrono::DateTime<chrono::Utc>,_>("effective_at"),
-        }))
-    })
-    .take(5)
-    .collect::<Vec<_>>();
+    let abnormal = recent_abnormal(tx, tenant_id, patient_id).await?;
 
     Ok(json!({
         "recent_notes": recent_notes,
@@ -434,6 +398,78 @@ pub(crate) async fn patient_brief(
         "recent_abnormal": abnormal,
         "generated_at": chrono::Utc::now(),
     }))
+}
+
+/// Number of abnormal results the brief lists.
+const RECENT_ABNORMAL_LIMIT: usize = 5;
+const ABNORMAL_SCAN_BATCH: i64 = 20;
+
+/// The latest `RECENT_ABNORMAL_LIMIT` results outside their reference range
+/// (latest non-superseded row per request), newest first.
+///
+/// Reference ranges are free text and classified in Rust (`abnormal_flag`),
+/// so the limit cannot be pushed into SQL. Instead the patient's results are
+/// walked newest-first in keyset batches and classified as they arrive; the
+/// walk stops once enough abnormal results have been found or the history is
+/// exhausted. Normal results therefore never consume the abnormal quota,
+/// however many of them are newer than the last abnormal one.
+async fn recent_abnormal(
+    tx: &mut PgConnection,
+    tenant_id: Uuid,
+    patient_id: Uuid,
+) -> Result<Vec<Value>, sqlx::Error> {
+    let mut abnormal = Vec::with_capacity(RECENT_ABNORMAL_LIMIT);
+    let mut after: Option<(chrono::DateTime<chrono::Utc>, Uuid)> = None;
+    loop {
+        let rows = sqlx::query(
+            "SELECT o.id, o.code_loinc, sr.display, o.value_num, o.unit, o.reference_range,
+                    o.effective_at, sr.id AS service_request_id,
+                    EXISTS (SELECT 1 FROM rule_evaluations re
+                            WHERE re.observation_id = o.id
+                              AND re.outcome->>'outcome' = 'critical') AS critical
+             FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
+             WHERE o.tenant_id = $1 AND o.patient_id = $2
+               AND NOT EXISTS (SELECT 1 FROM observations x WHERE x.amends = o.id)
+               AND ($3::timestamptz IS NULL OR (o.effective_at, o.id) < ($3, $4::uuid))
+             ORDER BY o.effective_at DESC, o.id DESC LIMIT $5",
+        )
+        .bind(tenant_id)
+        .bind(patient_id)
+        .bind(after.map(|(at, _)| at))
+        .bind(after.map(|(_, id)| id))
+        .bind(ABNORMAL_SCAN_BATCH)
+        .fetch_all(&mut *tx)
+        .await?;
+        let exhausted = rows.len() < ABNORMAL_SCAN_BATCH as usize;
+        for r in &rows {
+            let value: Decimal = r.get("value_num");
+            let range: Option<String> = r.get("reference_range");
+            let Some(flag) = abnormal_flag(value, range.as_deref()) else {
+                continue;
+            };
+            abnormal.push(json!({
+                "id": r.get::<Uuid,_>("id"),
+                "service_request_id": r.get::<Uuid,_>("service_request_id"),
+                "code": r.get::<String,_>("code_loinc"),
+                "display": r.get::<String,_>("display"),
+                "value": value,
+                "unit": r.get::<String,_>("unit"),
+                "reference_range": range,
+                "abnormal": flag,
+                "critical": r.get::<bool,_>("critical"),
+                "effective_at": r.get::<chrono::DateTime<chrono::Utc>,_>("effective_at"),
+            }));
+            if abnormal.len() == RECENT_ABNORMAL_LIMIT {
+                return Ok(abnormal);
+            }
+        }
+        match rows.last() {
+            Some(last) if !exhausted => {
+                after = Some((last.get("effective_at"), last.get("id")));
+            }
+            _ => return Ok(abnormal),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -525,6 +525,9 @@ export function ScribeReview({
   const actionable =
     (artifact.status === "awaiting_review" || artifact.status === "approved") &&
     !locked;
+  // A draft bound to a note version that no longer exists cannot be inserted
+  // (the server refuses it); dismissing it remains a decision only.
+  const insertable = actionable && !artifact.stale;
   const proposals = output.sections.filter((s) => isNoteSection(s.section));
   const applyAll = defaultApplyAll(proposals, current, applied);
   const segmentById = new Map<number, TranscriptSegment>(
@@ -638,7 +641,7 @@ export function ScribeReview({
           <button
             type="button"
             className="primary"
-            disabled={!actionable || busy || applyAll.length === 0}
+            disabled={!insertable || busy || applyAll.length === 0}
             onClick={() => void run(applyAll)}
           >
             {t(lang, "applyAllEmpty")}
@@ -707,7 +710,7 @@ export function ScribeReview({
                     <button
                       type="button"
                       className="secondary"
-                      disabled={!actionable || busy}
+                      disabled={!insertable || busy}
                       onClick={() => void run([{ section: key, mode: "fill" }])}
                     >
                       {t(lang, "insertIntoSection")}
@@ -716,7 +719,7 @@ export function ScribeReview({
                     <button
                       type="button"
                       className="secondary"
-                      disabled={!actionable || busy}
+                      disabled={!insertable || busy}
                       onClick={() =>
                         void run([{ section: key, mode: "append" }])
                       }

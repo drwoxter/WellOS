@@ -448,10 +448,9 @@ pub async fn workspace(
     .unwrap_or(Value::Null);
 
     // Latest consultation-scribe draft (transcript + proposed sections). It is
-    // bound to the note version it was proposed against; the clinician's own
-    // saves do not retire it (the text comes from the conversation, not the
-    // note), but application re-checks the live version so nothing is
-    // silently overwritten.
+    // bound to the note version it was proposed against, advanced by its own
+    // section applications; any other note write leaves it stale and the
+    // review route refuses to apply it (`artifact_stale`).
     let scribe_draft = sqlx::query(
         "SELECT id, status, output, limitations, model, model_version, route,
                 generated_at, review_decision, review_detail, note_version
@@ -465,6 +464,9 @@ pub async fn workspace(
     .await?
     .map(|r| {
         let note_version: Option<i64> = r.get("note_version");
+        let review_detail: Value = r.get("review_detail");
+        let stale = crate::routes::scribe::bound_note_version(note_version, &review_detail)
+            != current_note_version;
         json!({
             "id": r.get::<Uuid,_>("id"),
             "status": r.get::<String,_>("status"),
@@ -475,9 +477,9 @@ pub async fn workspace(
             "route": r.get::<Option<String>,_>("route"),
             "generated_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("generated_at"),
             "review_decision": r.get::<Option<String>,_>("review_decision"),
-            "review_detail": r.get::<Value,_>("review_detail"),
+            "review_detail": review_detail,
             "note_version": note_version,
-            "stale": note_version != current_note_version,
+            "stale": stale,
         })
     })
     .unwrap_or(Value::Null);

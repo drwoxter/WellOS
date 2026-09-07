@@ -33,7 +33,8 @@ finish ──────────────────────▶ POS
 review UI ◀───────────────────  { id, output, note_version, limitations, … }
 insert / append / dismiss ────▶ POST /encounters/:id/scribe/:artifact/review
                                  lock encounter; artifact FOR UPDATE
-                                 verify note version == artifact.note_version
+                                 verify client version == current note version
+                                 verify artifact's bound version == current note version
                                  merge (fill empty | append) + write note + approve
                                  in ONE transaction
 ```
@@ -149,9 +150,16 @@ with timecode links into the transcript.
   encounter-summary aid).
 - `POST …/scribe/:artifact/review` with `decision: "apply"` requires the
   client's `version` to equal the current note version; otherwise `409
-  version_conflict` (or `409 version_required`). Superseded/dismissed
-  drafts return `409 artifact_not_reviewable`; closed encounters are refused
-  before any write.
+  version_conflict` (or `409 version_required`). Independently of what the
+  client submits, the artifact itself must still be bound to the current
+  note: its stored `note_version` (or, after partial application, the
+  version its own last application produced) is compared with the current
+  version under the lock and any mismatch — including `null`/`n` transitions
+  — is refused with `409 artifact_stale`. Reloading a changed note therefore
+  never makes an older draft applicable again; the workspace exposes the
+  same comparison as `scribe_draft.stale` so the UI withholds insertion.
+  Superseded/dismissed drafts return `409 artifact_not_reviewable`; closed
+  encounters are refused before any write.
 - Merge rules are enforced server-side and mirrored in the UI
   (`mergeSection`): `fill` succeeds only when the target section is empty
   (`409 section_not_empty` otherwise); `append` adds the proposal below the
@@ -165,7 +173,8 @@ with timecode links into the transcript.
   merged sections and new version so the client hydrates exactly what was
   stored while preserving unsaved text typed meanwhile.
 - `decision: "dismiss"` marks the draft `rejected` without touching the note
-  (`encounter.scribe.dismissed`).
+  (`encounter.scribe.dismissed`); it is a decision only and does not depend
+  on the note version, so a stale draft can still be dismissed.
 
 ## Failure recovery (browser)
 

@@ -1160,10 +1160,12 @@ async fn application_against_a_changed_note_version_is_refused() {
     assert_eq!(ws["note"]["version"], json!(1));
     assert_eq!(ws["note"]["plan"], json!("Saved elsewhere."));
     assert_eq!(ws["scribe_draft"]["status"], json!("awaiting_review"));
+    assert_eq!(ws["scribe_draft"]["stale"], json!(true));
 
-    // Reloading and applying against the live version works, and the
-    // dismissed path is decision-only.
-    let (st, applied) = call(
+    // Reloading does not make the old draft applicable again: it was
+    // proposed against a note version that no longer exists, so even the
+    // live version is refused and the note stays untouched.
+    let (st, err) = call(
         &state,
         "POST",
         &format!("/api/v1/encounters/{enc}/scribe/{artifact}/review"),
@@ -1176,17 +1178,69 @@ async fn application_against_a_changed_note_version_is_refused() {
         })),
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "{applied}");
-    assert_eq!(applied["note"]["version"], json!(2));
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("artifact_stale"));
+    let (_, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(ws["note"]["version"], json!(1));
+    assert_eq!(ws["note"]["plan"], json!("Saved elsewhere."));
 
+    // A fresh recording binds to the live version and applies; the
+    // dismissed path stays decision-only even for a stale draft.
     let (st, draft2) = transcribe(&state, &enc, "dev-dr.garcia").await;
     assert_eq!(st, StatusCode::OK, "{draft2}");
-    let (st, dismissed) = call(
+    assert_eq!(draft2["note_version"], json!(1));
+    let (st, applied) = call(
         &state,
         "POST",
         &format!(
             "/api/v1/encounters/{enc}/scribe/{}/review",
             draft2["id"].as_str().unwrap()
+        ),
+        "dev-dr.garcia",
+        Some(json!({
+            "decision": "apply",
+            "version": 1,
+            "plan": "Saved elsewhere.",
+            "sections": [{ "section": "plan", "mode": "append" }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{applied}");
+    assert_eq!(applied["note"]["version"], json!(2));
+
+    let (st, note) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "version": 2, "plan": "Edited after the first insert." })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{note}");
+    let (st, draft3) = transcribe(&state, &enc, "dev-dr.garcia").await;
+    assert_eq!(st, StatusCode::OK, "{draft3}");
+    let (st, note) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        "dev-dr.garcia",
+        Some(json!({ "version": 3, "plan": "Edited again." })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{note}");
+    let (st, dismissed) = call(
+        &state,
+        "POST",
+        &format!(
+            "/api/v1/encounters/{enc}/scribe/{}/review",
+            draft3["id"].as_str().unwrap()
         ),
         "dev-dr.garcia",
         Some(json!({ "decision": "dismiss" })),
@@ -1202,7 +1256,145 @@ async fn application_against_a_changed_note_version_is_refused() {
         None,
     )
     .await;
-    assert_eq!(ws["note"]["version"], json!(2));
+    assert_eq!(ws["note"]["version"], json!(4));
+    assert_eq!(ws["note"]["plan"], json!("Edited again."));
+}
+
+/// A partially applied draft is bound to the version its own application
+/// produced, so its remaining sections stay insertable; a clinician save in
+/// between makes it stale even when the live version is supplied. The
+/// `Some -> None` direction cannot arise (notes are never deleted), and
+/// `None -> Some` is the first case above.
+#[tokio::test]
+async fn a_partially_applied_draft_stays_bound_to_its_own_writes_only() {
+    let (state, _) = test_state().await;
+    let (_, enc) = start_consultation(&state).await;
+    grant_consent(&state, &enc).await;
+    let (st, draft) = transcribe(&state, &enc, "dev-dr.garcia").await;
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    let artifact = draft["id"].as_str().unwrap().to_string();
+    let review = format!("/api/v1/encounters/{enc}/scribe/{artifact}/review");
+
+    let (st, applied) = call(
+        &state,
+        "POST",
+        &review,
+        "dev-dr.garcia",
+        Some(json!({
+            "decision": "apply",
+            "sections": [{ "section": "plan", "mode": "fill" }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{applied}");
+    assert_eq!(applied["note"]["version"], json!(1));
+    let (_, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(ws["scribe_draft"]["status"], json!("approved"));
+    assert_eq!(ws["scribe_draft"]["stale"], json!(false));
+
+    // Its own write advanced the binding, so a second section still applies.
+    let (st, applied) = call(
+        &state,
+        "POST",
+        &review,
+        "dev-dr.garcia",
+        Some(json!({
+            "decision": "apply",
+            "version": 1,
+            "plan": ws["note"]["plan"],
+            "sections": [{ "section": "reason_for_encounter", "mode": "fill" }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{applied}");
+    assert_eq!(applied["note"]["version"], json!(2));
+
+    // The clinician saves in between: the draft is now stale even with the
+    // live version, and the note is left exactly as saved.
+    let (st, note) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/note"),
+        "dev-dr.garcia",
+        Some(json!({
+            "version": 2,
+            "reason_for_encounter": applied["note"]["reason_for_encounter"],
+            "plan": applied["note"]["plan"],
+            "assessment": "Typed by the clinician.",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{note}");
+    assert_eq!(note["version"], json!(3));
+    let (_, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(ws["scribe_draft"]["stale"], json!(true));
+    let (st, err) = call(
+        &state,
+        "POST",
+        &review,
+        "dev-dr.garcia",
+        Some(json!({
+            "decision": "apply",
+            "version": 3,
+            "reason_for_encounter": ws["note"]["reason_for_encounter"],
+            "plan": ws["note"]["plan"],
+            "assessment": "Typed by the clinician.",
+            "sections": [{ "section": "history_present_illness", "mode": "fill" }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("artifact_stale"));
+    let (_, after) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(after["note"]["version"], json!(3));
+    assert_eq!(after["note"]["history_present_illness"], Value::Null);
+    assert_eq!(after["scribe_draft"]["status"], json!("approved"));
+
+    // The superseding recording binds to the live version and applies.
+    let (st, draft2) = transcribe(&state, &enc, "dev-dr.garcia").await;
+    assert_eq!(st, StatusCode::OK, "{draft2}");
+    assert_eq!(draft2["note_version"], json!(3));
+    let (st, applied) = call(
+        &state,
+        "POST",
+        &format!(
+            "/api/v1/encounters/{enc}/scribe/{}/review",
+            draft2["id"].as_str().unwrap()
+        ),
+        "dev-dr.garcia",
+        Some(json!({
+            "decision": "apply",
+            "version": 3,
+            "reason_for_encounter": after["note"]["reason_for_encounter"],
+            "plan": after["note"]["plan"],
+            "assessment": "Typed by the clinician.",
+            "sections": [{ "section": "history_present_illness", "mode": "fill" }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{applied}");
+    assert_eq!(applied["note"]["version"], json!(4));
 }
 
 #[tokio::test]
@@ -1396,15 +1588,47 @@ async fn workspace_carries_patient_brief_and_grouped_diagnostic_history() {
     assert_eq!(st, StatusCode::OK);
 }
 
+/// Deliver one laboratory result for `service_request`, optionally amending
+/// an earlier observation of the same request; returns the observation id.
+async fn deliver_result(
+    state: &AppState,
+    service_request: &str,
+    code: &str,
+    (value, unit, range): (f64, &str, Option<&str>),
+    effective_at: chrono::DateTime<chrono::Utc>,
+    amends: Option<&str>,
+) -> String {
+    let (st, res) = call(
+        state,
+        "POST",
+        "/api/v1/lab/results",
+        "dev-lab.chen",
+        Some(json!({
+            "service_request_id": service_request,
+            "code_loinc": code,
+            "value": value,
+            "unit": unit,
+            "reference_range": range,
+            "source_system": "fake-lab",
+            "idempotency_key": uniq("dx-key"),
+            "effective_at": effective_at,
+            "amends_observation_id": amends,
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    res["observation_id"].as_str().unwrap().to_string()
+}
+
 /// Order `code` in `enc` and ingest one result for it; returns the
-/// observation id.
-async fn ingest_result(
+/// (service request, observation) ids.
+async fn order_and_ingest(
     state: &AppState,
     enc: &str,
     (code, display): (&str, &str),
-    (value, unit, range): (f64, &str, Option<&str>),
+    result: (f64, &str, Option<&str>),
     effective_at: chrono::DateTime<chrono::Utc>,
-) -> String {
+) -> (String, String) {
     let (st, sr) = call(
         state,
         "POST",
@@ -1414,25 +1638,23 @@ async fn ingest_result(
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{sr}");
-    let (st, res) = call(
-        state,
-        "POST",
-        "/api/v1/lab/results",
-        "dev-lab.chen",
-        Some(json!({
-            "service_request_id": sr["id"],
-            "code_loinc": code,
-            "value": value,
-            "unit": unit,
-            "reference_range": range,
-            "source_system": "fake-lab",
-            "idempotency_key": uniq("dx-key"),
-            "effective_at": effective_at,
-        })),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{res}");
-    res["observation_id"].as_str().unwrap().to_string()
+    let sr_id = sr["id"].as_str().unwrap().to_string();
+    let obs = deliver_result(state, &sr_id, code, result, effective_at, None).await;
+    (sr_id, obs)
+}
+
+/// Order `code` in `enc` and ingest one result for it; returns the
+/// observation id.
+async fn ingest_result(
+    state: &AppState,
+    enc: &str,
+    test: (&str, &str),
+    result: (f64, &str, Option<&str>),
+    effective_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    order_and_ingest(state, enc, test, result, effective_at)
+        .await
+        .1
 }
 
 async fn workspace_tests(state: &AppState, enc: &str) -> Vec<Value> {
@@ -1576,6 +1798,136 @@ async fn diagnostic_history_normalizes_units_and_never_compares_incomparable_val
         "{g}"
     );
     assert!(g["text"].as_str().unwrap().contains("rising"), "{g}");
+}
+
+/// The brief lists the five most recent abnormal results of the patient's
+/// whole history. Normal results, however many and however recent, must not
+/// push older abnormal ones out; amended rows are excluded and replaced by
+/// their amendment, and the five-item cap applies to abnormal results only.
+#[tokio::test]
+async fn recent_abnormal_results_are_not_crowded_out_by_newer_normal_ones() {
+    let (state, _) = test_state().await;
+    let (_, enc) = start_consultation(&state).await;
+    let t0 = chrono::Utc::now() - chrono::Duration::days(90);
+    let day = chrono::Duration::days(1);
+
+    // Six abnormal results, oldest first (one with a signed range).
+    let mut old_abnormal = Vec::new();
+    for i in 0..6i64 {
+        let (_, obs) = if i == 5 {
+            order_and_ingest(
+                &state,
+                &enc,
+                ("11555-0", "Base excess"),
+                (-3.0, "mmol/L", Some("-2-2 mmol/L")),
+                t0 + day * i as i32,
+            )
+            .await
+        } else {
+            order_and_ingest(
+                &state,
+                &enc,
+                ("2823-3", "Potassium"),
+                (6.0 + i as f64 / 10.0, "mmol/L", Some("3.5-5.1 mmol/L")),
+                t0 + day * i as i32,
+            )
+            .await
+        };
+        old_abnormal.push(obs);
+    }
+
+    // Then 22 normal glucose results, all newer than every abnormal one.
+    let mut normals = Vec::new();
+    for i in 0..22i32 {
+        normals.push(
+            order_and_ingest(
+                &state,
+                &enc,
+                ("2345-7", "Glucose"),
+                (85.0, "mg/dL", Some("70-99 mg/dL")),
+                t0 + day * (10 + i),
+            )
+            .await,
+        );
+    }
+
+    // The newest result is abnormal but is then amended to a normal value:
+    // neither row may be listed.
+    let (sr_b, obs_b) = order_and_ingest(
+        &state,
+        &enc,
+        ("2345-7", "Glucose"),
+        (134.0, "mg/dL", Some("70-99 mg/dL")),
+        t0 + day * 40,
+    )
+    .await;
+    deliver_result(
+        &state,
+        &sr_b,
+        "2345-7",
+        (90.0, "mg/dL", Some("70-99 mg/dL")),
+        t0 + day * 40 + chrono::Duration::hours(1),
+        Some(&obs_b),
+    )
+    .await;
+
+    // One normal result is corrected to an abnormal value: the amendment
+    // is listed, the amended row is not.
+    let (sr_c, obs_c_original) = &normals[21];
+    let obs_c = deliver_result(
+        &state,
+        sr_c,
+        "2345-7",
+        (140.0, "mg/dL", Some("70-99 mg/dL")),
+        t0 + day * 31 + chrono::Duration::hours(1),
+        Some(obs_c_original),
+    )
+    .await;
+
+    let (st, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ws}");
+    let listed: Vec<&Value> = ws["brief"]["recent_abnormal"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .collect();
+    let ids: Vec<&str> = listed.iter().map(|o| o["id"].as_str().unwrap()).collect();
+    // Newest abnormal first: the amendment, then the base excess, then the
+    // three newest potassium results; the two oldest fall to the cap.
+    assert_eq!(
+        ids,
+        vec![
+            obs_c.as_str(),
+            old_abnormal[5].as_str(),
+            old_abnormal[4].as_str(),
+            old_abnormal[3].as_str(),
+            old_abnormal[2].as_str(),
+        ],
+        "{listed:?}"
+    );
+    assert!(!ids.contains(&obs_b.as_str()));
+    assert!(!ids.contains(&obs_c_original.as_str()));
+    assert_eq!(listed[0]["abnormal"], json!("high"));
+    assert!(
+        listed[0]["value"].as_str().unwrap().starts_with("140"),
+        "{}",
+        listed[0]
+    );
+    assert_eq!(listed[1]["abnormal"], json!("low"), "{}", listed[1]);
+    assert_eq!(listed[1]["reference_range"], json!("-2-2 mmol/L"));
+    for w in listed.windows(2) {
+        assert!(
+            w[0]["effective_at"].as_str().unwrap() > w[1]["effective_at"].as_str().unwrap(),
+            "{listed:?}"
+        );
+    }
 }
 
 #[tokio::test]
