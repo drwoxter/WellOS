@@ -4,6 +4,7 @@
 //! facts with no network access. Can be switched into an "unavailable" mode
 //! to exercise degradation paths.
 
+use crate::triage::{self, TriageRequest, TriageResponse};
 use crate::{input_hash, GatewayError, GatewayResponse, ModelGateway, SummaryRequest};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,6 +75,15 @@ impl ModelGateway for FakeProvider {
             route: "local-fake".into(),
             input_hash: input_hash(req),
         })
+    }
+
+    async fn propose_triage(&self, req: &TriageRequest) -> Result<TriageResponse, GatewayError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(GatewayError::Unavailable(
+                "fake provider forced unavailable".into(),
+            ));
+        }
+        triage::propose(req)
     }
 }
 

@@ -370,7 +370,7 @@ pub async fn chart(
 
     // Recent vital-sign sets so trends are visible from the chart.
     let vitals = sqlx::query(
-        "SELECT id, encounter_id, systolic_mmhg, diastolic_mmhg, heart_rate_bpm,
+        "SELECT id, encounter_id, visit_id, systolic_mmhg, diastolic_mmhg, heart_rate_bpm,
                 respiratory_rate_bpm, temperature_c, spo2_percent, weight_kg, height_cm,
                 bmi, recorded_at
          FROM vital_signs WHERE tenant_id=$1 AND patient_id=$2
@@ -384,7 +384,8 @@ pub async fn chart(
     .map(|r| {
         json!({
             "id": r.get::<Uuid,_>("id"),
-            "encounter_id": r.get::<Uuid,_>("encounter_id"),
+            "encounter_id": r.get::<Option<Uuid>,_>("encounter_id"),
+            "visit_id": r.get::<Option<Uuid>,_>("visit_id"),
             "systolic_mmhg": r.get::<Option<rust_decimal::Decimal>,_>("systolic_mmhg"),
             "diastolic_mmhg": r.get::<Option<rust_decimal::Decimal>,_>("diastolic_mmhg"),
             "heart_rate_bpm": r.get::<Option<rust_decimal::Decimal>,_>("heart_rate_bpm"),

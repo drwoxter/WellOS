@@ -280,7 +280,8 @@ pub async fn workspace(
     let vitals_row = |r: &sqlx::postgres::PgRow| {
         json!({
             "id": r.get::<Uuid,_>("id"),
-            "encounter_id": r.get::<Uuid,_>("encounter_id"),
+            "encounter_id": r.get::<Option<Uuid>,_>("encounter_id"),
+            "visit_id": r.get::<Option<Uuid>,_>("visit_id"),
             "systolic_mmhg": r.get::<Option<Decimal>,_>("systolic_mmhg"),
             "diastolic_mmhg": r.get::<Option<Decimal>,_>("diastolic_mmhg"),
             "heart_rate_bpm": r.get::<Option<Decimal>,_>("heart_rate_bpm"),
@@ -306,7 +307,7 @@ pub async fn workspace(
     .collect::<Vec<_>>();
     let previous_vitals = sqlx::query(
         "SELECT * FROM vital_signs WHERE tenant_id = $1 AND patient_id = $2
-           AND encounter_id <> $3
+           AND encounter_id IS DISTINCT FROM $3
          ORDER BY recorded_at DESC LIMIT 5",
     )
     .bind(enc.tenant_id)
@@ -870,6 +871,7 @@ pub async fn sign(
     // with the transition.
     supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
     crate::routes::scribe::supersede_applicable_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
+    crate::routes::visits::complete_for_encounter(&mut tx, &ctx, &state, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,
@@ -974,7 +976,7 @@ pub async fn add_addendum(
 // POST /api/v1/encounters/:id/vitals — structured vital signs with validation
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Copy, Default)]
 pub struct RecordVitals {
     pub systolic_mmhg: Option<Decimal>,
     pub diastolic_mmhg: Option<Decimal>,
@@ -1040,28 +1042,40 @@ const VITAL_BOUNDS: &[VitalBounds] = &[
     },
 ];
 
-pub async fn record_vitals(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(id): Path<Uuid>,
-    Json(body): Json<RecordVitals>,
-) -> Result<Json<Value>, ApiError> {
-    let values: [(&str, Option<Decimal>); 8] = [
-        ("systolic_mmhg", body.systolic_mmhg),
-        ("diastolic_mmhg", body.diastolic_mmhg),
-        ("heart_rate_bpm", body.heart_rate_bpm),
-        ("respiratory_rate_bpm", body.respiratory_rate_bpm),
-        ("temperature_c", body.temperature_c),
-        ("spo2_percent", body.spo2_percent),
-        ("weight_kg", body.weight_kg),
-        ("height_cm", body.height_cm),
-    ];
-    if values.iter().all(|(_, v)| v.is_none()) {
-        return Err(ApiError::bad_request(
-            "validation_failed",
-            "at least one vital sign value is required",
-        ));
+impl RecordVitals {
+    pub fn values(&self) -> [(&'static str, Option<Decimal>); 8] {
+        [
+            ("systolic_mmhg", self.systolic_mmhg),
+            ("diastolic_mmhg", self.diastolic_mmhg),
+            ("heart_rate_bpm", self.heart_rate_bpm),
+            ("respiratory_rate_bpm", self.respiratory_rate_bpm),
+            ("temperature_c", self.temperature_c),
+            ("spo2_percent", self.spo2_percent),
+            ("weight_kg", self.weight_kg),
+            ("height_cm", self.height_cm),
+        ]
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.values().iter().all(|(_, v)| v.is_none())
+    }
+
+    /// BMI is always server-calculated (kg / m²), never client-supplied.
+    pub fn bmi(&self) -> Option<Decimal> {
+        match (self.weight_kg, self.height_cm) {
+            (Some(w), Some(h)) if h > Decimal::ZERO => {
+                let meters = h / Decimal::from(100);
+                Some((w / (meters * meters)).round_dp(1))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Hard-range values are rejected outright; unusual values need explicit
+/// confirmation (422 `unusual_values`) so a typo cannot silently persist.
+pub fn validate_vitals(body: &RecordVitals) -> Result<(), ApiError> {
+    let values = body.values();
     let mut unusual: Vec<&str> = Vec::new();
     for bounds in VITAL_BOUNDS {
         let Some(value) = values
@@ -1094,6 +1108,22 @@ pub async fn record_vitals(
             ),
         ));
     }
+    Ok(())
+}
+
+pub async fn record_vitals(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RecordVitals>,
+) -> Result<Json<Value>, ApiError> {
+    if body.is_empty() {
+        return Err(ApiError::bad_request(
+            "validation_failed",
+            "at least one vital sign value is required",
+        ));
+    }
+    validate_vitals(&body)?;
 
     let enc = load_encounter(&state, id).await?;
     let allowed = guard(
@@ -1106,14 +1136,7 @@ pub async fn record_vitals(
     .await?;
     require_own_active(&enc, &ctx)?;
 
-    // BMI is always server-calculated (kg / m²), never client-supplied.
-    let bmi = match (body.weight_kg, body.height_cm) {
-        (Some(w), Some(h)) if h > Decimal::ZERO => {
-            let meters = h / Decimal::from(100);
-            Some((w / (meters * meters)).round_dp(1))
-        }
-        _ => None,
-    };
+    let bmi = body.bmi();
 
     let vitals_id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
@@ -1313,6 +1336,7 @@ pub async fn cancel(
     }
     supersede_awaiting_drafts(&mut tx, enc.tenant_id, id).await?;
     crate::routes::scribe::supersede_applicable_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
+    crate::routes::visits::release_for_encounter(&mut tx, &ctx, &state, enc.tenant_id, id).await?;
     audit::emit(
         &mut *tx,
         &ctx,

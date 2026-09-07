@@ -24,7 +24,8 @@ import {
 
 type VitalSet = {
   id: string;
-  encounter_id: string;
+  encounter_id: string | null;
+  visit_id?: string | null;
   systolic_mmhg: string | null;
   diastolic_mmhg: string | null;
   heart_rate_bpm: string | null;

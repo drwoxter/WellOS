@@ -84,6 +84,14 @@ pub async fn review_artifact(
             "encounter summaries are accepted via /encounters/:id/ai-draft/accept",
         ));
     }
+    // Triage proposals carry an accept/override/reject decision that must be
+    // written into the assessment under the visit lock.
+    if row.get::<String, _>("artifact_type") == "triage_proposal" {
+        return Err(ApiError::conflict(
+            "use_triage_review",
+            "triage proposals are reviewed via /visits/:id/triage/proposal/:artifact_id/review",
+        ));
+    }
     // Scribe drafts are reviewed per section through the encounter route,
     // which also records which sections were applied.
     if row.get::<String, _>("artifact_type") == "scribe_draft" {
