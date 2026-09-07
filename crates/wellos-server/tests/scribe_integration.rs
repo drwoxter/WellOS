@@ -1912,6 +1912,96 @@ async fn diagnostic_history_normalizes_units_and_never_compares_incomparable_val
     assert!(g["text"].as_str().unwrap().contains("rising"), "{g}");
 }
 
+/// A direction needs two consecutive moves, so two results never report one;
+/// and results sharing both timestamps keep a stable order (by id) across
+/// requests, so the latest value and trend cannot flip without new data.
+#[tokio::test]
+async fn trend_needs_three_results_and_equal_time_results_keep_a_stable_order() {
+    let (state, _) = test_state().await;
+    let (_, enc) = start_consultation(&state).await;
+    let t0 = chrono::Utc::now() - chrono::Duration::days(2);
+
+    let first = ingest_result(
+        &state,
+        &enc,
+        ("2345-7", "Glucose"),
+        (90.0, "mg/dL", Some("70-99 mg/dL")),
+        t0,
+    )
+    .await;
+    let second = ingest_result(
+        &state,
+        &enc,
+        ("2345-7", "Glucose"),
+        (120.0, "mg/dL", Some("70-99 mg/dL")),
+        t0,
+    )
+    .await;
+    // Both results carry the same effective and received instants.
+    sqlx::query("UPDATE observations SET received_at = $1 WHERE id = ANY($2::uuid[])")
+        .bind(t0)
+        .bind(vec![
+            Uuid::parse_str(&first).unwrap(),
+            Uuid::parse_str(&second).unwrap(),
+        ])
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+    for _ in 0..5 {
+        let tests = workspace_tests(&state, &enc).await;
+        let glucose = tests.iter().find(|t| t["code"] == json!("2345-7")).unwrap();
+        assert_eq!(glucose["result_count"], json!(2), "{glucose}");
+        // One change is not a trend.
+        assert_eq!(glucose["direction"], json!("insufficient"), "{glucose}");
+        // The later-recorded row (larger time-ordered id) is the latest.
+        assert_eq!(glucose["latest_value"], json!("120"), "{glucose}");
+        assert_eq!(glucose["latest_abnormal"], json!("high"), "{glucose}");
+        let ids: Vec<&str> = glucose["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![first.as_str(), second.as_str()], "{glucose}");
+    }
+
+    let (_, ws) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/encounters/{enc}"),
+        "dev-dr.garcia",
+        None,
+    )
+    .await;
+    let g = ws["diagnostics"]["analysis"]["statements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["code"] == json!("2345-7"))
+        .cloned()
+        .unwrap();
+    let text = g["text"].as_str().unwrap();
+    assert!(text.contains("no trend can be calculated"), "{text}");
+    assert!(
+        !text.contains("rising") && !text.contains("falling"),
+        "{text}"
+    );
+
+    // A third result completes two consecutive moves.
+    ingest_result(
+        &state,
+        &enc,
+        ("2345-7", "Glucose"),
+        (130.0, "mg/dL", Some("70-99 mg/dL")),
+        t0 + chrono::Duration::days(1),
+    )
+    .await;
+    let tests = workspace_tests(&state, &enc).await;
+    let glucose = tests.iter().find(|t| t["code"] == json!("2345-7")).unwrap();
+    assert_eq!(glucose["direction"], json!("rising"), "{glucose}");
+}
+
 /// The brief lists the five most recent abnormal results of the patient's
 /// whole history. Normal results, however many and however recent, must not
 /// push older abnormal ones out; amended rows are excluded and replaced by

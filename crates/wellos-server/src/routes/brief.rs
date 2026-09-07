@@ -76,14 +76,15 @@ pub(crate) fn abnormal_flag(value: Decimal, range: Option<&str>) -> Option<&'sta
 
 /// Direction over the last three comparable, non-superseded results. Two
 /// consecutive moves in the same direction are required for rising/falling;
-/// otherwise the series is reported as stable. Values must already be
-/// expressed in one unit; if any result of the series could not be
-/// converted, no direction is computed at all.
+/// otherwise the series is reported as stable. Fewer than three results
+/// cannot show two moves, so no direction is reported for them. Values must
+/// already be expressed in one unit; if any result of the series could not
+/// be converted, no direction is computed at all.
 pub(crate) fn direction(values: &[Decimal], incomparable: usize) -> Direction {
     if incomparable > 0 {
         return Direction::MixedUnits;
     }
-    if values.len() < 2 {
+    if values.len() < 3 {
         return Direction::Insufficient;
     }
     let tail: Vec<Decimal> = values.iter().rev().take(3).rev().copied().collect();
@@ -167,7 +168,7 @@ pub(crate) async fn diagnostic_history(
                           AND re.outcome->>'outcome' = 'critical') AS critical
          FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
          WHERE o.tenant_id = $1 AND o.patient_id = $2
-         ORDER BY o.effective_at ASC, o.received_at ASC",
+         ORDER BY o.effective_at ASC, o.received_at ASC, o.id ASC",
     )
     .bind(tenant_id)
     .bind(patient_id)
@@ -563,6 +564,9 @@ mod tests {
     #[test]
     fn direction_uses_last_three_results() {
         assert_eq!(direction(&[d("118")], 0), Direction::Insufficient);
+        // A single change is not a trend: two results never report a direction.
+        assert_eq!(direction(&[d("118"), d("126")], 0), Direction::Insufficient);
+        assert_eq!(direction(&[d("126"), d("118")], 0), Direction::Insufficient);
         assert_eq!(
             direction(&[d("118"), d("126"), d("134")], 0),
             Direction::Rising

@@ -120,14 +120,14 @@ pub fn analyze(series: &[SeriesFacts], language: &str) -> TrendAnalysis {
             ("es", Direction::Rising) => "en ascenso en los resultados recientes",
             ("es", Direction::Falling) => "en descenso en los resultados recientes",
             ("es", Direction::Stable) => "estable en los resultados recientes",
-            ("es", Direction::Insufficient) => "un único resultado; sin tendencia calculable",
+            ("es", Direction::Insufficient) => "menos de tres resultados; sin tendencia calculable",
             ("es", Direction::MixedUnits) => {
                 "tendencia no calculada: resultados en unidades no convertibles"
             }
             (_, Direction::Rising) => "rising across recent results",
             (_, Direction::Falling) => "falling across recent results",
             (_, Direction::Stable) => "stable across recent results",
-            (_, Direction::Insufficient) => "single result; no trend can be calculated",
+            (_, Direction::Insufficient) => "fewer than three results; no trend can be calculated",
             (_, Direction::MixedUnits) => "trend not calculated: results in non-convertible units",
         };
         let incomparable = if s.incomparable_count > 0 {
