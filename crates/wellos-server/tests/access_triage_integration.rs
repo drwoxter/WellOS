@@ -810,6 +810,98 @@ async fn appointment_scheduling_is_bounded_in_time_and_count() {
 }
 
 #[tokio::test]
+async fn the_board_shows_the_operational_day_not_every_future_appointment() {
+    let (state, _) = test_state().await;
+    let now = chrono::Utc::now();
+    let schedule = |patient: &str, at: chrono::DateTime<chrono::Utc>| {
+        json!({
+            "patient_id": patient,
+            "arrival_kind": "scheduled",
+            "service": "general_medicine",
+            "scheduled_at": at,
+        })
+    };
+    let today_patient = register_patient(&state).await;
+    let (st, today) = call(
+        &state,
+        "POST",
+        "/api/v1/visits",
+        REG,
+        Some(schedule(&today_patient, now + chrono::Duration::hours(6))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{today}");
+    let today = today["id"].as_str().unwrap().to_string();
+
+    let later_patient = register_patient(&state).await;
+    let mut later_ids = Vec::new();
+    for days in [2, 30, 200] {
+        let (st, v) = call(
+            &state,
+            "POST",
+            "/api/v1/visits",
+            REG,
+            Some(schedule(&later_patient, now + chrono::Duration::days(days))),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        later_ids.push(v["id"].as_str().unwrap().to_string());
+    }
+
+    // Only appointments inside the operational window sit on the board, on
+    // every view that includes scheduled visits.
+    for view in ["access", "all"] {
+        let ids = list_ids(&state, REG, view).await;
+        assert!(ids.contains(&today), "{view}: {ids:?}");
+        for later in &later_ids {
+            assert!(!ids.contains(later), "{view}: {later} listed");
+        }
+    }
+
+    // The patient chart still surfaces the nearest upcoming appointment with
+    // its actions, so a future booking can be reviewed or cancelled.
+    let (st, chart) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{later_patient}"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{chart}");
+    assert_eq!(chart["visit"]["id"], json!(later_ids[0]), "{chart}");
+    assert_eq!(chart["visit"]["capabilities"]["can_cancel"], json!(true));
+    let (st, c) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/visits/{}/cancel", later_ids[0]),
+        REG,
+        Some(json!({ "version": chart["visit"]["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    let (_, chart) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/patients/{later_patient}"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(chart["visit"]["id"], json!(later_ids[1]), "{chart}");
+
+    // Once an appointment enters the window it appears on the board.
+    sqlx::query("UPDATE visits SET scheduled_at = now() + interval '20 hours' WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(&later_ids[1]).unwrap())
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let ids = list_ids(&state, REG, "access").await;
+    assert!(ids.contains(&later_ids[1]), "{ids:?}");
+    assert!(!ids.contains(&later_ids[2]), "{ids:?}");
+}
+
+#[tokio::test]
 async fn visit_creation_has_its_own_rate_limit_family() {
     // admin.silva is used here because reg.rivera's window is shared with
     // the other tests in this file running concurrently.

@@ -1152,7 +1152,7 @@ async fn seed_access_triage(tx: &mut PgConnection, s: AccessSeed) -> anyhow::Res
     };
     insert_visit(tx, s.tenant, &scheduled).await?;
 
-    // 2) Remote (teleconsultation) appointment tomorrow at the annex (Anexa).
+    // 2) Remote (teleconsultation) appointment later today at the annex (Anexa).
     let remote = VisitSeed {
         id: Uuid::now_v7(),
         facility: s.annex,
@@ -1161,7 +1161,7 @@ async fn seed_access_triage(tx: &mut PgConnection, s: AccessSeed) -> anyhow::Res
         arrival_kind: ArrivalKind::Remote,
         service: "telehealth",
         reason: "Teleconsultation: medication review (synthetic)",
-        scheduled_at: Some(now + chrono::Duration::hours(26)),
+        scheduled_at: Some(now + chrono::Duration::hours(5)),
         arrived_at: None,
         triage_started_at: None,
         ready_at: None,

@@ -160,7 +160,7 @@ conventions.
 
 | Route | Action | Purpose |
 | --- | --- | --- |
-| `GET /visits?view=access\|triage\|ready\|closed\|all[&facility_id]` | `visit.read` | Today's board for the caller's facilities with per-visit capability hints |
+| `GET /visits?view=access\|triage\|ready\|closed\|all[&facility_id]` | `visit.read` | Today's board for the caller's facilities (appointments within ±24 h, closures in the last 24 h; later appointments are reachable from the patient chart) with per-visit capability hints |
 | `POST /visits` | `visit.manage` | Register an appointment (`scheduled` + `scheduled_at`) or a walk-in / urgent / remote arrival |
 | `GET /visits/:id` | `visit.read` | Visit detail with patient safety data, previous vitals, latest triage, proposal and routing |
 | `POST /visits/:id/arrive` · `/cancel` · `/no-show` | `visit.manage` | Arrival and closure transitions |

@@ -1157,11 +1157,15 @@ pub async fn list(
         }
     };
     let statuses: Vec<String> = statuses.iter().map(|s| s.to_string()).collect();
+    // The board is the operational day: appointments within ±24 h and visits
+    // closed in the last 24 h. Later appointments stay reachable from the
+    // patient chart (`current_for_patient`) until they enter the window.
     let rows = sqlx::query(&format!(
         "{VISIT_LIST_SQL}
          WHERE v.tenant_id = $1 AND ($2 OR v.facility_id = ANY($3))
            AND v.status = ANY($4)
-           AND (v.status <> 'scheduled' OR v.scheduled_at >= now() - interval '1 day')
+           AND (v.status <> 'scheduled'
+                OR v.scheduled_at BETWEEN now() - interval '1 day' AND now() + interval '1 day')
            AND (v.status NOT IN ('completed','cancelled','no_show') OR v.updated_at >= now() - interval '1 day')
          ORDER BY
            CASE v.status
