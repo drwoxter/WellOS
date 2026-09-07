@@ -268,6 +268,20 @@ export function localDateTimeToIso(value: string): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+const SCHEDULE_PAST_GRACE_MS = 60 * 60 * 1000;
+const SCHEDULE_HORIZON_MS = 365 * 24 * 60 * 60 * 1000;
+
+/** Mirrors the server's appointment window (one hour of grace for a slot
+ *  that just passed, at most one year ahead) so the form can explain the
+ *  rule before the request is refused. The server remains authoritative. */
+export function isSchedulableAt(iso: string, now: Date = new Date()): boolean {
+  const at = new Date(iso).getTime();
+  return (
+    at >= now.getTime() - SCHEDULE_PAST_GRACE_MS &&
+    at <= now.getTime() + SCHEDULE_HORIZON_MS
+  );
+}
+
 export type VisitCapabilities = {
   can_arrive: boolean;
   can_cancel: boolean;

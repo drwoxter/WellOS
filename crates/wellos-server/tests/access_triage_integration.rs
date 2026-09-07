@@ -708,6 +708,171 @@ async fn visit_creation_validation() {
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn appointment_scheduling_is_bounded_in_time_and_count() {
+    let (state, _) = test_state().await;
+    let patient = register_patient(&state).await;
+    let schedule = |at: chrono::DateTime<chrono::Utc>| {
+        json!({
+            "patient_id": patient,
+            "arrival_kind": "scheduled",
+            "service": "general_medicine",
+            "scheduled_at": at,
+        })
+    };
+    let now = chrono::Utc::now();
+    // Appointments must fall inside a bounded window around now: elapsed
+    // ones are arrivals, far-future ones cannot be parked in the worklist.
+    for at in [
+        now - chrono::Duration::hours(3),
+        now + chrono::Duration::days(366),
+        chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        now + chrono::Duration::days(365 * 100),
+    ] {
+        let (st, err) = call(&state, "POST", "/api/v1/visits", REG, Some(schedule(at))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{at}: {err}");
+        assert_eq!(code(&err), "validation_failed");
+    }
+    // A recently elapsed slot is still accepted (late registration).
+    let (st, v) = call(
+        &state,
+        "POST",
+        "/api/v1/visits",
+        REG,
+        Some(schedule(now - chrono::Duration::minutes(30))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let first = v["id"].as_str().unwrap().to_string();
+    let first_version = v["version"].as_i64().unwrap();
+
+    // One patient can hold a handful of pending appointments, no more.
+    for day in 1..5 {
+        let (st, v) = call(
+            &state,
+            "POST",
+            "/api/v1/visits",
+            REG,
+            Some(schedule(now + chrono::Duration::days(day))),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    let (st, err) = call(
+        &state,
+        "POST",
+        "/api/v1/visits",
+        REG,
+        Some(schedule(now + chrono::Duration::days(10))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(code(&err), "too_many_pending_appointments");
+    let scheduled: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM visits WHERE patient_id = $1 AND status = 'scheduled'",
+    )
+    .bind(uuid::Uuid::parse_str(&patient).unwrap())
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(scheduled, 5);
+
+    // The cap never blocks an actual presentation of the patient.
+    let (st, v) = call(
+        &state,
+        "POST",
+        "/api/v1/visits",
+        REG,
+        Some(json!({ "patient_id": patient, "arrival_kind": "walk_in", "service": "general_medicine" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    // Cancelling a pending appointment frees a slot.
+    let (st, c) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/visits/{first}/cancel"),
+        REG,
+        Some(json!({ "version": first_version })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    let (st, v) = call(
+        &state,
+        "POST",
+        "/api/v1/visits",
+        REG,
+        Some(schedule(now + chrono::Duration::days(10))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn visit_creation_has_its_own_rate_limit_family() {
+    // admin.silva is used here because reg.rivera's window is shared with
+    // the other tests in this file running concurrently.
+    const ADMIN: &str = "dev-admin.silva";
+    let (seeded, gateway) = test_state().await;
+    let mut cfg = wellos_server::state::AuthConfig::development();
+    cfg.rate.visit_create_per_min = 3;
+    let state = AppState::with_auth(seeded.pool.clone(), gateway, cfg);
+    // Windows are fixed-minute and persisted, so a previous run within the
+    // same minute would otherwise leave this principal already exhausted.
+    sqlx::query("DELETE FROM rate_limit_windows WHERE key LIKE '%:visit_create'")
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let mut patients = Vec::new();
+    for _ in 0..5 {
+        patients.push(register_patient(&state).await);
+    }
+    let mut statuses = Vec::new();
+    for patient in &patients {
+        let (st, _) = call(
+            &state,
+            "POST",
+            "/api/v1/visits",
+            ADMIN,
+            Some(json!({
+                "patient_id": patient,
+                "arrival_kind": "scheduled",
+                "service": "general_medicine",
+                "scheduled_at": chrono::Utc::now() + chrono::Duration::days(1),
+            })),
+        )
+        .await;
+        statuses.push(st);
+    }
+    assert_eq!(
+        statuses,
+        vec![
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::TOO_MANY_REQUESTS,
+        ],
+        "{statuses:?}"
+    );
+    let created: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM visits WHERE patient_id = ANY($1::uuid[])")
+            .bind(
+                patients
+                    .iter()
+                    .map(|p| uuid::Uuid::parse_str(p).unwrap())
+                    .collect::<Vec<_>>(),
+            )
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(created, 3);
+    // The general API family is unaffected: the worklist still loads.
+    let (st, body) = call(&state, "GET", "/api/v1/visits?view=access", ADMIN, None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+}
+
 // ---------------------------------------------------------------------------
 // Isolation and authorization
 // ---------------------------------------------------------------------------
@@ -924,6 +1089,64 @@ async fn vitals_drive_the_safety_floor() {
     // Out-of-range vitals are rejected as validation errors.
     let (st, err) = save_triage(&state, &visit, json!({ "vitals": { "spo2_percent": 140 } })).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{err}");
+}
+
+#[tokio::test]
+async fn sparse_vitals_updates_cannot_lower_the_safety_floor() {
+    let (state, _) = test_state().await;
+    let (_, visit, _) = create_visit(&state, "walk_in", "general_medicine").await;
+    let (st, t) = save_triage(&state, &visit, json!({ "vitals": { "spo2_percent": 88 } })).await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["safety_floor"], json!("immediate"));
+    assert_eq!(t["safety_rules"][0]["rule"], json!("vitals:spo2_below_90"));
+
+    // Recording only a temperature afterwards keeps the earlier SpO₂ 88 % in
+    // force: the floor and its rule hit survive the partial re-measurement.
+    let (st, t) = save_triage(
+        &state,
+        &visit,
+        json!({ "vitals": { "temperature_c": 37.1 } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["safety_floor"], json!("immediate"), "{t}");
+    assert_eq!(t["safety_rules"][0]["rule"], json!("vitals:spo2_below_90"));
+    let (st, err) = save_triage(
+        &state,
+        &visit,
+        json!({ "vitals": { "temperature_c": 37.2 }, "priority": "urgent" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert_eq!(code(&err), "priority_below_safety_floor");
+    let (st, err) = complete_triage(&state, &visit, json!({ "priority": "urgent" })).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert_eq!(code(&err), "priority_below_safety_floor");
+
+    // The dMind proposal reasons over the same effective vitals.
+    let (st, p) = propose(&state, &visit).await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["output"]["safety_floor"], json!("immediate"));
+    assert_eq!(p["output"]["proposed_priority"], json!("immediate"));
+
+    // Each vital-sign row stays an append-only record of what was measured.
+    let rows: Vec<(Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)> = sqlx::query_as(
+        "SELECT spo2_percent, temperature_c FROM vital_signs
+             WHERE visit_id = $1 ORDER BY recorded_at, id",
+    )
+    .bind(uuid::Uuid::parse_str(&visit).unwrap())
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "rejected saves leave no vital-sign rows");
+    assert_eq!(rows[0].0, Some(rust_decimal::Decimal::from(88)));
+    assert_eq!(rows[1], (None, Some(rust_decimal::Decimal::new(371, 1))));
+
+    // Only a newer reading of the same measurement can lift the floor.
+    let (st, t) = save_triage(&state, &visit, json!({ "vitals": { "spo2_percent": 97 } })).await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["safety_floor"], json!("non_urgent"));
+    assert_eq!(t["safety_rules"], json!([]));
 }
 
 #[tokio::test]
@@ -1323,6 +1546,207 @@ async fn care_team_assignments_are_recorded_with_provenance() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+}
+
+/// Inserts `n` open, immediate queue alerts on `visit` in a facility of the
+/// same tenant that nobody in the synthetic roster is assigned to. They pass
+/// tenant and queue targeting but fail facility scope for every caller.
+/// Returns their ids so the caller can resolve them again.
+async fn insert_alerts_of_unassigned_facility(
+    state: &AppState,
+    visit: &str,
+    n: i64,
+) -> Vec<uuid::Uuid> {
+    let mut tx = state.pool.begin().await.unwrap();
+    let visit_id = uuid::Uuid::parse_str(visit).unwrap();
+    let facility = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO facilities (id, tenant_id, name)
+         SELECT $1, tenant_id, 'Synthetic Unstaffed Clinic' FROM visits WHERE id = $2",
+    )
+    .bind(facility)
+    .bind(visit_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let queue = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO service_queues (id, tenant_id, facility_id, code, name)
+         SELECT $1, tenant_id, $2, 'general_medicine', 'Unstaffed general medicine'
+         FROM visits WHERE id = $3",
+    )
+    .bind(queue)
+    .bind(facility)
+    .bind(visit_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let ids = sqlx::query_scalar(
+        "INSERT INTO internal_alerts
+           (id, tenant_id, facility_id, patient_id, visit_id, kind, priority,
+            target_queue_id, status, created_by, created_at)
+         SELECT gen_random_uuid(), v.tenant_id, $2, v.patient_id, v.id,
+                'patient_ready', 'immediate', $3, 'open', v.created_by,
+                now() - interval '1 hour' + make_interval(secs => g)
+         FROM visits v CROSS JOIN generate_series(1, $4) AS g
+         WHERE v.id = $1
+         RETURNING id",
+    )
+    .bind(visit_id)
+    .bind(facility)
+    .bind(queue)
+    .bind(n)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    ids
+}
+
+#[tokio::test]
+async fn alert_visibility_is_decided_before_the_result_cap() {
+    let (state, _) = test_state().await;
+    let (_, visit, _) = create_visit(&state, "walk_in", "general_medicine").await;
+    // One directed, urgent alert Dr. López may see …
+    let (st, _) = save_triage(&state, &visit, json!({ "priority": "urgent" })).await;
+    assert_eq!(st, StatusCode::OK);
+    let lopez = user_id(&state, "dr.lopez").await;
+    let (st, c) = complete_triage(
+        &state,
+        &visit,
+        json!({ "priority": "urgent", "assignee_user_id": lopez }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    // … outranked by more alerts than the list returns, none of them visible
+    // to him (nor to anyone else in the roster).
+    let hidden = insert_alerts_of_unassigned_facility(&state, &visit, 120).await;
+    assert_eq!(hidden.len(), 120);
+    for token in [LOPEZ, GARCIA, NURSE, ANNEX] {
+        let (st, body) = call(&state, "GET", "/api/v1/alerts", token, None).await;
+        assert_eq!(st, StatusCode::OK, "{token}: {body}");
+        let leaked = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["target"]["name"] == json!("Unstaffed general medicine"))
+            .count();
+        assert_eq!(leaked, 0, "{token}");
+    }
+
+    let (st, body) = call(&state, "GET", "/api/v1/alerts", LOPEZ, None).await;
+    // The database is shared with the seeded demo: remove the synthetic
+    // clinic again before asserting anything.
+    let mut tx = state.pool.begin().await.unwrap();
+    let facility: uuid::Uuid =
+        sqlx::query_scalar("DELETE FROM internal_alerts WHERE id = ANY($1) RETURNING facility_id")
+            .bind(&hidden)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM service_queues WHERE facility_id = $1")
+        .bind(facility)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM facilities WHERE id = $1")
+        .bind(facility)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().unwrap();
+    assert!(items.len() <= 100);
+    let mine: Vec<&Value> = items
+        .iter()
+        .filter(|a| a["visit_id"] == json!(visit))
+        .collect();
+    assert_eq!(mine.len(), 1, "{body}");
+    assert_eq!(mine[0]["priority"], json!("urgent"));
+    assert_eq!(mine[0]["target"]["kind"], json!("professional"));
+    // The ranking (priority, then age) is unchanged by the filtering.
+    let rank = |p: &Value| match p.as_str() {
+        Some("immediate") => 0,
+        Some("urgent") => 1,
+        Some("standard") => 2,
+        _ => 3,
+    };
+    assert!(items
+        .windows(2)
+        .all(|w| rank(&w[0]["priority"]) <= rank(&w[1]["priority"])));
+}
+
+#[tokio::test]
+async fn acknowledging_an_invisible_alert_looks_like_an_unknown_id() {
+    let (state, _) = test_state().await;
+    let state = &state;
+    let ack = |token: &'static str, id: String| async move {
+        call(
+            state,
+            "POST",
+            &format!("/api/v1/alerts/{id}/acknowledge"),
+            token,
+            None,
+        )
+        .await
+    };
+    let denials = || async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM audit_events
+             WHERE action = 'alert.acknowledge' AND decision = 'deny'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap()
+    };
+    let (st, unknown) = ack(GARCIA, uuid::Uuid::now_v7().to_string()).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let denials_before = denials().await;
+
+    // A queue alert of Dr. García's facility: visible to him, not to the
+    // annex physician, the nurse (wrong queue), registration (no clinical
+    // function) or another tenant.
+    let (_, visit, _) = create_visit(state, "walk_in", "general_medicine").await;
+    let (st, _) = save_triage(state, &visit, json!({})).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, c) = complete_triage(state, &visit, json!({})).await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    let queue_alert = alerts_for(state, GARCIA, &visit).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for token in [ANNEX, NURSE, REG, OTHER_TENANT, LAB] {
+        let (st, body) = ack(token, queue_alert.clone()).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{token}: {body}");
+        assert_eq!(body, unknown, "{token}");
+    }
+
+    // A directed alert: the same shape for everyone but its target.
+    let (_, visit2, _) = create_visit(state, "walk_in", "general_medicine").await;
+    let (st, _) = save_triage(state, &visit2, json!({})).await;
+    assert_eq!(st, StatusCode::OK);
+    let lopez = user_id(state, "dr.lopez").await;
+    let (st, c) = complete_triage(state, &visit2, json!({ "assignee_user_id": lopez })).await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    let directed = alerts_for(state, LOPEZ, &visit2).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for token in [GARCIA, NURSE, ANNEX, OTHER_TENANT] {
+        let (st, body) = ack(token, directed.clone()).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{token}: {body}");
+        assert_eq!(body, unknown, "{token}");
+    }
+    // The probes never reached the policy layer: no denial was decided (or
+    // recorded) for an alert the caller cannot see.
+    assert_eq!(denials().await, denials_before);
+
+    let (st, ok) = ack(LOPEZ, directed).await;
+    assert_eq!(st, StatusCode::OK, "{ok}");
+    let (st, ok) = ack(GARCIA, queue_alert).await;
+    assert_eq!(st, StatusCode::OK, "{ok}");
 }
 
 // ---------------------------------------------------------------------------

@@ -43,6 +43,12 @@ scheduled ──arrive──▶ arrived ──start_triage──▶ triage_in_pr
 
 - Walk-in, urgent and remote visits are created directly as `arrived`;
   scheduled visits require `scheduled_at` and are arrived explicitly.
+- Registration is bounded so one compromised account cannot flood the
+  fixed-size worklists: `scheduled_at` must lie between one hour ago and one
+  year ahead (`400 validation_failed`), a patient may hold at most five
+  pending appointments (`409 too_many_pending_appointments`; walk-ins are
+  never blocked by this cap), and `POST /visits` has its own per-principal
+  rate-limit family (`WELLOS_RATE_VISIT_CREATE_PER_MIN`, default 30).
 - `cancel` is allowed from every open state before a consultation starts;
   `no_show` only from `scheduled`.
 - `in_consultation` is entered only through `POST /visits/:id/start-consultation`,
@@ -133,10 +139,15 @@ decide which controls are drawn; the server re-authorises every action.
 - `GET /api/v1/alerts` returns unresolved alerts addressed to the caller
   personally plus queue alerts for queues the caller may serve (nursing queues
   for triage roles, clinical queues for roles allowed to start encounters) in
-  facilities within their scope, ordered by priority then age.
+  facilities within their scope, ordered by priority then age. Visibility is
+  part of the query itself, so the 100-item cap is applied to alerts the
+  caller may see, never to a broader candidate set.
 - Acknowledging (`POST /alerts/:id/acknowledge`) is audited and requires the
-  alert to be visible to the caller. Alerts resolve automatically when the
-  consultation starts or the visit closes.
+  alert to be visible to the caller. The lookup applies the same visibility
+  predicate, so an alert outside the caller's scope answers `404 not_found`
+  exactly like an unknown id, before any patient or facility data is read.
+  Alerts resolve automatically when the consultation starts or the visit
+  closes.
 - Alerts are internal professional notifications only. Patient-facing
   notification is a separate, deliberately unimplemented capability.
 

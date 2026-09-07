@@ -13,6 +13,7 @@ use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
 use crate::policy::{actions, facility_scope, ResourceCtx};
+use crate::ratelimit;
 use crate::routes::encounter_docs::{validate_vitals, RecordVitals};
 use crate::routes::guard;
 use crate::state::AppState;
@@ -565,6 +566,14 @@ async fn resolve_target(
 // POST /api/v1/visits — scheduled visit or arrival without appointment
 // ---------------------------------------------------------------------------
 
+/// Appointment bounds. Together with the per-principal `VisitCreate` rate
+/// limit they keep a compromised registration account from filling the
+/// fixed-size worklists: an appointment must fall inside a bounded window
+/// around now, and one patient can only hold a handful of pending ones.
+const SCHEDULE_PAST_GRACE: chrono::Duration = chrono::Duration::hours(1);
+const SCHEDULE_HORIZON: chrono::Duration = chrono::Duration::days(365);
+const MAX_PENDING_APPOINTMENTS_PER_PATIENT: i64 = 5;
+
 #[derive(Deserialize)]
 pub struct CreateVisit {
     pub patient_id: Uuid,
@@ -590,14 +599,25 @@ pub async fn create(
     let service = require_service(&body.service)?;
     let reason = clean_text(body.reason, "reason", MAX_REASON)?;
     let scheduled_at = match arrival_kind {
-        ArrivalKind::Scheduled => Some(body.scheduled_at.ok_or_else(|| {
-            ApiError::bad_request(
-                "validation_failed",
-                "scheduled_at is required for a scheduled visit",
-            )
-        })?),
+        ArrivalKind::Scheduled => {
+            let at = body.scheduled_at.ok_or_else(|| {
+                ApiError::bad_request(
+                    "validation_failed",
+                    "scheduled_at is required for a scheduled visit",
+                )
+            })?;
+            let now = Utc::now();
+            if at < now - SCHEDULE_PAST_GRACE || at > now + SCHEDULE_HORIZON {
+                return Err(ApiError::bad_request(
+                    "validation_failed",
+                    "scheduled_at must be within the next 365 days (register an elapsed appointment as an arrival)",
+                ));
+            }
+            Some(at)
+        }
         _ => None,
     };
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::VisitCreate).await?;
 
     let patient = sqlx::query("SELECT tenant_id, facility_id FROM patients WHERE id = $1")
         .bind(body.patient_id)
@@ -645,6 +665,23 @@ pub async fn create(
             return Err(ApiError::conflict(
                 "patient_already_present",
                 "this patient already has an open visit today",
+            ));
+        }
+    } else {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM visits WHERE tenant_id = $1 AND patient_id = $2
+               AND status = 'scheduled' AND scheduled_at >= now() - interval '1 day'",
+        )
+        .bind(tenant_id)
+        .bind(body.patient_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if pending >= MAX_PENDING_APPOINTMENTS_PER_PATIENT {
+            return Err(ApiError::conflict(
+                "too_many_pending_appointments",
+                format!(
+                    "this patient already has {MAX_PENDING_APPOINTMENTS_PER_PATIENT} pending appointments; cancel one before scheduling another"
+                ),
             ));
         }
     }
@@ -1490,11 +1527,10 @@ pub async fn save_triage(
         .await?;
         Some(vid)
     };
-    // The safety floor is computed from the vitals that will be on record.
-    let floor_vitals = match vitals_id {
-        Some(vid) => load_triage_vitals(&mut tx, vid).await?,
-        None => TriageVitals::default(),
-    };
+    // The safety floor is computed from every measurement on record for this
+    // visit, so a partial re-measurement can never drop an earlier abnormal
+    // value out of the rules.
+    let floor_vitals = load_visit_vitals(&mut tx, v.tenant_id, id).await?;
     let (floor, hits) = safety_floor(v.arrival_kind, &red_flags, &floor_vitals);
     if let Some(p) = priority {
         if p < floor {
@@ -1585,16 +1621,34 @@ pub async fn save_triage(
     })))
 }
 
-async fn load_triage_vitals(
+/// The vitals the safety rules see: for each measurement, the most recently
+/// recorded non-null value among all vital-sign rows of the visit. Rows stay
+/// append-only records of what was measured when; the effective view carries
+/// earlier readings forward until a newer reading of the same measurement
+/// replaces them.
+async fn load_visit_vitals(
     conn: &mut PgConnection,
-    vitals_id: Uuid,
+    tenant_id: Uuid,
+    visit_id: Uuid,
 ) -> Result<TriageVitals, ApiError> {
     let r = sqlx::query(
-        "SELECT systolic_mmhg, diastolic_mmhg, heart_rate_bpm, respiratory_rate_bpm,
-                temperature_c, spo2_percent
-         FROM vital_signs WHERE id = $1",
+        "WITH vs AS (
+            SELECT * FROM vital_signs WHERE tenant_id = $1 AND visit_id = $2
+         )
+         SELECT
+           (SELECT systolic_mmhg FROM vs WHERE systolic_mmhg IS NOT NULL
+              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS systolic_mmhg,
+           (SELECT heart_rate_bpm FROM vs WHERE heart_rate_bpm IS NOT NULL
+              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS heart_rate_bpm,
+           (SELECT respiratory_rate_bpm FROM vs WHERE respiratory_rate_bpm IS NOT NULL
+              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS respiratory_rate_bpm,
+           (SELECT temperature_c FROM vs WHERE temperature_c IS NOT NULL
+              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS temperature_c,
+           (SELECT spo2_percent FROM vs WHERE spo2_percent IS NOT NULL
+              ORDER BY recorded_at DESC, id DESC LIMIT 1) AS spo2_percent",
     )
-    .bind(vitals_id)
+    .bind(tenant_id)
+    .bind(visit_id)
     .fetch_one(&mut *conn)
     .await?;
     Ok(TriageVitals {
@@ -1664,10 +1718,7 @@ pub async fn propose(
     let red_flags: Vec<String> =
         serde_json::from_value(a.get::<Value, _>("red_flags")).unwrap_or_default();
     let vitals_id: Option<Uuid> = a.get("vital_signs_id");
-    let vitals = match vitals_id {
-        Some(vid) => load_triage_vitals(&mut tx, vid).await?,
-        None => TriageVitals::default(),
-    };
+    let vitals = load_visit_vitals(&mut tx, v.tenant_id, id).await?;
     let allergies: Vec<String> = sqlx::query_scalar(
         "SELECT substance FROM allergies WHERE tenant_id = $1 AND patient_id = $2 ORDER BY substance",
     )
@@ -2615,24 +2666,54 @@ pub async fn release_for_encounter(
 /// Queue alerts are visible to the professionals who work that queue in that
 /// facility: the nursing queue to triage staff, every other queue to those
 /// who may start consultations. Directed alerts are visible to their target.
-fn alert_visible(
-    ctx: &AuthContext,
-    facility_id: Uuid,
-    target_user: Option<Uuid>,
-    queue_code: Option<&str>,
-) -> bool {
-    if let Some(u) = target_user {
-        return u == ctx.user_id;
+///
+/// The decision is a SQL predicate ([`ALERT_VISIBLE_SQL`]) rather than a
+/// post-filter: the alert list applies it before its result cap, and the
+/// acknowledgement lookup applies it before touching any patient or facility
+/// data, so an alert the caller may not see is indistinguishable from one
+/// that does not exist.
+struct AlertScope {
+    /// Facilities whose nursing-queue alerts are visible; `None` = tenant-wide.
+    nursing: Option<Vec<Uuid>>,
+    /// Facilities whose other queue alerts are visible; `None` = tenant-wide.
+    consultation: Option<Vec<Uuid>>,
+}
+
+impl AlertScope {
+    fn for_ctx(ctx: &AuthContext) -> Self {
+        Self {
+            nursing: facility_scope(ctx, actions::TRIAGE_WRITE),
+            consultation: facility_scope(ctx, actions::ENCOUNTER_START),
+        }
     }
-    let action = match queue_code {
-        Some("nursing") => actions::TRIAGE_WRITE,
-        _ => actions::ENCOUNTER_START,
-    };
-    match facility_scope(ctx, action) {
-        None => true,
-        Some(ids) => ids.contains(&facility_id),
+
+    /// Binds `$1..$6` as consumed by [`ALERT_VISIBLE_SQL`].
+    fn bind<'q>(
+        &'q self,
+        q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+        ctx: &AuthContext,
+    ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+        q.bind(ctx.tenant_id)
+            .bind(ctx.user_id)
+            .bind(self.nursing.is_none())
+            .bind(self.nursing.as_deref().unwrap_or(&[]))
+            .bind(self.consultation.is_none())
+            .bind(self.consultation.as_deref().unwrap_or(&[]))
     }
 }
+
+/// Visibility predicate over `internal_alerts ia LEFT JOIN service_queues q`.
+/// Parameters: `$1` tenant, `$2` caller, `$3`/`$4` nursing scope
+/// (tenant-wide flag, facility list), `$5`/`$6` consultation scope.
+const ALERT_VISIBLE_SQL: &str = "
+    ia.tenant_id = $1
+    AND (
+      ia.target_user_id = $2
+      OR (ia.target_user_id IS NULL AND ia.target_queue_id IS NOT NULL
+          AND CASE WHEN q.code = 'nursing'
+                   THEN ($3 OR ia.facility_id = ANY($4))
+                   ELSE ($5 OR ia.facility_id = ANY($6)) END)
+    )";
 
 const ALERT_SQL: &str = "
     SELECT ia.id, ia.facility_id, ia.visit_id, ia.kind, ia.priority, ia.status, ia.target_user_id,
@@ -2699,30 +2780,19 @@ pub async fn list_alerts(
     .await?
     .record_on_pool(&state, &ctx)
     .await?;
-    let rows = sqlx::query(&format!(
+    let scope = AlertScope::for_ctx(&ctx);
+    let sql = format!(
         "{ALERT_SQL}
-         WHERE ia.tenant_id = $1 AND ia.status <> 'resolved'
-           AND (ia.target_user_id = $2 OR ia.target_queue_id IS NOT NULL)
+         WHERE {ALERT_VISIBLE_SQL} AND ia.status <> 'resolved'
          ORDER BY CASE ia.priority WHEN 'immediate' THEN 0 WHEN 'urgent' THEN 1 WHEN 'standard' THEN 2 ELSE 3 END,
                   ia.created_at ASC
          LIMIT 100"
-    ))
-    .bind(ctx.tenant_id)
-    .bind(ctx.user_id)
-    .fetch_all(&state.pool)
-    .await?;
-    let items: Vec<Value> = rows
-        .iter()
-        .filter(|r| {
-            alert_visible(
-                &ctx,
-                r.get("facility_id"),
-                r.get("target_user_id"),
-                r.get::<Option<String>, _>("queue_code").as_deref(),
-            )
-        })
-        .map(|r| alert_item(&ctx, r))
-        .collect();
+    );
+    let rows = scope
+        .bind(sqlx::query(&sql), &ctx)
+        .fetch_all(&state.pool)
+        .await?;
+    let items: Vec<Value> = rows.iter().map(|r| alert_item(&ctx, r)).collect();
     let unacknowledged = items.iter().filter(|i| i["status"] == "open").count();
     Ok(Json(
         json!({ "items": items, "unacknowledged": unacknowledged }),
@@ -2734,15 +2804,21 @@ pub async fn acknowledge_alert(
     ctx: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let row = sqlx::query(
-        "SELECT ia.tenant_id, ia.facility_id, ia.patient_id, ia.target_user_id, q.code AS queue_code
+    // Visibility is decided by the lookup itself: an alert outside the
+    // caller's scope yields the same `not_found` as an unknown id, and no
+    // patient or facility data is read (or authorization attempted) for it.
+    let scope = AlertScope::for_ctx(&ctx);
+    let sql = format!(
+        "SELECT ia.tenant_id, ia.facility_id, ia.patient_id
          FROM internal_alerts ia LEFT JOIN service_queues q ON q.id = ia.target_queue_id
-         WHERE ia.id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(ApiError::not_found)?;
+         WHERE ia.id = $7 AND {ALERT_VISIBLE_SQL}"
+    );
+    let row = scope
+        .bind(sqlx::query(&sql), &ctx)
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let tenant_id: Uuid = row.get("tenant_id");
     let facility_id: Uuid = row.get("facility_id");
     let allowed = guard(
@@ -2757,14 +2833,6 @@ pub async fn acknowledge_alert(
         }),
     )
     .await?;
-    if !alert_visible(
-        &ctx,
-        facility_id,
-        row.get("target_user_id"),
-        row.get::<Option<String>, _>("queue_code").as_deref(),
-    ) {
-        return Err(ApiError::not_found());
-    }
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     let updated = sqlx::query(
@@ -2825,47 +2893,21 @@ mod tests {
     #[test]
     fn queue_alerts_route_by_function_and_facility() {
         let facility = Uuid::now_v7();
-        let other = Uuid::now_v7();
-        let physician = ctx(roles::PHYSICIAN, facility);
-        assert!(alert_visible(
-            &physician,
-            facility,
-            None,
-            Some("general_medicine")
-        ));
-        assert!(!alert_visible(
-            &physician,
-            other,
-            None,
-            Some("general_medicine")
-        ));
-        let nurse = ctx(roles::NURSE, facility);
-        assert!(alert_visible(&nurse, facility, None, Some("nursing")));
-        assert!(!alert_visible(
-            &nurse,
-            facility,
-            None,
-            Some("general_medicine")
-        ));
-        let registration = ctx(roles::REGISTRATION, facility);
-        assert!(!alert_visible(
-            &registration,
-            facility,
-            None,
-            Some("general_medicine")
-        ));
-        // Directed alerts are visible to their target only.
-        assert!(alert_visible(
-            &physician,
-            facility,
-            Some(physician.user_id),
-            None
-        ));
-        assert!(!alert_visible(
-            &physician,
-            facility,
-            Some(Uuid::now_v7()),
-            None
-        ));
+        let physician = AlertScope::for_ctx(&ctx(roles::PHYSICIAN, facility));
+        assert_eq!(physician.consultation, Some(vec![facility]));
+        // Physicians may triage, so they also serve the nursing queue.
+        assert_eq!(physician.nursing, Some(vec![facility]));
+        let nurse = AlertScope::for_ctx(&ctx(roles::NURSE, facility));
+        assert_eq!(nurse.nursing, Some(vec![facility]));
+        assert_eq!(nurse.consultation, Some(vec![]));
+        let registration = AlertScope::for_ctx(&ctx(roles::REGISTRATION, facility));
+        assert_eq!(registration.nursing, Some(vec![]));
+        assert_eq!(registration.consultation, Some(vec![]));
+        // Ordinary clinical roles never become tenant-wide through a NULL
+        // facility assignment.
+        let mut unscoped = ctx(roles::PHYSICIAN, facility);
+        unscoped.assignments[0].facility_id = None;
+        let unscoped = AlertScope::for_ctx(&unscoped);
+        assert_eq!(unscoped.consultation, Some(vec![]));
     }
 }

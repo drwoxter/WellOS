@@ -479,12 +479,15 @@ function TriageWorkspace({ visitId }: { visitId: string }) {
     return body;
   }
 
-  async function save(confirm = false): Promise<boolean> {
-    if (!d || !form) return false;
+  /** Saves the displayed form against the version it was loaded from and
+   *  returns the visit version the saved facts now carry, or null when the
+   *  save did not land (validation, floor, conflict). */
+  async function save(confirm = false): Promise<number | null> {
+    if (!d || !form) return null;
     setBusy("save");
     setMessage(null);
     const submit = (priority: string | null) =>
-      apiFetch(`/api/v1/visits/${visitId}/triage`, {
+      apiFetch<{ version: number }>(`/api/v1/visits/${visitId}/triage`, {
         method: "POST",
         body: JSON.stringify({
           version: d.version,
@@ -500,8 +503,9 @@ function TriageWorkspace({ visitId }: { visitId: string }) {
       });
     try {
       let priorityDropped = false;
+      let saved: { version: number };
       try {
-        await submit(form.priority || null);
+        saved = await submit(form.priority || null);
       } catch (err) {
         // New facts raised the floor above the chosen priority: keep the
         // facts, clear the now-invalid priority and let the clinician
@@ -511,7 +515,7 @@ function TriageWorkspace({ visitId }: { visitId: string }) {
           err.code === "priority_below_safety_floor" &&
           form.priority
         ) {
-          await submit(null);
+          saved = await submit(null);
           priorityDropped = true;
         } else {
           throw err;
@@ -527,12 +531,16 @@ function TriageWorkspace({ visitId }: { visitId: string }) {
           : f,
       );
       await load();
+      // The handoff summary is only recorded at completion, so the typed
+      // text outlives the refresh.
+      const handoff = form.handoff;
+      setForm((f) => (f && !f.handoff && handoff ? { ...f, handoff } : f));
       setMessage(
         priorityDropped
           ? { kind: "error", text: t(lang, "belowFloorReselect") }
           : { kind: "success", text: t(lang, "triageSaved") },
       );
-      return !priorityDropped;
+      return priorityDropped ? null : saved.version;
     } catch (err) {
       if (err instanceof ApiRequestError && err.code === "unusual_values") {
         setNeedsConfirm(true);
@@ -545,7 +553,7 @@ function TriageWorkspace({ visitId }: { visitId: string }) {
           await load().catch(() => undefined);
         }
       }
-      return false;
+      return null;
     } finally {
       setBusy(null);
     }
@@ -649,18 +657,23 @@ function TriageWorkspace({ visitId }: { visitId: string }) {
       setMessage({ kind: "error", text: t(lang, "belowFloor") });
       return;
     }
+    // The completion is bound to the version the displayed facts belong to:
+    // the one the form was loaded from, or the one the save just produced.
+    // Anything another clinician changed in between surfaces as a conflict
+    // and reloads the workspace for review instead of being overwritten.
+    let version = d.version;
     if (dirty) {
-      const ok = await save();
-      if (!ok) return;
+      const saved = await save();
+      if (saved === null) return;
+      version = saved;
     }
     setBusy("complete");
     setMessage(null);
     try {
-      const latest = await apiFetch<Detail>(`/api/v1/visits/${visitId}`);
       await apiFetch(`/api/v1/visits/${visitId}/triage/complete`, {
         method: "POST",
         body: JSON.stringify({
-          version: latest.version,
+          version,
           priority: form.priority,
           requested_service: form.requested_service,
           handoff_summary: form.handoff.trim() || null,

@@ -175,6 +175,8 @@ function setup(
   let loads = 0;
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (init?.method === "POST")
+      posts.push({ url, body: JSON.parse(String(init.body ?? "null")) });
     const custom = options.handler?.(url, init);
     if (custom) return Promise.resolve(custom);
     if (url === "/api/session")
@@ -189,7 +191,6 @@ function setup(
       return Promise.resolve(jsonResponse(current));
     }
     if (init?.method === "POST") {
-      posts.push({ url, body: JSON.parse(String(init.body ?? "null")) });
       if (url.endsWith("/start-consultation"))
         return Promise.resolve(jsonResponse({ encounter_id: "enc-visit" }));
       if (url.endsWith("/review"))
@@ -198,6 +199,10 @@ function setup(
             applied_priority: "urgent",
             applied_service: "general_medicine",
           }),
+        );
+      if (url.endsWith("/triage"))
+        return Promise.resolve(
+          jsonResponse({ id: "v1", version: current.version + 1 }),
         );
       return Promise.resolve(jsonResponse({ ok: true }));
     }
@@ -337,8 +342,11 @@ describe("triage workspace", () => {
       /outside the usual range/i,
     );
     await user.click(confirm);
-    await waitFor(() => expect(posts).toHaveLength(1));
+    await waitFor(() => expect(posts).toHaveLength(2));
     expect(posts[0].body).toMatchObject({
+      vitals: { confirm_unusual: false, heart_rate_bpm: "190" },
+    });
+    expect(posts[1].body).toMatchObject({
       vitals: { confirm_unusual: true, heart_rate_bpm: "190" },
     });
     expect(await screen.findByText("Triage saved.")).toBeInTheDocument();
@@ -438,14 +446,15 @@ describe("triage workspace", () => {
     await user.click(
       screen.getByRole("button", { name: "Complete triage and route" }),
     );
-    // Dirty form: saved first, then completed against the freshly read version.
+    // Dirty form: saved first, then completed against the version the save
+    // produced for exactly these facts.
     await waitFor(() => expect(posts).toHaveLength(2));
     expect(posts[0].url).toBe("/api/v1/visits/v1/triage");
     expect(posts[0].body).toMatchObject({ version: 5, priority: "urgent" });
     expect(posts[1]).toEqual({
       url: "/api/v1/visits/v1/triage/complete",
       body: {
-        version: 5,
+        version: 6,
         priority: "urgent",
         requested_service: "general_medicine",
         handoff_summary: "Dyspnoea, SpO₂ 93 %.",
@@ -458,6 +467,91 @@ describe("triage workspace", () => {
         "Triage completed. The care team has been alerted.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("completes against the displayed version and surfaces a concurrent change as a conflict for review", async () => {
+    const user = userEvent.setup();
+    const displayed = detail({
+      triage: { ...TRIAGE, priority: "urgent" },
+      handoff_summary: "Dyspnoea with fever, urgent.",
+    });
+    const concurrent = detail({
+      version: 6,
+      triage: { ...TRIAGE, version: 3, priority: "immediate" },
+      handoff_summary: "Deteriorated: SpO₂ 86 %, immediate.",
+    });
+    const { posts, loads, setServer } = setup(displayed, {
+      handler: (url, init) => {
+        if (url.endsWith("/triage/complete") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { version: number };
+          return body.version === 6
+            ? jsonResponse({ ok: true })
+            : jsonResponse(
+                {
+                  error: {
+                    code: "stale_version",
+                    message: "visit changed",
+                  },
+                },
+                409,
+              );
+        }
+        return undefined;
+      },
+    });
+    expect(await screen.findByLabelText("Operational priority")).toHaveValue(
+      "urgent",
+    );
+    const loadsBefore = loads();
+    // Another clinician raises the priority after this workspace loaded.
+    setServer(concurrent);
+    await user.click(
+      screen.getByRole("button", { name: "Complete triage and route" }),
+    );
+    // Only the completion is sent, bound to the version behind the visible
+    // form — never a freshly fetched version paired with the old values.
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0].url).toBe("/api/v1/visits/v1/triage/complete");
+    expect(posts[0].body).toMatchObject({
+      version: 5,
+      priority: "urgent",
+      handoff_summary: "Dyspnoea with fever, urgent.",
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /changed in the meantime/i,
+    );
+    // The workspace reloads with the concurrent facts for review; nothing
+    // was completed with the stale values.
+    await waitFor(() => expect(loads()).toBeGreaterThan(loadsBefore));
+    expect(screen.getByLabelText("Operational priority")).toHaveValue(
+      "immediate",
+    );
+    expect(screen.getByLabelText("Handoff summary")).toHaveValue(
+      "Deteriorated: SpO₂ 86 %, immediate.",
+    );
+    expect(screen.queryByText(/Triage completed/)).toBeNull();
+    expect(posts).toHaveLength(1);
+  });
+
+  it("keeps the typed handoff summary after saving the triage", async () => {
+    const user = userEvent.setup();
+    const { posts } = setup(detail());
+    await user.type(
+      await screen.findByLabelText("Handoff summary"),
+      "Dyspnoea, SpO₂ 93 %.",
+    );
+    await user.click(
+      within(screen.getByRole("group", { name: "Red flags" })).getByRole(
+        "checkbox",
+        { name: "Chest pain" },
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Save triage" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(await screen.findByText("Triage saved.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Handoff summary")).toHaveValue(
+      "Dyspnoea, SpO₂ 93 %.",
+    );
   });
 
   it("shows the routed handoff read-only once ready and lets the assigned physician start", async () => {

@@ -13,6 +13,7 @@ import {
   patientName,
   registrableFacilities,
 } from "@/lib/clinical";
+import { isSchedulableAt } from "@/lib/visits";
 
 describe("clinical helpers", () => {
   it("shows partial blood-pressure readings instead of dropping them", () => {
@@ -81,5 +82,17 @@ describe("clinical helpers", () => {
     expect(canActClinically(facilities)).toBe(false);
     expect(canRegisterPatients([])).toBe(false);
     expect(canActClinically([])).toBe(false);
+  });
+
+  it("mirrors the server's appointment window", () => {
+    const now = new Date("2026-08-29T10:00:00Z");
+    const at = (deltaMs: number) =>
+      new Date(now.getTime() + deltaMs).toISOString();
+    const hour = 60 * 60 * 1000;
+    const day = 24 * hour;
+    expect(isSchedulableAt(at(-30 * 60 * 1000), now)).toBe(true);
+    expect(isSchedulableAt(at(-2 * hour), now)).toBe(false);
+    expect(isSchedulableAt(at(364 * day), now)).toBe(true);
+    expect(isSchedulableAt(at(366 * day), now)).toBe(false);
   });
 });

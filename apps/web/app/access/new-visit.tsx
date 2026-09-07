@@ -9,6 +9,7 @@ import {
   ARRIVAL_KINDS,
   SERVICES,
   arrivalKindLabel,
+  isSchedulableAt,
   localDateTimeToIso,
   serviceLabel,
 } from "@/lib/visits";
@@ -93,6 +94,10 @@ export function NewVisit({
       scheduled_at = localDateTimeToIso(scheduledAt);
       if (!scheduled_at) {
         setError(t(lang, "requiredField"));
+        return;
+      }
+      if (!isSchedulableAt(scheduled_at)) {
+        setError(t(lang, "scheduledOutOfWindow"));
         return;
       }
     }

@@ -565,6 +565,10 @@ const dict = {
     visitConflict:
       "This visit changed in the meantime. The list was refreshed — check the current state before repeating the action.",
     patientAlreadyPresent: "This patient already has an open visit today.",
+    tooManyPendingAppointments:
+      "This patient already has the maximum number of pending appointments. Cancel one before scheduling another.",
+    scheduledOutOfWindow:
+      "Appointments can be scheduled up to one year ahead. Register an appointment that has already passed as an arrival.",
     actionNotPermitted: "You do not have permission for this action.",
     noAccessBoard: "Your role does not include patient access or triage.",
     internalAlerts: "Alerts for you",
@@ -1274,6 +1278,10 @@ const dict = {
     visitConflict:
       "Esta visita cambió mientras tanto. La lista se actualizó: revise el estado actual antes de repetir la acción.",
     patientAlreadyPresent: "Este paciente ya tiene una visita abierta hoy.",
+    tooManyPendingAppointments:
+      "Este paciente ya tiene el máximo de citas pendientes. Cancele una antes de programar otra.",
+    scheduledOutOfWindow:
+      "Las citas pueden programarse hasta con un año de antelación. Registre una cita ya pasada como una llegada.",
     actionNotPermitted: "No tiene permiso para esta acción.",
     noAccessBoard: "Su rol no incluye acceso de pacientes ni triaje.",
     internalAlerts: "Alertas para usted",

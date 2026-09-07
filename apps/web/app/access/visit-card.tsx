@@ -31,6 +31,8 @@ export function visitErrorMessage(lang: Lang, err: unknown): string {
     if (err.status === 409) {
       if (err.code === "patient_already_present")
         return t(lang, "patientAlreadyPresent");
+      if (err.code === "too_many_pending_appointments")
+        return t(lang, "tooManyPendingAppointments");
       return t(lang, "visitConflict");
     }
   }
