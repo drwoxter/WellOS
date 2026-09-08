@@ -1277,3 +1277,156 @@ table.vitals-trend {
     grid-template-columns: 1fr;
   }
 }
+
+/* --- Patient access and triage ------------------------------------------ */
+
+.visit-card.warn {
+  border-left-color: var(--warn-fg);
+}
+
+.visit-card.closed {
+  border-left-color: var(--border);
+  opacity: 0.85;
+}
+
+.visit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.8rem;
+  align-items: center;
+  font-size: 0.9rem;
+  margin-top: 0.25rem;
+}
+
+.visit-reason {
+  margin-top: 0.3rem;
+}
+
+.visit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.visit-actions .button-link {
+  display: inline-block;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  padding: 0.45rem 0.95rem;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.visit-actions .button-link.primary {
+  background: var(--primary);
+  color: var(--primary-contrast);
+}
+
+.visit-confirm {
+  flex-basis: 100%;
+}
+
+.visit-confirm p {
+  margin: 0 0 0.5rem;
+}
+
+.new-visit {
+  border-left: 4px solid var(--primary);
+}
+
+.visit-selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+fieldset.arrival-kinds,
+fieldset.choice-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem 0.7rem;
+  margin: 0.6rem 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.2rem;
+}
+
+fieldset.arrival-kinds legend,
+fieldset.choice-group legend {
+  font-weight: 600;
+  padding: 0 0.3rem;
+}
+
+.radio-option,
+.check-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 400;
+  margin: 0;
+}
+
+.radio-option input,
+.check-option input {
+  width: auto;
+  margin: 0;
+}
+
+.safety-floor {
+  border-left: 4px solid var(--warn-fg);
+}
+
+.safety-floor .floor-value {
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.triage-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+  margin-top: 1rem;
+}
+
+.triage-main,
+.triage-side {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.triage-main .card,
+.triage-side .card {
+  margin: 0;
+}
+
+.flow-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 0.6rem;
+  margin: 0.6rem 0;
+}
+
+.handoff-card {
+  border-left: 4px solid var(--warn-fg);
+}
+
+@media (max-width: 760px) {
+  .triage-layout {
+    grid-template-columns: 1fr;
+  }
+  .visit-actions {
+    justify-content: flex-start;
+    flex-basis: 100%;
+  }
+  .visit-actions > * {
+    flex: 1 1 auto;
+    text-align: center;
+  }
+}

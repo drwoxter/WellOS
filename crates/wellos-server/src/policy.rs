@@ -64,6 +64,16 @@ pub mod actions {
     pub const SERVICE_CREDENTIAL_MANAGE: &str = "service_credential.manage";
     pub const SERVICE_CREDENTIAL_READ: &str = "service_credential.read";
     pub const TENANT_META_READ: &str = "tenant.meta_read";
+    /// Create scheduled visits and arrivals; mark arrived, cancel, no-show.
+    pub const VISIT_MANAGE: &str = "visit.manage";
+    /// Read access/arrival worklists and visit detail.
+    pub const VISIT_READ: &str = "visit.read";
+    /// Triage documentation, dMind triage proposal and its human review.
+    pub const TRIAGE_WRITE: &str = "triage.write";
+    /// Assign a professional or an explicit service queue to a visit.
+    pub const CARE_TEAM_ASSIGN: &str = "care_team.assign";
+    /// Acknowledge directed internal alerts.
+    pub const ALERT_ACKNOWLEDGE: &str = "alert.acknowledge";
 
     pub const ALL: &[&str] = &[
         PATIENT_REGISTER,
@@ -86,6 +96,11 @@ pub mod actions {
         SERVICE_CREDENTIAL_MANAGE,
         SERVICE_CREDENTIAL_READ,
         TENANT_META_READ,
+        VISIT_MANAGE,
+        VISIT_READ,
+        TRIAGE_WRITE,
+        CARE_TEAM_ASSIGN,
+        ALERT_ACKNOWLEDGE,
     ];
 
     /// Whether `s` names a known action (used to validate service scopes).
@@ -111,7 +126,11 @@ pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
         | RESULT_REVIEW
         | PATIENT_NOTIFY
         | LOOP_CLOSE
-        | AI_REVIEW => &[Purpose::Treatment],
+        | AI_REVIEW
+        | TRIAGE_WRITE => &[Purpose::Treatment],
+        VISIT_MANAGE | VISIT_READ | CARE_TEAM_ASSIGN | ALERT_ACKNOWLEDGE => {
+            &[Purpose::Treatment, Purpose::Operations]
+        }
         RESULT_INGEST => &[Purpose::Treatment, Purpose::Operations],
         AUDIT_READ => &[Purpose::Operations, Purpose::Quality],
         CONSENT_WRITE => &[Purpose::Treatment, Purpose::Operations],
@@ -173,6 +192,9 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             PATIENT_REGISTER,
             PATIENT_READ,
             PATIENT_SEARCH,
+            VISIT_MANAGE,
+            VISIT_READ,
+            ALERT_ACKNOWLEDGE,
             TENANT_META_READ,
         ],
         PHYSICIAN => &[
@@ -187,16 +209,25 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             LOOP_CLOSE,
             AI_REVIEW,
             WORKLIST_READ,
+            VISIT_READ,
+            TRIAGE_WRITE,
+            CARE_TEAM_ASSIGN,
+            ALERT_ACKNOWLEDGE,
             TENANT_META_READ,
         ],
-        // Nurses have no PATIENT_NOTIFY grant: notification requires an
-        // established care relationship, and encounters name a single
-        // practitioner. A care-team assignment model (roadmap) is required
-        // before nurse-performed notification can be authorized.
+        // Nurses have no PATIENT_NOTIFY grant: result notification requires
+        // the encounter-based care relationship, and encounters name a single
+        // practitioner. Triage and care-team routing are nursing functions
+        // scoped by facility; they never imply consultation rights.
         NURSE => &[
             PATIENT_SEARCH,
             PATIENT_READ,
             WORKLIST_READ,
+            VISIT_MANAGE,
+            VISIT_READ,
+            TRIAGE_WRITE,
+            CARE_TEAM_ASSIGN,
+            ALERT_ACKNOWLEDGE,
             TENANT_META_READ,
         ],
         LAB => &[RESULT_INGEST, WORKLIST_READ, TENANT_META_READ],
@@ -210,6 +241,9 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             PATIENT_SEARCH,
             PATIENT_READ,
             WORKLIST_READ,
+            VISIT_MANAGE,
+            VISIT_READ,
+            CARE_TEAM_ASSIGN,
             JOBS_RUN,
             TENANT_META_READ,
         ],
@@ -427,8 +461,9 @@ pub async fn authorize_with_limit(
     }
 
     // Contextual check: clinical chart access requires a care relationship
-    // (an encounter between practitioner and patient) unless the caller's
-    // role is non-clinical-contextual or break-glass is invoked.
+    // (an encounter between practitioner and patient, or an active
+    // care-team assignment naming the caller) unless the caller's role is
+    // non-clinical-contextual or break-glass is invoked.
     let needs_relationship = match action {
         // Consequential clinical transitions always require an established
         // care relationship, regardless of the caller's role: facility
@@ -454,17 +489,8 @@ pub async fn authorize_with_limit(
             ..
         }) = resource
         {
-            let related: Option<(Uuid,)> = sqlx::query_as(
-                "SELECT id FROM encounters
-                 WHERE tenant_id = $1 AND patient_id = $2 AND practitioner_id = $3
-                 LIMIT 1",
-            )
-            .bind(ctx.tenant_id)
-            .bind(patient_id)
-            .bind(ctx.user_id)
-            .fetch_optional(pool)
-            .await?;
-            if related.is_none() {
+            let related = has_care_relationship(pool, ctx, *patient_id, action).await?;
+            if !related {
                 // Break-glass grants emergency *read* access only; consequential
                 // transitions (review, notify, close, AI review) still require
                 // an established care relationship.
@@ -503,6 +529,48 @@ pub async fn authorize_with_limit(
         reason: "rbac_allow".into(),
         used_break_glass: false,
     })
+}
+
+/// Whether the caller has an established care relationship with the
+/// patient. Consequential result/documentation transitions rely on the
+/// encounter relationship (encounters name one practitioner). Chart reads
+/// additionally accept an active, patient-specific care-team assignment
+/// naming the caller: membership is explicit and time-bounded, and never
+/// inferred from a system role.
+async fn has_care_relationship(
+    pool: &PgPool,
+    ctx: &AuthContext,
+    patient_id: Uuid,
+    action: &str,
+) -> Result<bool, ApiError> {
+    let encounter: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM encounters
+         WHERE tenant_id = $1 AND patient_id = $2 AND practitioner_id = $3
+         LIMIT 1",
+    )
+    .bind(ctx.tenant_id)
+    .bind(patient_id)
+    .bind(ctx.user_id)
+    .fetch_optional(pool)
+    .await?;
+    if encounter.is_some() {
+        return Ok(true);
+    }
+    if action != actions::PATIENT_READ {
+        return Ok(false);
+    }
+    let assignment: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM care_team_assignments
+         WHERE tenant_id = $1 AND patient_id = $2 AND assignee_user_id = $3
+           AND active AND starts_at <= now() AND (ends_at IS NULL OR ends_at > now())
+         LIMIT 1",
+    )
+    .bind(ctx.tenant_id)
+    .bind(patient_id)
+    .bind(ctx.user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(assignment.is_some())
 }
 
 /// The audited break-glass read path: emergency purpose, bounded reason,
@@ -635,6 +703,25 @@ mod tests {
     fn every_action_is_known() {
         assert!(actions::is_known_action(actions::RESULT_INGEST));
         assert!(!actions::is_known_action("no.such.action"));
+    }
+
+    #[test]
+    fn access_and_triage_grants_follow_function_not_hierarchy() {
+        assert!(role_allows(roles::REGISTRATION, actions::VISIT_MANAGE));
+        assert!(!role_allows(roles::REGISTRATION, actions::TRIAGE_WRITE));
+        assert!(!role_allows(roles::REGISTRATION, actions::ENCOUNTER_START));
+        assert!(role_allows(roles::NURSE, actions::TRIAGE_WRITE));
+        assert!(role_allows(roles::NURSE, actions::CARE_TEAM_ASSIGN));
+        assert!(!role_allows(roles::NURSE, actions::ENCOUNTER_START));
+        assert!(role_allows(roles::PHYSICIAN, actions::VISIT_READ));
+        assert!(!role_allows(roles::PHYSICIAN, actions::VISIT_MANAGE));
+        assert!(!role_allows(roles::LAB, actions::VISIT_READ));
+        assert!(!role_allows(roles::RESEARCH, actions::VISIT_READ));
+        assert!(!role_allows(roles::DMIND_SERVICE, actions::TRIAGE_WRITE));
+        assert!(purpose_allows(Purpose::Treatment, actions::TRIAGE_WRITE));
+        assert!(!purpose_allows(Purpose::Operations, actions::TRIAGE_WRITE));
+        assert!(purpose_allows(Purpose::Operations, actions::VISIT_MANAGE));
+        assert!(!purpose_allows(Purpose::Emergency, actions::VISIT_MANAGE));
     }
 
     #[test]

@@ -237,6 +237,7 @@ impl AuthConfig {
                 cred_admin_per_min: 10_000,
                 api_per_min: 100_000,
                 scribe_per_min: 1_000,
+                visit_create_per_min: 10_000,
                 trusted_proxies: Vec::new(),
             },
         }
@@ -287,6 +288,7 @@ impl AuthConfig {
             cred_admin_per_min: parse_positive_i64("WELLOS_RATE_CRED_ADMIN_PER_MIN", 30)?,
             api_per_min: parse_positive_i64("WELLOS_RATE_API_PER_MIN", 600)?,
             scribe_per_min: parse_positive_i64("WELLOS_RATE_SCRIBE_PER_MIN", 6)?,
+            visit_create_per_min: parse_positive_i64("WELLOS_RATE_VISIT_CREATE_PER_MIN", 30)?,
             trusted_proxies: parse_trusted_proxies("WELLOS_TRUSTED_PROXIES")?,
         };
         Ok(Self {

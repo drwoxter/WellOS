@@ -10,6 +10,7 @@ pub mod events;
 pub mod ids;
 pub mod result_loop;
 pub mod rules;
+pub mod triage;
 pub mod units;
 
 pub use ids::*;

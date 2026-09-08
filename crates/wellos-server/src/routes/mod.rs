@@ -13,6 +13,7 @@ pub mod oidc_login;
 pub mod patients;
 pub mod scribe;
 pub mod session;
+pub mod visits;
 
 use crate::audit;
 use crate::auth::AuthContext;
@@ -115,6 +116,31 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/worklist", get(loops::worklist))
         .route("/api/v1/worklist/summary", get(loops::worklist_summary))
         .route("/api/v1/dashboard/cockpit", get(dashboard::cockpit))
+        .route("/api/v1/visits", post(visits::create).get(visits::list))
+        .route("/api/v1/visits/:id", get(visits::detail))
+        .route("/api/v1/visits/:id/arrive", post(visits::arrive))
+        .route("/api/v1/visits/:id/cancel", post(visits::cancel))
+        .route("/api/v1/visits/:id/no-show", post(visits::no_show))
+        .route("/api/v1/visits/:id/triage", post(visits::save_triage))
+        .route("/api/v1/visits/:id/triage/proposal", post(visits::propose))
+        .route(
+            "/api/v1/visits/:id/triage/proposal/:artifact_id/review",
+            post(visits::review_proposal),
+        )
+        .route(
+            "/api/v1/visits/:id/triage/complete",
+            post(visits::complete_triage),
+        )
+        .route("/api/v1/visits/:id/assign", post(visits::assign))
+        .route(
+            "/api/v1/visits/:id/start-consultation",
+            post(visits::start_consultation),
+        )
+        .route("/api/v1/alerts", get(visits::list_alerts))
+        .route(
+            "/api/v1/alerts/:id/acknowledge",
+            post(visits::acknowledge_alert),
+        )
         .route("/api/v1/lab/results", post(lab::ingest_result))
         .route("/api/v1/ai-artifacts/:id/review", post(ai::review_artifact))
         .route("/api/v1/consents", post(consent::set_consent))

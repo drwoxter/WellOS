@@ -71,7 +71,7 @@ describe("development demo login", () => {
     expect(signInCall?.body).toContain("dev-dr.garcia");
   });
 
-  it("routes registration staff to /patients without racing the dashboard redirect", async () => {
+  it("routes registration staff to /access without racing the dashboard redirect", async () => {
     mockFetch((url, init) => {
       if (url === "/api/session" && init?.method === "POST") {
         return jsonResponse({ ok: true });
@@ -86,7 +86,7 @@ describe("development demo login", () => {
     );
     const card = await screen.findByRole("button", { name: /reg\.rivera/ });
     await userEvent.click(card);
-    await waitFor(() => expect(push).toHaveBeenCalledWith("/patients"));
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/access"));
     expect(replace).not.toHaveBeenCalled();
   });
 

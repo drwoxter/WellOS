@@ -92,15 +92,41 @@ trend commentary; backend integration (including no-sensitive-logging),
 component, Playwright journey (fake microphone), keyboard, accessibility and
 390px coverage.
 
+Care Team, Patient Access, Arrival and AI-Assisted Triage Worklist MVP: one
+operational flow from appointment or walk-in → arrival → triage → care-team
+assignment → internal professional alert → start/resume consultation.
+`visits` with a locked, version-checked state machine (`scheduled`,
+`arrived`, `triage_in_progress`, `ready_for_consultation`,
+`in_consultation`, `completed`, `cancelled`, `no_show`), facility service
+queues, time-bounded patient-specific `care_team_assignments` (distinct from
+system roles), append-only `triage_assessments` and directed
+`internal_alerts` (professional or queue, acknowledged and audited, resolved
+on consultation start; never SMS/e-mail/push). Deterministic versioned
+triage safety floor (`triage-safety@1.0.0`: explicit red flags, urgent
+arrival, abnormal vitals) enforced server-side; dMind `triage-proposal.v1`
+(deterministic offline fake) clamped to the floor, bound to the triage
+version, explicit accept/override only — never diagnoses, finalises acuity,
+assigns, starts an encounter or notifies a patient. Role-aware `/access`
+board, `/visits/[id]/triage` workspace, dashboard ready/alerts/triage/access
+widgets on the existing cockpit, patient-workspace visit actions and a
+read-only arrival/triage handoff in the consultation workspace. Backend
+integration (transitions, floor, stale proposals, routing, authorization,
+lab/research denial), component, Playwright golden path across three roles,
+keyboard, accessibility, 390px and Spanish coverage. Hazards H-13–H-17
+recorded; not a validated triage scale.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
    rate limiting with tenant-level aggregate caps, encrypted-at-rest login
    transactions.
-2. **Care-team assignment model**: represent nurses and other staff assigned
-   to a patient's care so consequential actions (e.g. patient notification)
-   can be authorized beyond the single encounter practitioner. Until then,
-   notification is physician-only.
+2. **Care-team management and patient-facing notification**: a general
+   care-team management UI on top of the assignment model, periodic
+   assignment review, extending consequential permissions (e.g. patient
+   notification) to care-team members beyond the encounter practitioner, and
+   a real appointment book (slots, calendars, reminders) with escalation
+   timers and re-triage for waiting patients. Until then, notification is
+   physician-only and alerts are internal without escalation.
 3. **PostgreSQL row-level security** as a second tenant-isolation layer, plus
    audit hash-chaining for tamper evidence.
 4. **Outbox dispatcher + NATS JetStream**: publish outbox rows, consumer

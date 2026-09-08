@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { signInAs } from "./helpers";
+import { COCKPIT_STORAGE_ITEM } from "../lib/cockpit";
 
 /**
  * Smart consultation cockpit and AI scribe journey. Chromium's fake media
@@ -205,15 +206,23 @@ test("dashboard cockpit customization is keyboard operable and stores layout onl
     page.getByRole("heading", { name: "Draft consultations" }),
   ).toHaveCount(0);
   await page.getByRole("radio", { name: "Compact" }).check();
-  const stored = await page.evaluate(() =>
-    window.localStorage.getItem("wellos.cockpit.v1"),
+  const stored = await page.evaluate(
+    (key) => window.localStorage.getItem(key),
+    COCKPIT_STORAGE_ITEM,
   );
   expect(stored).not.toBeNull();
   expect(stored).not.toMatch(/Demopatient|SYN-/);
-  expect(JSON.parse(stored ?? "{}")).toMatchObject({
-    hidden: ["drafts"],
-    density: "compact",
-  });
+  const layout = JSON.parse(stored ?? "{}") as {
+    hidden: string[];
+    density: string;
+  };
+  expect(layout.density).toBe("compact");
+  // Physicians hide the triage/access widgets by default; the user's choice
+  // is added to that set.
+  expect(layout.hidden).toEqual(
+    expect.arrayContaining(["triage", "access", "drafts"]),
+  );
+  expect(layout.hidden).not.toContain("ready");
   await page.getByRole("button", { name: "Restore role defaults" }).click();
   await expect(
     page.getByRole("heading", { name: "Draft consultations" }),

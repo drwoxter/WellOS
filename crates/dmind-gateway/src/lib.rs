@@ -9,10 +9,13 @@
 pub mod fake;
 pub mod scribe;
 pub mod trends;
+pub mod triage;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use wellos_domain::ai::ResultSummaryV1;
+
+pub use triage::{TriageRequest, TriageResponse};
 
 /// A request for an A1/A2 structured result summary.
 ///
@@ -53,11 +56,21 @@ pub enum GatewayError {
 pub trait ModelGateway: Send + Sync {
     async fn summarize_result(&self, req: &SummaryRequest)
         -> Result<GatewayResponse, GatewayError>;
+
+    /// A2 triage assistance: proposes operational priority, destination and
+    /// a handoff summary from policy-filtered triage facts. The caller clamps
+    /// the result to the deterministic safety floor and gates it behind an
+    /// explicit human decision.
+    async fn propose_triage(&self, req: &TriageRequest) -> Result<TriageResponse, GatewayError>;
 }
 
 pub fn input_hash(req: &SummaryRequest) -> String {
+    hash_json(req)
+}
+
+pub(crate) fn hash_json<T: Serialize>(value: &T) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_vec(req).expect("serializable"));
+    hasher.update(serde_json::to_vec(value).expect("serializable"));
     hex::encode(hasher.finalize())
 }

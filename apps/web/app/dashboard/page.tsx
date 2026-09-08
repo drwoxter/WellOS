@@ -17,6 +17,7 @@ import {
   patientName,
 } from "@/lib/clinical";
 import {
+  availableWidgets,
   defaultConfig,
   loadConfig,
   move,
@@ -26,6 +27,10 @@ import {
   visibleWidgets,
 } from "@/lib/cockpit";
 import type { CockpitConfig, CockpitWidget } from "@/lib/cockpit";
+import { canReadVisits } from "@/lib/visits";
+import type { InternalAlert, VisitItem } from "@/lib/visits";
+import { AlertsPanel } from "../access/alerts-panel";
+import { VisitCard, useVisitActions } from "../access/visit-card";
 
 type Summary = {
   critical_open: number;
@@ -110,6 +115,10 @@ type PatientHit = {
 };
 
 const WIDGET_TITLE: Record<CockpitWidget, TKey> = {
+  ready: "widgetReady",
+  alerts: "internalAlerts",
+  triage: "widgetTriage",
+  access: "widgetAccess",
   drafts: "widgetDrafts",
   attention: "widgetAttention",
   results: "widgetResults",
@@ -280,22 +289,51 @@ function StartConsultation({ lang }: { lang: Lang }) {
   );
 }
 
+/** One-line count of where today's patients are in the access flow. */
+function FlowStrip({ lang, visits }: { lang: Lang; visits: VisitItem[] }) {
+  const count = (...statuses: string[]) =>
+    visits.filter((v) => statuses.includes(v.status)).length;
+  const steps: { key: TKey; n: number; tone: string }[] = [
+    { key: "flowScheduled", n: count("scheduled"), tone: "" },
+    { key: "flowWaiting", n: count("arrived"), tone: " warn" },
+    { key: "flowInTriage", n: count("triage_in_progress"), tone: "" },
+    { key: "flowReady", n: count("ready_for_consultation"), tone: " ok" },
+    { key: "flowInConsultation", n: count("in_consultation"), tone: "" },
+  ];
+  return (
+    <section className="card" aria-labelledby="flow-h">
+      <h2 id="flow-h">{t(lang, "flowTitle")}</h2>
+      <div className="cards-grid">
+        {steps.map((s) => (
+          <div key={s.key} className={`stat-card${s.n > 0 ? s.tone : ""}`}>
+            <span className="num">{s.n}</span>
+            <span className="label">{t(lang, s.key)}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function Customizer({
   lang,
   config,
+  available,
   onChange,
   onRestore,
 }: {
   lang: Lang;
   config: CockpitConfig;
+  available: CockpitWidget[];
   onChange: (c: CockpitConfig) => void;
   onRestore: () => void;
 }) {
+  const rows = config.order.filter((w) => available.includes(w));
   return (
     <div className="card customizer" aria-labelledby="customize-h">
       <h2 id="customize-h">{t(lang, "customizeDashboard")}</h2>
       <ul className="brief-list">
-        {config.order.map((w, i) => {
+        {rows.map((w, i) => {
           const hidden = config.hidden.includes(w);
           const title = t(lang, WIDGET_TITLE[w]);
           return (
@@ -324,7 +362,7 @@ function Customizer({
                 type="button"
                 className="tertiary"
                 aria-label={`${t(lang, "moveDown")}: ${title}`}
-                disabled={i === config.order.length - 1}
+                disabled={i === rows.length - 1}
                 onClick={() => onChange(move(config, w, 1))}
               >
                 ↓
@@ -378,12 +416,15 @@ function DashboardContent() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [items, setItems] = useState<WorklistItem[] | null>(null);
   const [cockpit, setCockpit] = useState<Cockpit | null>(null);
+  const [visits, setVisits] = useState<VisitItem[] | null>(null);
+  const [alerts, setAlerts] = useState<InternalAlert[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<CockpitConfig | null>(null);
   const [customizing, setCustomizing] = useState(false);
 
   const roles = meta?.user.roles ?? null;
   const worklistUser = roles ? canReadWorklist(roles) : false;
+  const visitUser = roles ? canReadVisits(roles) : false;
   const clinician = meta ? canActClinically(meta.facilities) : false;
   const rolesKey = roles?.join(",") ?? "";
 
@@ -403,28 +444,53 @@ function DashboardContent() {
     saveConfig(typeof window === "undefined" ? null : window.localStorage, c);
   }, []);
 
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     setError(null);
-    Promise.all([
-      apiFetch<Summary>("/api/v1/worklist/summary"),
-      apiFetch<{ items: WorklistItem[] }>("/api/v1/worklist"),
-      apiFetch<Cockpit>("/api/v1/dashboard/cockpit"),
-    ])
-      .then(([s, w, c]) => {
-        setSummary(s);
-        setItems(w.items);
-        setCockpit(c);
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, []);
+    try {
+      const [work, board] = await Promise.all([
+        worklistUser
+          ? Promise.all([
+              apiFetch<Summary>("/api/v1/worklist/summary"),
+              apiFetch<{ items: WorklistItem[] }>("/api/v1/worklist"),
+              apiFetch<Cockpit>("/api/v1/dashboard/cockpit"),
+            ])
+          : Promise.resolve(null),
+        visitUser
+          ? Promise.all([
+              apiFetch<{ items: VisitItem[] }>("/api/v1/visits?view=access"),
+              apiFetch<{ items: InternalAlert[] }>("/api/v1/alerts").catch(
+                () => ({ items: [] as InternalAlert[] }),
+              ),
+            ])
+          : Promise.resolve(null),
+      ]);
+      if (work) {
+        setSummary(work[0]);
+        setItems(work[1].items);
+        setCockpit(work[2]);
+      }
+      if (board) {
+        setVisits(board[0].items);
+        setAlerts(board[1].items);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [worklistUser, visitUser]);
 
   useEffect(() => {
-    if (authenticated && worklistUser) load();
-  }, [authenticated, worklistUser, load]);
+    if (authenticated && (worklistUser || visitUser)) void load();
+  }, [authenticated, worklistUser, visitUser, load]);
 
+  const visitActions = useVisitActions(lang, load);
+
+  const available = useMemo(
+    () => availableWidgets(visitUser, worklistUser),
+    [visitUser, worklistUser],
+  );
   const visible = useMemo(
-    () => (config ? visibleWidgets(config) : []),
-    [config],
+    () => (config ? visibleWidgets(config, available) : []),
+    [config, available],
   );
 
   if (error) {
@@ -451,7 +517,12 @@ function DashboardContent() {
       </div>
     );
   }
-  if (!roles || !config || (worklistUser && (!summary || !items || !cockpit))) {
+  if (
+    !roles ||
+    !config ||
+    (worklistUser && (!summary || !items || !cockpit)) ||
+    (visitUser && (!visits || !alerts))
+  ) {
     return (
       <p className="muted" role="status">
         {t(lang, "loading")}
@@ -472,14 +543,96 @@ function DashboardContent() {
   if (clinician) {
     quickActions.push({ href: "/patients", key: "actionOrderLab" });
   }
+  if (visitUser) {
+    quickActions.push({ href: "/access", key: "navAccess" });
+  }
 
   const compact = config.density === "compact";
   const limit = compact ? 3 : 6;
   const priority = items?.slice(0, limit) ?? [];
 
-  function renderWidget(w: CockpitWidget) {
-    if (!cockpit) return null;
+  function visitWidget(w: "ready" | "triage" | "access") {
+    if (!visits) return null;
     const title = t(lang, WIDGET_TITLE[w]);
+    const statuses: string[] =
+      w === "ready"
+        ? ["ready_for_consultation", "in_consultation"]
+        : w === "triage"
+          ? ["arrived", "triage_in_progress"]
+          : ["scheduled", "arrived"];
+    const rows = visits.filter((v) => statuses.includes(v.status));
+    const empty: TKey =
+      w === "ready"
+        ? "noReadyPatients"
+        : w === "triage"
+          ? "noTriageVisits"
+          : "noArrivals";
+    return (
+      <section className="card widget" aria-labelledby={`w-${w}`}>
+        <h2 id={`w-${w}`}>
+          {title}{" "}
+          {rows.length > 0 ? (
+            <span className={`badge ${w === "access" ? "neutral" : "warn"}`}>
+              {rows.length}
+            </span>
+          ) : null}
+        </h2>
+        {visitActions.message ? (
+          <p
+            role={visitActions.message.kind === "error" ? "alert" : "status"}
+            className={
+              visitActions.message.kind === "error" ? "error" : "success"
+            }
+          >
+            {visitActions.message.text}
+          </p>
+        ) : null}
+        {rows.length === 0 ? (
+          <p className="muted">{t(lang, empty)}</p>
+        ) : (
+          <ul className="result-list">
+            {rows.slice(0, limit).map((v) => (
+              <VisitCard
+                key={v.id}
+                lang={lang}
+                visit={v}
+                busy={visitActions.busy}
+                onAction={(visit, action) =>
+                  void visitActions.run(visit, action)
+                }
+                showFacility={(meta?.facilities.length ?? 0) > 1}
+                compact={compact}
+              />
+            ))}
+          </ul>
+        )}
+        <p style={{ marginBottom: 0 }}>
+          <Link href="/access">{t(lang, "openAccessBoard")}</Link>
+        </p>
+      </section>
+    );
+  }
+
+  function renderWidget(w: CockpitWidget) {
+    const title = t(lang, WIDGET_TITLE[w]);
+    switch (w) {
+      case "ready":
+      case "triage":
+      case "access":
+        return visitWidget(w);
+      case "alerts":
+        return alerts ? (
+          <AlertsPanel
+            lang={lang}
+            alerts={alerts}
+            onAcknowledged={load}
+            limit={limit}
+            headingId={`w-${w}`}
+            className="widget"
+          />
+        ) : null;
+    }
+    if (!cockpit) return null;
     switch (w) {
       case "drafts": {
         const rows = cockpit.draft_consultations.slice(0, limit);
@@ -737,7 +890,7 @@ function DashboardContent() {
 
       {clinician ? <StartConsultation lang={lang} /> : null}
 
-      {!worklistUser ? (
+      {!worklistUser && !visitUser ? (
         <div className="card">
           <p className="muted" style={{ margin: 0 }}>
             {t(lang, "noWorklistAccess")}
@@ -748,7 +901,7 @@ function DashboardContent() {
       <div className="card">
         <div className="recording-dock-head">
           <h2 style={{ margin: 0 }}>{t(lang, "quickActions")}</h2>
-          {worklistUser ? (
+          {worklistUser || visitUser ? (
             <button
               type="button"
               className="secondary"
@@ -771,18 +924,21 @@ function DashboardContent() {
         </div>
       </div>
 
-      {customizing && worklistUser ? (
+      {visits ? <FlowStrip lang={lang} visits={visits} /> : null}
+
+      {customizing && (worklistUser || visitUser) ? (
         <div id="customizer">
           <Customizer
             lang={lang}
             config={config}
+            available={available}
             onChange={updateConfig}
             onRestore={() => updateConfig(defaultConfig(roles ?? []))}
           />
         </div>
       ) : null}
 
-      {worklistUser ? (
+      {worklistUser || visitUser ? (
         visible.length === 0 ? (
           <p className="muted" role="status">
             {t(lang, "allWidgetsHidden")}

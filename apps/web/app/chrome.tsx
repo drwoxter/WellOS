@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { t } from "@/lib/i18n";
 import { useSession } from "@/lib/session";
 import { canReadWorklist, canSearchPatients } from "@/lib/clinical";
+import { canReadVisits } from "@/lib/visits";
 import { confirmLeaveUnsaved } from "@/lib/unsaved-guard";
 
 /** Sign-out confirmed against unsaved documentation before the session is
@@ -69,6 +70,9 @@ function NavLinks() {
     { href: "/dashboard", label: t(lang, "navHome") },
     ...(canSearchPatients(roles)
       ? [{ href: "/patients", label: t(lang, "navPatients") }]
+      : []),
+    ...(canReadVisits(roles)
+      ? [{ href: "/access", label: t(lang, "navAccess") }]
       : []),
     ...(canReadWorklist(roles)
       ? [{ href: "/results", label: t(lang, "navResults") }]

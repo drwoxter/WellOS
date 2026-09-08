@@ -63,10 +63,12 @@ token needs to be typed.
 
 | URL | Screen |
 | --- | --- |
-| `/dashboard` | Consultation cockpit: prominent **Start consultation** (patient search → create or resume), customizable widgets for draft consultations, patients needing attention, critical/pending results, pending tasks and recent dMind activity (show/hide, reorder, density; layout-only browser storage) |
+| `/dashboard` | Consultation cockpit: prominent **Start consultation** (patient search → create or resume), role-aware widgets for patients ready for consultation (start/resume), alerts for you, the triage queue and today's appointments/arrivals, plus draft consultations, patients needing attention, critical/pending results, pending tasks and recent dMind activity (show/hide, reorder, density; layout-only browser storage) |
+| `/access` | Access board: today's appointments and arrivals, walk-in / urgent / remote registration, mark arrived, cancel, no-show; Triage, Ready and Closed tabs by role |
+| `/visits/[id]/triage` | Triage workspace: safety header, previous vitals, structured concerns, red flags, vital signs, deterministic safety floor, dMind triage proposal (assistive), priority, requested service, named professional, handoff summary, complete |
 | `/patients` | Patient directory: search by name or identifier, register a patient |
-| `/patients/[id]` | Patient workspace: demographics, allergies/alerts, tabs, clinical timeline, recent vital trends, start/resume consultation, order laboratory test |
-| `/encounters/[id]` | Consultation workspace: patient safety header, sticky recording dock (consent → record → pause/resume → finish/discard → transcript + structured dMind scribe draft), Patient Brief, vital signs (validated, BMI), structured clinical note, diagnoses, laboratory order, dMind documentation aid, diagnostic history with deterministic trend commentary, draft save, sign-and-complete, addenda on signed notes |
+| `/patients/[id]` | Patient workspace: demographics, allergies/alerts, tabs, clinical timeline, recent vital trends, today's visit (arrive / triage / start), start/resume consultation, order laboratory test |
+| `/encounters/[id]` | Consultation workspace: patient safety header, read-only arrival & triage handoff, sticky recording dock (consent → record → pause/resume → finish/discard → transcript + structured dMind scribe draft), Patient Brief, vital signs (validated, BMI), structured clinical note, diagnoses, laboratory order, dMind documentation aid, diagnostic history with deterministic trend commentary, draft save, sign-and-complete, addenda on signed notes |
 | `/results` | Results worklist: priority-first, criticality/state filters, patient search (`/worklist` redirects here) |
 | `/requests/[id]` | Result detail: workflow stepper, critical banner, deterministic rule evaluation, advisory dMind summary, review → notification → closure |
 
@@ -83,7 +85,13 @@ holds the clinical note, while `order_only` is the laboratory-order context
 used by the result loops (pre-documentation encounters are backfilled to it);
 order-only encounters appear in the timeline as “Laboratory orders”, are never
 offered as “Resume consultation” and refuse note, vitals, diagnosis, sign and
-dMind mutations. `make reset` restores all demo states.
+dMind mutations. For patient access it seeds facility service queues and
+today's visits in every state — a scheduled appointment and a remote
+appointment, a walk-in awaiting triage, an urgent arrival with an open
+emergency-queue alert, a walk-in mid-triage with a pending dMind proposal, a
+patient ready for consultation assigned to Dr. García with an open alert, the
+in-consultation visit behind Alba's draft encounter and a cancelled
+appointment from yesterday. `make reset` restores all demo states.
 
 Development tokens work only against
 seeded synthetic users and only when `WELLOS_ENV=development` and
@@ -153,6 +161,29 @@ only a hash, size, MIME type and duration are persisted. See
 `docs/architecture/ai-scribe.md` for the provider configuration, privacy
 boundaries, structured-output contract and failure recovery.
 
+### Patient access and triage demo (registration → nurse → physician)
+
+1. Sign in as **Reg. Rivera**. The access board opens on **Arrivals**: add
+   an appointment or walk-in with **New visit** (search the patient by name;
+   no identifiers to type), then **Mark arrived** when the patient presents.
+   Urgent arrivals immediately alert the emergency queue.
+2. Sign in as **Nurse Kim**. The board opens on **Triage**; open the patient
+   and record concerns, explicit red flags and vital signs. The deterministic
+   **safety floor** (e.g. SpO₂ below 94 % → Urgent) is shown with the rules
+   that fired; priorities below it are disabled. Optionally **Ask dMind**: the
+   proposal is an assistive draft citing the facts it used and can never lower
+   the floor — accept or override it explicitly. Choose the service and,
+   optionally, a named professional, write the handoff summary and
+   **Complete triage**.
+3. Sign in as **Dr. García**. The dashboard shows the internal **Patient
+   ready** alert and the **Ready for consultation** card; **Acknowledge**,
+   then **Start consultation**. The consultation workspace opens with the
+   read-only arrival and triage handoff; sign the note to complete the visit.
+
+See `docs/architecture/patient-access-and-triage.md` for the visit state
+machine, the safety rules, the care-team versus system-role distinction and
+internal alert routing.
+
 ## Tests
 
 ```bash
@@ -188,10 +219,15 @@ npm run test:e2e   # browser tests (Playwright; requires Postgres, seeds mutated
 - No claims of HIPAA/GDPR compliance, clinical validation, or device
   certification are made or implied.
 - Not production-deployable: no TLS termination, HA, or backup automation here.
-- The workspace UI covers the diagnostic-result loop and consultation
-  documentation; scheduling, arrival/triage, orders beyond the two seeded
-  laboratory tests, and care-team based notification permissions are future
-  work.
+- The workspace UI covers the diagnostic-result loop, patient access and
+  triage, and consultation documentation; a real appointment book (slots,
+  calendars, reminders), patient-facing notifications, orders beyond the two
+  seeded laboratory tests, and care-team based notification permissions are
+  future work.
+- Triage uses an internal four-level operational priority with deterministic
+  safety rules; it is not a validated triage scale (Manchester/ESI/CTAS) and
+  the dMind triage proposal is assistive only. Internal alerts stay inside
+  WellOS (no SMS, e-mail, push or paging) and have no escalation timers.
 - The dashboard cockpit stores only widget layout (order, hidden, density)
   in the browser; no patient or clinical data is ever placed in browser
   storage.

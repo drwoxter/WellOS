@@ -131,11 +131,96 @@ const COCKPIT = {
   generated_at: "2026-08-29T09:00:00Z",
 };
 
+const CAPS_NONE = {
+  can_arrive: false,
+  can_cancel: false,
+  can_no_show: false,
+  can_triage: false,
+  can_assign: false,
+  can_start_consultation: false,
+  can_resume_consultation: false,
+  assigned_to_other: false,
+};
+
+function visit(
+  id: string,
+  status: string,
+  caps: Partial<typeof CAPS_NONE> = {},
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    status,
+    arrival_kind: "walk_in",
+    service: "general_medicine",
+    reason: `Reason ${id}`,
+    scheduled_at: null,
+    arrived_at: "2026-08-29T08:00:00Z",
+    ready_at: null,
+    consultation_started_at: null,
+    wait_minutes: 12,
+    priority: "standard",
+    handoff_summary: null,
+    encounter_id: null,
+    version: 3,
+    updated_at: "2026-08-29T08:10:00Z",
+    facility: { id: "f1", name: "Central Hospital" },
+    patient: {
+      ...PATIENT,
+      age_years: 36,
+      alert_count: 0,
+      allergy_count: 1,
+    },
+    assignment: null,
+    open_alerts: 0,
+    capabilities: { ...CAPS_NONE, ...caps },
+    ...extra,
+  };
+}
+
+const VISITS = [
+  visit("v-sched", "scheduled", { can_arrive: true }, { arrived_at: null }),
+  visit("v-arrived", "arrived", { can_triage: true }),
+  visit("v-triage", "triage_in_progress", { can_triage: true }),
+  visit("v-ready", "ready_for_consultation", { can_start_consultation: true }),
+  visit(
+    "v-open",
+    "in_consultation",
+    { can_resume_consultation: true },
+    { encounter_id: "enc-open" },
+  ),
+];
+
+const ALERTS = [
+  {
+    id: "al1",
+    visit_id: "v-ready",
+    kind: "ready_for_consultation",
+    priority: "standard",
+    status: "open",
+    created_at: "2026-08-29T08:20:00Z",
+    acknowledged_at: null,
+    acknowledged_by_me: false,
+    target: { kind: "professional" },
+    visit: {
+      status: "ready_for_consultation",
+      reason: "Reason v-ready",
+      wait_minutes: 12,
+      handoff_summary: null,
+      encounter_id: null,
+      version: 3,
+    },
+    patient: PATIENT,
+  },
+];
+
 function setup(
   roles: string[],
   options: { openConsultationId?: string | null } = {},
 ) {
   const encounterCalls: string[] = [];
+  const visitCalls: { url: string; body: string }[] = [];
+  let visitLoads = 0;
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url === "/api/session")
@@ -165,6 +250,20 @@ function setup(
       encounterCalls.push(String(init.body));
       return Promise.resolve(jsonResponse({ id: "enc-new" }));
     }
+    if (url === "/api/v1/visits?view=access") {
+      visitLoads += 1;
+      return Promise.resolve(jsonResponse({ items: VISITS }));
+    }
+    if (url === "/api/v1/alerts")
+      return Promise.resolve(jsonResponse({ items: ALERTS }));
+    if (url.startsWith("/api/v1/visits/") && init?.method === "POST") {
+      visitCalls.push({ url, body: String(init.body ?? "") });
+      return Promise.resolve(jsonResponse({ encounter_id: "enc-from-visit" }));
+    }
+    if (url.startsWith("/api/v1/alerts/") && init?.method === "POST") {
+      visitCalls.push({ url, body: "" });
+      return Promise.resolve(jsonResponse({ status: "acknowledged" }));
+    }
     return Promise.resolve(jsonResponse({}));
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -173,7 +272,12 @@ function setup(
       <DashboardPage />
     </SessionProvider>,
   );
-  return { encounterCalls, fetchMock };
+  return {
+    encounterCalls,
+    visitCalls,
+    fetchMock,
+    visitLoads: () => visitLoads,
+  };
 }
 
 describe("dashboard cockpit", () => {
@@ -242,6 +346,104 @@ describe("dashboard cockpit", () => {
     expect(widgets).toEqual(["w-results", "w-tasks", "w-attention", "w-ai"]);
   });
 
+  it("shows physicians their ready patients and alerts and starts from the card", async () => {
+    const user = userEvent.setup();
+    const { visitCalls, visitLoads } = setup(["physician"]);
+    const ready = await screen.findByRole("region", {
+      name: /^Ready for consultation/,
+    });
+    // Only ready/in-consultation visits, no triage or scheduled ones.
+    expect(within(ready).getByText("Reason v-ready")).toBeInTheDocument();
+    expect(within(ready).getByText("Reason v-open")).toBeInTheDocument();
+    expect(within(ready).queryByText("Reason v-arrived")).toBeNull();
+    expect(within(ready).queryByText("Reason v-sched")).toBeNull();
+    // Resuming an open consultation is plain navigation to its workspace.
+    expect(
+      within(ready).getByRole("link", { name: "Resume consultation" }),
+    ).toHaveAttribute("href", "/encounters/enc-open");
+    // Physicians do not get the triage or access widgets by default.
+    expect(screen.queryByRole("region", { name: /^Triage queue/ })).toBeNull();
+    expect(
+      screen.queryByRole("region", {
+        name: /^Today's appointments and arrivals/,
+      }),
+    ).toBeNull();
+    // Flow strip counts every state of today's flow.
+    const flow = screen.getByRole("region", { name: "Today's flow" });
+    expect(
+      within(flow).getByText("Appointments").previousSibling?.textContent,
+    ).toBe("1");
+    expect(within(flow).getByText("Ready").previousSibling?.textContent).toBe(
+      "1",
+    );
+    // Alerts widget with acknowledgement.
+    const alerts = screen.getByRole("region", { name: /^Alerts for you/ });
+    expect(within(alerts).getByText(/Alba Demopatient/)).toBeInTheDocument();
+    await user.click(
+      within(alerts).getByRole("button", { name: "Acknowledge" }),
+    );
+    await waitFor(() =>
+      expect(visitCalls.map((c) => c.url)).toContain(
+        "/api/v1/alerts/al1/acknowledge",
+      ),
+    );
+    await waitFor(() => expect(visitLoads()).toBe(2));
+    // Start consultation from the ready card sends the current version and
+    // navigates to the encounter returned by the server.
+    await user.click(
+      within(ready).getByRole("button", { name: "Start consultation" }),
+    );
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith("/encounters/enc-from-visit"),
+    );
+    const start = visitCalls.find((c) =>
+      c.url.endsWith("/visits/v-ready/start-consultation"),
+    );
+    expect(start).toBeDefined();
+    expect(JSON.parse(start!.body)).toEqual({ version: 3 });
+  });
+
+  it("gives nurses the triage queue with links into the triage workspace", async () => {
+    setup(["nurse"]);
+    const triage = await screen.findByRole("region", { name: /^Triage queue/ });
+    expect(within(triage).getByText("Reason v-arrived")).toBeInTheDocument();
+    expect(within(triage).getByText("Reason v-triage")).toBeInTheDocument();
+    expect(within(triage).queryByText("Reason v-ready")).toBeNull();
+    expect(
+      within(triage).getByRole("link", { name: "Open triage" }),
+    ).toHaveAttribute("href", "/visits/v-arrived/triage");
+    expect(
+      within(triage).getByRole("link", { name: "Continue triage" }),
+    ).toHaveAttribute("href", "/visits/v-triage/triage");
+    for (const link of screen.getAllByRole("link", {
+      name: "Open access board",
+    })) {
+      expect(link).toHaveAttribute("href", "/access");
+    }
+  });
+
+  it("shows registration staff only the access widgets", async () => {
+    setup(["registration_staff"]);
+    const access = await screen.findByRole("region", {
+      name: /^Today's appointments and arrivals/,
+    });
+    expect(within(access).getByText("Reason v-sched")).toBeInTheDocument();
+    expect(within(access).getByText("Reason v-arrived")).toBeInTheDocument();
+    expect(within(access).queryByText("Reason v-triage")).toBeNull();
+    expect(
+      within(access).getByRole("button", { name: "Mark arrived" }),
+    ).toBeInTheDocument();
+    const widgets = screen
+      .getAllByRole("region")
+      .filter((s) => s.classList.contains("widget"))
+      .map((s) => s.getAttribute("aria-labelledby"));
+    expect(widgets).toEqual(["w-alerts", "w-access"]);
+    expect(screen.queryByText("Pending tasks")).toBeNull();
+    expect(
+      screen.queryByRole("region", { name: "Start consultation" }),
+    ).toBeNull();
+  });
+
   it("renders the role-default widgets with record data", async () => {
     setup(["physician"]);
     expect(await screen.findByText("Draft consultations")).toBeInTheDocument();
@@ -303,13 +505,17 @@ describe("dashboard cockpit", () => {
     );
     expect(Object.keys(stored).sort()).toEqual(["density", "hidden", "order"]);
     expect(stored.order).toEqual([
+      "ready",
+      "alerts",
       "drafts",
       "results",
       "attention",
       "tasks",
       "ai",
+      "triage",
+      "access",
     ]);
-    expect(stored.hidden).toEqual(["drafts"]);
+    expect(stored.hidden).toEqual(["triage", "access", "drafts"]);
     expect(stored.density).toBe("compact");
     expect(JSON.stringify(stored)).not.toMatch(/Demopatient|SYN-0001|cough/);
     await user.click(
@@ -318,7 +524,7 @@ describe("dashboard cockpit", () => {
     expect(await screen.findByText(/Follow-up of cough/)).toBeInTheDocument();
     expect(
       JSON.parse(window.localStorage.getItem(COCKPIT_STORAGE_ITEM) ?? "{}"),
-    ).toMatchObject({ hidden: [], density: "expanded" });
+    ).toMatchObject({ hidden: ["triage", "access"], density: "expanded" });
   });
 
   it("starts from a stored layout and ignores malformed storage", async () => {

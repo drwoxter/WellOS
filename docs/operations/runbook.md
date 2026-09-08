@@ -76,7 +76,9 @@ plaintext (only a SHA-256 hash is stored) and expires after 90 days.
   honored; set `WELLOS_WEB_BEHIND_TRUSTED_PROXY=true` on the web app only
   when a trusted platform proxy fronts it),
   `WELLOS_RATE_SEARCH_PER_MIN` (30), `WELLOS_RATE_CRED_ADMIN_PER_MIN` (30),
-  `WELLOS_RATE_API_PER_MIN` (600, per tenant+principal). Exhaustion returns
+  `WELLOS_RATE_API_PER_MIN` (600, per tenant+principal),
+  `WELLOS_RATE_VISIT_CREATE_PER_MIN` (30, per tenant+principal; visit and
+  appointment registration). Exhaustion returns
   429 with `Retry-After`; if PostgreSQL is unreachable the limiter fails
   closed. Old windows can be pruned with
   `DELETE FROM rate_limit_windows WHERE window_start < now() - interval '1 hour'`.

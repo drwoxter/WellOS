@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import EncounterPage from "@/app/encounters/[id]/page";
 import { SessionProvider } from "@/lib/session";
@@ -169,6 +175,67 @@ describe("encounter documentation workspace", () => {
     expect(
       screen.getByRole("button", { name: "Sign and complete" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows the arrival and triage handoff read-only when the encounter came from a visit", async () => {
+    setup(
+      workspace({
+        visit: {
+          id: "v1",
+          status: "in_consultation",
+          arrival_kind: "walk_in",
+          service: "general_medicine",
+          reason: "Chest pain since this morning",
+          arrived_at: "2026-08-29T08:00:00Z",
+          ready_at: "2026-08-29T08:20:00Z",
+          priority: "immediate",
+          handoff_summary: "Chest pain, urgent floor from red flag.",
+          triage: {
+            concerns: ["chest_pain"],
+            red_flags: ["chest_pain"],
+            onset: "2 hours",
+            note: "Diaphoretic on arrival.",
+            safety_floor: "urgent",
+            safety_rules: [{ rule: "red_flag:chest_pain", priority: "urgent" }],
+            rules_version: "triage-safety@1.0.0",
+            completed_at: "2026-08-29T08:18:00Z",
+            author_name: "Nurse Kim",
+          },
+        },
+      }),
+    );
+    const card = await screen.findByRole("region", {
+      name: "Arrival and triage",
+    });
+    expect(within(card).getByText("Immediate")).toBeInTheDocument();
+    expect(within(card).getByText("Walk-in")).toBeInTheDocument();
+    expect(within(card).getByText("General medicine")).toBeInTheDocument();
+    expect(within(card).getByText("In consultation")).toBeInTheDocument();
+    expect(within(card).getByText(/Triaged by Nurse Kim/)).toBeInTheDocument();
+    expect(
+      within(card).getByText("Chest pain since this morning"),
+    ).toBeInTheDocument();
+    expect(within(card).getByText("Safety floor")).toBeInTheDocument();
+    expect(
+      within(card).getByText(/Red flags: Chest pain → Urgent/),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByText("Diaphoretic on arrival."),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByText("Chest pain, urgent floor from red flag."),
+    ).toBeInTheDocument();
+    // Nothing on the handoff is editable.
+    expect(within(card).queryAllByRole("textbox")).toHaveLength(0);
+    expect(within(card).queryAllByRole("button")).toHaveLength(0);
+  });
+
+  it("omits the handoff card for encounters that did not come from a visit", async () => {
+    setup(workspace({ visit: null }));
+    await screen.findByText("Alba Demopatient");
+    expect(
+      screen.queryByRole("region", { name: "Arrival and triage" }),
+    ).toBeNull();
   });
 
   it("marks unsaved changes and saves the draft", async () => {

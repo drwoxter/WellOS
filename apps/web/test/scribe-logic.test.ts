@@ -14,6 +14,8 @@ import {
 } from "@/lib/scribe";
 import {
   COCKPIT_STORAGE_ITEM,
+  COCKPIT_WIDGETS,
+  availableWidgets,
   defaultConfig,
   loadConfig,
   move,
@@ -267,29 +269,70 @@ describe("scribe section merge rules", () => {
 
 describe("dashboard cockpit configuration", () => {
   it("gives role-specific defaults", () => {
+    // Physicians: patients ready for them and their alerts come first.
     expect(visibleWidgets(defaultConfig(["physician"]))).toEqual([
+      "ready",
+      "alerts",
       "drafts",
       "attention",
       "results",
       "tasks",
       "ai",
     ]);
-    // Laboratory professionals and nurses share the results-first layout,
-    // matched on the server's role name.
-    for (const role of ["laboratory_professional", "nurse"]) {
-      expect(visibleWidgets(defaultConfig([role]))).toEqual([
-        "results",
-        "tasks",
-        "attention",
-        "ai",
-      ]);
-      expect(defaultConfig([role]).density).toBe("compact");
-    }
+    // Nurses: triage queue first, then alerts and the ready list.
+    expect(visibleWidgets(defaultConfig(["nurse"]))).toEqual([
+      "triage",
+      "alerts",
+      "ready",
+      "results",
+      "tasks",
+      "attention",
+    ]);
+    expect(defaultConfig(["nurse"]).density).toBe("compact");
+    // Laboratory professionals keep the results-first layout, matched on
+    // the server's role name; visit widgets are not available to them.
+    const lab = defaultConfig(["laboratory_professional"]);
+    expect(visibleWidgets(lab, availableWidgets(false, true))).toEqual([
+      "results",
+      "tasks",
+      "attention",
+      "ai",
+    ]);
+    expect(lab.density).toBe("compact");
+    // Registration staff only see the access widgets.
+    expect(
+      visibleWidgets(
+        defaultConfig(["registration_staff"]),
+        availableWidgets(true, false),
+      ),
+    ).toEqual(["alerts", "access"]);
     // Any other role gets the minimal generic cockpit.
-    expect(visibleWidgets(defaultConfig(["registration_staff"]))).toEqual([
+    expect(visibleWidgets(defaultConfig(["clinical_administrator"]))).toEqual([
+      "ready",
+      "alerts",
+      "triage",
+      "access",
       "results",
       "tasks",
     ]);
+  });
+
+  it("offers each role only the widgets its APIs can populate", () => {
+    expect(availableWidgets(true, true)).toEqual([...COCKPIT_WIDGETS]);
+    expect(availableWidgets(false, true)).toEqual([
+      "drafts",
+      "attention",
+      "results",
+      "tasks",
+      "ai",
+    ]);
+    expect(availableWidgets(true, false)).toEqual([
+      "ready",
+      "alerts",
+      "triage",
+      "access",
+    ]);
+    expect(availableWidgets(false, false)).toEqual([]);
   });
 
   it("hides, shows, reorders and changes density", () => {
@@ -299,8 +342,8 @@ describe("dashboard cockpit configuration", () => {
     cfg = toggleHidden(cfg, "ai");
     expect(visibleWidgets(cfg)).toContain("ai");
     cfg = move(cfg, "results", -1);
-    expect(cfg.order.slice(0, 3)).toEqual(["drafts", "results", "attention"]);
-    expect(move(cfg, "drafts", -1)).toBe(cfg);
+    expect(cfg.order.slice(2, 5)).toEqual(["drafts", "results", "attention"]);
+    expect(move(cfg, "ready", -1)).toBe(cfg);
     cfg = setDensity(cfg, "compact");
     expect(cfg.density).toBe("compact");
   });
@@ -321,6 +364,10 @@ describe("dashboard cockpit configuration", () => {
     );
     expect(parsed.order).toEqual([
       "tasks",
+      "ready",
+      "alerts",
+      "triage",
+      "access",
       "drafts",
       "attention",
       "results",
