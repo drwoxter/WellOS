@@ -12,6 +12,8 @@ import type { ApplyMode, NoteSectionKey, ScribeArtifact } from "@/lib/scribe";
 import { RecordingDock, ScribeReview } from "./scribe";
 import type { ApplyOutcome } from "./scribe";
 import { DiagnosticHistory, PatientBrief } from "./brief";
+import { CockpitRisk } from "../../risk/cockpit-risk";
+import { canReadRisk } from "@/lib/risk";
 import type { Brief, Diagnostics } from "./brief";
 import {
   LAB_TESTS,
@@ -1192,7 +1194,8 @@ type LocalDraft = {
 };
 
 function EncounterWorkspace({ id }: { id: string }) {
-  const { lang, authenticated } = useSession();
+  const { lang, authenticated, meta } = useSession();
+  const roles = meta?.user.roles ?? [];
   const [ws, setWs] = useState<Workspace | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -1750,6 +1753,10 @@ function EncounterWorkspace({ id }: { id: string }) {
   const currentVitals = useMemo(() => ws?.vitals ?? [], [ws]);
   const orderOnly =
     ws !== null && ws.encounter.encounter_type !== "consultation";
+  // Confirmed clinical changes that trigger a server-side risk recalculation.
+  const riskRefreshKey = ws
+    ? `${ws.vitals.length}:${ws.diagnoses.length}:${ws.note?.status ?? ""}:${ws.encounter.status}`
+    : "";
 
   if (loadError) {
     const denied =
@@ -1800,6 +1807,13 @@ function EncounterWorkspace({ id }: { id: string }) {
               enabled={!signed}
               onConsentRecorded={onConsentRecorded}
               onDraft={onScribeDraft}
+            />
+          ) : null}
+          {!orderOnly && canReadRisk(roles) ? (
+            <CockpitRisk
+              lang={lang}
+              patientId={ws.patient.id}
+              refreshKey={riskRefreshKey}
             />
           ) : null}
           {!orderOnly && ws.brief ? (

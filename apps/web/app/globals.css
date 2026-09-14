@@ -1430,3 +1430,329 @@ fieldset.choice-group legend {
     text-align: center;
   }
 }
+
+/* ---------- Patient 360 and explainable risk ---------- */
+
+.p360-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  align-items: flex-start;
+}
+
+.p360-header h1 {
+  margin: 0 0 0.25rem;
+}
+
+.p360-header p {
+  margin: 0.15rem 0;
+}
+
+.p360-kicker {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.8rem;
+}
+
+.p360-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.p360-actions .button {
+  display: inline-block;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  padding: 0.45rem 0.95rem;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.p360-actions .button.primary {
+  background: var(--primary);
+  color: var(--primary-contrast);
+}
+
+.p360-actions .button:focus-visible,
+.p360-section summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.p360-generated {
+  margin: 0.4rem 0 0.8rem;
+  font-size: 0.85rem;
+}
+
+.p360-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.p360-grid > .card,
+.p360-grid > .p360-wide > .card {
+  margin: 0;
+  height: 100%;
+}
+
+.p360-wide {
+  grid-column: 1 / -1;
+}
+
+.p360-section h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1.05rem;
+  margin: 0 0 0.5rem;
+}
+
+.p360-section h3 {
+  font-size: 0.9rem;
+  margin: 0.8rem 0 0.3rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.p360-count {
+  font-weight: 500;
+}
+
+.p360-flags li {
+  border-bottom: none;
+}
+
+.risk-level {
+  white-space: nowrap;
+}
+
+.risk-overall {
+  font-size: 1rem;
+  padding: 0.25rem 0.8rem;
+}
+
+.risk-overview,
+.risk-summary {
+  margin-bottom: 0.75rem;
+}
+
+.risk-domain-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  margin-bottom: 0.3rem;
+}
+
+.risk-domain-head .title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.risk-domains {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 0.6rem;
+}
+
+.risk-domain {
+  align-items: flex-start;
+}
+
+.risk-domain[data-level="high"] {
+  border-left-color: var(--warn-fg);
+}
+
+.risk-factors,
+.risk-gaps,
+.risk-explanations,
+.risk-suggestions,
+.risk-citations,
+.risk-evidence {
+  margin: 0.3rem 0;
+  padding-left: 1.1rem;
+}
+
+.risk-gaps {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.risk-technical {
+  margin-top: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.risk-technical > summary {
+  cursor: pointer;
+  color: var(--primary);
+}
+
+.risk-technical > summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.risk-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.8rem;
+  margin: 0.4rem 0;
+}
+
+.risk-meta dt {
+  color: var(--muted);
+}
+
+.risk-meta dd {
+  margin: 0;
+}
+
+.risk-factor-detail {
+  border-top: 1px dashed var(--border);
+  padding-top: 0.3rem;
+  margin-top: 0.3rem;
+}
+
+.risk-factor-detail p {
+  margin: 0 0 0.2rem;
+}
+
+.risk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: flex-end;
+  margin: 0.6rem 0;
+}
+
+.risk-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.risk-assign,
+.risk-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.risk-assign label,
+.risk-confirm label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+
+.risk-history {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.risk-history th,
+.risk-history td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.risk-summary {
+  border-left: 4px solid var(--neutral-fg);
+}
+
+/* Risk worklist */
+
+.risk-worklist {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.risk-item .risk-item-domains {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.3rem 0;
+}
+
+.risk-item-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  align-items: center;
+}
+
+.risk-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.6rem;
+  align-items: end;
+  margin-bottom: 0.75rem;
+}
+
+.risk-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+
+/* Consultation cockpit: pre-encounter 360 summary */
+
+.cockpit-360 {
+  border-left: 4px solid var(--primary);
+}
+
+.cockpit-360 .risk-domains {
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+}
+
+@media (max-width: 760px) {
+  .p360-grid {
+    grid-template-columns: 1fr;
+  }
+  .p360-actions {
+    width: 100%;
+  }
+  .p360-actions > * {
+    flex: 1 1 auto;
+    text-align: center;
+  }
+  .risk-domains {
+    grid-template-columns: 1fr;
+  }
+  .risk-meta {
+    grid-template-columns: 1fr;
+  }
+  .risk-history thead {
+    display: none;
+  }
+  .risk-history tr {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 0.3rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .risk-history td {
+    border-bottom: none;
+    padding: 0.15rem 0.3rem;
+  }
+}

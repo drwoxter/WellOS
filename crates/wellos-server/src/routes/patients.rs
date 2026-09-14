@@ -268,20 +268,32 @@ pub async fn chart(
     .record_on_pool(&state, &ctx)
     .await?;
 
+    Ok(Json(chart_payload(&state, &ctx, &patient).await?))
+}
+
+/// The chart sections for an already-authorized patient read. Shared by the
+/// chart and the Patient 360 view so both present the same records.
+pub(crate) async fn chart_payload(
+    state: &AppState,
+    ctx: &AuthContext,
+    patient: &sqlx::postgres::PgRow,
+) -> Result<Value, ApiError> {
+    let id: Uuid = patient.get("id");
+    let patient_facility: Uuid = patient.get("facility_id");
     let allergies = fetch_list(
-        &state,
-        "SELECT substance AS a, criticality AS b FROM allergies WHERE tenant_id=$1 AND patient_id=$2 ORDER BY recorded_at",
-        ctx.tenant_id, id, |r| json!({"substance": r.get::<String,_>("a"), "criticality": r.get::<String,_>("b")}),
+        state,
+        "SELECT id, substance AS a, criticality AS b FROM allergies WHERE tenant_id=$1 AND patient_id=$2 ORDER BY recorded_at",
+        ctx.tenant_id, id, |r| json!({"id": r.get::<Uuid,_>("id"), "substance": r.get::<String,_>("a"), "criticality": r.get::<String,_>("b")}),
     ).await?;
     let medications = fetch_list(
-        &state,
-        "SELECT name AS a, status AS b FROM medications WHERE tenant_id=$1 AND patient_id=$2 ORDER BY recorded_at",
-        ctx.tenant_id, id, |r| json!({"name": r.get::<String,_>("a"), "status": r.get::<String,_>("b")}),
+        state,
+        "SELECT id, name AS a, status AS b FROM medications WHERE tenant_id=$1 AND patient_id=$2 ORDER BY recorded_at",
+        ctx.tenant_id, id, |r| json!({"id": r.get::<Uuid,_>("id"), "name": r.get::<String,_>("a"), "status": r.get::<String,_>("b")}),
     ).await?;
     let conditions = fetch_list(
-        &state,
-        "SELECT code AS a, display AS b, clinical_status AS c FROM conditions WHERE tenant_id=$1 AND patient_id=$2 ORDER BY recorded_at",
-        ctx.tenant_id, id, |r| json!({"code": r.get::<String,_>("a"), "display": r.get::<String,_>("b"), "status": r.get::<String,_>("c")}),
+        state,
+        "SELECT id, code AS a, display AS b, clinical_status AS c FROM conditions WHERE tenant_id=$1 AND patient_id=$2 ORDER BY recorded_at",
+        ctx.tenant_id, id, |r| json!({"id": r.get::<Uuid,_>("id"), "code": r.get::<String,_>("a"), "display": r.get::<String,_>("b"), "status": r.get::<String,_>("c")}),
     ).await?;
 
     let observations = sqlx::query(
@@ -401,7 +413,7 @@ pub async fn chart(
     .collect::<Vec<_>>();
 
     let alerts = sqlx::query(
-        "SELECT severity, message, created_at FROM alerts
+        "SELECT id, observation_id, severity, message, created_at FROM alerts
          WHERE tenant_id=$1 AND patient_id=$2 AND status='open' ORDER BY created_at DESC",
     )
     .bind(ctx.tenant_id)
@@ -411,6 +423,8 @@ pub async fn chart(
     .iter()
     .map(|r| {
         json!({
+            "id": r.get::<Uuid,_>("id"),
+            "observation_id": r.get::<Uuid,_>("observation_id"),
             "severity": r.get::<String,_>("severity"),
             "message": r.get::<String,_>("message"),
             "created_at": r.get::<chrono::DateTime<chrono::Utc>,_>("created_at"),
@@ -419,7 +433,7 @@ pub async fn chart(
     .collect::<Vec<_>>();
 
     let consents = fetch_list(
-        &state,
+        state,
         "SELECT DISTINCT ON (purpose) purpose AS a, status AS b FROM consents
          WHERE tenant_id=$1 AND patient_id=$2 ORDER BY purpose, version DESC, recorded_at DESC",
         ctx.tenant_id,
@@ -428,10 +442,10 @@ pub async fn chart(
     )
     .await?;
 
-    let visit = super::visits::current_for_patient(&state, &ctx, ctx.tenant_id, id).await?;
-    let can_manage_visit = super::visits::can_manage_visits_at(&ctx, patient_facility);
+    let visit = super::visits::current_for_patient(state, ctx, ctx.tenant_id, id).await?;
+    let can_manage_visit = super::visits::can_manage_visits_at(ctx, patient_facility);
 
-    Ok(Json(json!({
+    Ok(json!({
         "patient": {
             "id": patient.get::<Uuid,_>("id"),
             "facility_id": patient.get::<Uuid,_>("facility_id"),
@@ -452,7 +466,7 @@ pub async fn chart(
         "alerts": alerts,
         "visit": visit,
         "can_manage_visit": can_manage_visit,
-    })))
+    }))
 }
 
 async fn fetch_list(

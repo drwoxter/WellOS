@@ -884,6 +884,15 @@ pub async fn sign(
     )
     .await
     .map_err(ApiError::internal)?;
+    crate::routes::risk::recalculate_after_change(
+        &mut tx,
+        &ctx,
+        &state,
+        enc.tenant_id,
+        enc.patient_id,
+        "encounter.note.signed",
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(
         json!({ "id": note_id, "status": "signed", "encounter_status": "completed" }),
@@ -1179,6 +1188,15 @@ pub async fn record_vitals(
     )
     .await
     .map_err(ApiError::internal)?;
+    crate::routes::risk::recalculate_after_change(
+        &mut tx,
+        &ctx,
+        &state,
+        enc.tenant_id,
+        enc.patient_id,
+        "encounter.vitals.recorded",
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(json!({ "id": vitals_id, "bmi": bmi })))
 }
@@ -1264,6 +1282,15 @@ pub async fn add_diagnosis(
     )
     .await
     .map_err(ApiError::internal)?;
+    crate::routes::risk::recalculate_after_change(
+        &mut tx,
+        &ctx,
+        &state,
+        enc.tenant_id,
+        enc.patient_id,
+        "encounter.diagnosis.added",
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(json!({ "id": dx_id })))
 }

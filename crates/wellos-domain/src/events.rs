@@ -74,6 +74,12 @@ pub const EVENT_TYPES: &[&str] = &[
     "ai.artifact.reviewed",
     "ai.provider.unavailable",
     "ai.generation.failed",
+    "risk.assessment.calculated",
+    "risk.item.acknowledged",
+    "risk.item.assigned",
+    "risk.item.reviewed",
+    "risk.suggestion.confirmed",
+    "risk.projection.accessed",
 ];
 
 pub fn is_known_event_type(t: &str) -> bool {

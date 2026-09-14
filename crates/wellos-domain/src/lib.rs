@@ -9,6 +9,7 @@ pub mod ai;
 pub mod events;
 pub mod ids;
 pub mod result_loop;
+pub mod risk;
 pub mod rules;
 pub mod triage;
 pub mod units;

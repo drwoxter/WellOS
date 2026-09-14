@@ -289,7 +289,7 @@ pub async fn escalate_overdue(
             &state.cell,
             json!({
                 "follow_up_task_id": r.get::<Uuid,_>("id"),
-                "service_request_id": r.get::<Uuid,_>("service_request_id")
+                "service_request_id": r.get::<Option<Uuid>,_>("service_request_id")
             }),
             None,
         )

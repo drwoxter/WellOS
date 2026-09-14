@@ -146,7 +146,7 @@ pub async fn cockpit(
     // Actionable follow-up tasks: overdue first, then urgent/high priority.
     let tasks = sqlx::query(&format!(
         "SELECT t.id, t.description, t.priority, t.status, t.due_at, t.created_at,
-                t.service_request_id, p.family_name, p.given_name, p.identifier, p.facility_id,
+                t.service_request_id, t.patient_id, p.family_name, p.given_name, p.identifier, p.facility_id,
                 EXISTS (SELECT 1 FROM encounters e
                         WHERE e.tenant_id = p.tenant_id AND e.patient_id = p.id
                           AND e.practitioner_id = $2) AS has_relationship
@@ -173,7 +173,8 @@ pub async fn cockpit(
             "status": r.get::<String,_>("status"),
             "due_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("due_at"),
             "created_at": r.get::<chrono::DateTime<chrono::Utc>,_>("created_at"),
-            "service_request_id": r.get::<Uuid,_>("service_request_id"),
+            "service_request_id": r.get::<Option<Uuid>,_>("service_request_id"),
+            "patient_id": r.get::<Uuid,_>("patient_id"),
             "patient": {
                 "family_name": r.get::<String,_>("family_name"),
                 "given_name": r.get::<String,_>("given_name"),

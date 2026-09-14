@@ -2153,6 +2153,13 @@ async fn overdue_tasks_stay_outstanding_and_superseded_tasks_drop_out_everywhere
     .fetch_one(&state.pool)
     .await
     .unwrap();
+    // The dashboard lists the ten most pressing tasks; make this one sort ahead
+    // of the open tasks other suites leave behind in the shared database.
+    sqlx::query("UPDATE follow_up_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
+        .bind(task_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
 
     async fn listed(
         state: &AppState,

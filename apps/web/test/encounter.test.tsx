@@ -89,6 +89,22 @@ function apiError(status: number, code: string, message: string): Response {
   return jsonResponse({ error: { code, message } }, status);
 }
 
+/** Patient 360 risk section read by the cockpit: no assessment calculated yet. */
+const RISK_SECTION = {
+  rules_version: "risk-rules.v1",
+  current: null,
+  history: [],
+  summary: null,
+  follow_up_owner: null,
+  professionals: [],
+  capabilities: {
+    can_recalculate: false,
+    can_acknowledge: false,
+    can_review: false,
+    can_assign: false,
+  },
+};
+
 /** Let queued history traversals dispatch their popstate events. */
 function settleHistory(): Promise<void> {
   return new Promise((r) => setTimeout(r, 25));
@@ -143,6 +159,8 @@ function setup(
     }
     if (url.startsWith("/api/v1/encounters/e1?"))
       return Promise.resolve(getWorkspace ? getWorkspace() : jsonResponse(ws));
+    if (url.endsWith("/risk"))
+      return Promise.resolve(jsonResponse(RISK_SECTION));
     return Promise.resolve(jsonResponse({}));
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -502,6 +520,8 @@ describe("encounter documentation workspace", () => {
       }
       if (url.startsWith("/api/v1/encounters/e1?"))
         return Promise.resolve(jsonResponse(currentWs));
+      if (url.endsWith("/risk"))
+        return Promise.resolve(jsonResponse(RISK_SECTION));
       return Promise.resolve(jsonResponse({}));
     });
     vi.stubGlobal("fetch", fetchMock);

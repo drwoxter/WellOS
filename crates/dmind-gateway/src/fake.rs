@@ -4,6 +4,7 @@
 //! facts with no network access. Can be switched into an "unavailable" mode
 //! to exercise degradation paths.
 
+use crate::risk::{self, RiskSummaryRequest, RiskSummaryResponse};
 use crate::triage::{self, TriageRequest, TriageResponse};
 use crate::{input_hash, GatewayError, GatewayResponse, ModelGateway, SummaryRequest};
 use async_trait::async_trait;
@@ -84,6 +85,18 @@ impl ModelGateway for FakeProvider {
             ));
         }
         triage::propose(req)
+    }
+
+    async fn summarize_risk(
+        &self,
+        req: &RiskSummaryRequest,
+    ) -> Result<RiskSummaryResponse, GatewayError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(GatewayError::Unavailable(
+                "fake provider forced unavailable".into(),
+            ));
+        }
+        risk::summarize(req)
     }
 }
 

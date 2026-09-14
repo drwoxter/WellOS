@@ -68,7 +68,9 @@ token needs to be typed.
 | `/visits/[id]/triage` | Triage workspace: safety header, previous vitals, structured concerns, red flags, vital signs, deterministic safety floor, dMind triage proposal (assistive), priority, requested service, named professional, handoff summary, complete |
 | `/patients` | Patient directory: search by name or identifier, register a patient |
 | `/patients/[id]` | Patient workspace: demographics, allergies/alerts, tabs, clinical timeline, recent vital trends, today's visit (arrive / triage / start), start/resume consultation, order laboratory test |
-| `/encounters/[id]` | Consultation workspace: patient safety header, read-only arrival & triage handoff, sticky recording dock (consent → record → pause/resume → finish/discard → transcript + structured dMind scribe draft), Patient Brief, vital signs (validated, BMI), structured clinical note, diagnoses, laboratory order, dMind documentation aid, diagnostic history with deterministic trend commentary, draft save, sign-and-complete, addenda on signed notes |
+| `/patients/[id]/360` | Patient 360: identity, care team and responsible professional, alerts, conditions, allergies and medications, recent encounters and notes, pending tasks/referrals/tests/follow-ups, diagnostic trends and abnormal results awaiting review, preventive gaps, explainable risk by domain with expandable technical evidence, risk evolution, dMind risk summary (assistive), start/resume consultation — all on one screen |
+| `/risk` | Risk worklist: critical and high first, filters by domain / service / assigned professional / review status / trend, plain-language reason per item, links to Patient 360 and source evidence, acknowledge / assign / mark reviewed (audited) |
+| `/encounters/[id]` | Consultation workspace: patient safety header, read-only arrival & triage handoff, “Patient 360 before you start” card (elevated risk domains, alerts, pending items, evidence links, dMind summary; re-read after confirmed changes, never blocks the note), sticky recording dock (consent → record → pause/resume → finish/discard → transcript + structured dMind scribe draft), Patient Brief, vital signs (validated, BMI), structured clinical note, diagnoses, laboratory order, dMind documentation aid, diagnostic history with deterministic trend commentary, draft save, sign-and-complete, addenda on signed notes |
 | `/results` | Results worklist: priority-first, criticality/state filters, patient search (`/worklist` redirects here) |
 | `/requests/[id]` | Result detail: workflow stepper, critical banner, deterministic rule evaluation, advisory dMind summary, review → notification → closure |
 
@@ -184,6 +186,79 @@ See `docs/architecture/patient-access-and-triage.md` for the visit state
 machine, the safety rules, the care-team versus system-role distinction and
 internal alert routing.
 
+### Patient 360 and explainable risk demo
+
+The seed adds six clearly synthetic `Riskdemo` patients (`SYN-0101` …
+`SYN-0106`): Lucía (stable low risk, consented to the insurer projection),
+Ramón (worsening chronic complexity), Teresa (critical unreviewed potassium),
+Hugo (penicillin allergy with active amoxicillin), Nora (preventive-care
+gaps, no responsible professional) and Iván (registered with a treating
+professional but no clinical data yet — insufficient data).
+
+1. Sign in as **Dr. García** and open **Risk** in the navigation. Teresa and
+   Hugo (▲ Critical) lead, then Ramón (High, worsening) and Nora (High);
+   Iván is listed as *Insufficient data* and Lucía only appears with
+   **Include low risk**. Every item states *why* in plain language; expand
+   **Technical evidence** for rule codes, `risk-rules.v1`, timestamps and
+   links to the source records. Filter by domain, service, assignee, review
+   status or trend; **Acknowledge**, **Assign follow-up** and **Mark as
+   reviewed** are audited and bound to the assessment version shown.
+2. Open **Patient 360** for Teresa: identity, care team, alerts, conditions,
+   allergies/medications, encounters, pending work, diagnostic trends,
+   preventive gaps, risk by domain and risk evolution are on one screen.
+   Press **Generate dMind summary**: the proposal is labelled
+   AI-generated, explains each domain, cites the records used, lists missing
+   or contradictory information and suggests follow-ups. Levels are always
+   the deterministic ones — dMind cannot lower a critical signal. **Approve**
+   the summary, then **Create follow-up task…** on a suggestion: the task is
+   created only after your explicit confirmation.
+3. **Start / Resume consultation** from Patient 360. The cockpit shows the
+   Patient 360 card before the note; record vitals or sign the note and the
+   risk assessment is recalculated in the same transaction without touching
+   the consultation.
+4. Insurer projection (contract only): as **Carla Silva** (clinical
+   administrator) call `GET /api/v1/patients/{id}/risk/projection` with
+   `X-Purpose-Of-Use: operations`. Lucía (consented) returns levels,
+   versions, review state and record provenance; the other patients return
+   the envelope with `risk: null`; every call is audited.
+
+See `docs/architecture/patient-360-and-risk.md` for the rules, contracts,
+permissions and non-goals.
+
+#### Windows PowerShell
+
+Equivalent commands for the Makefile targets (run from the repository root,
+Rust, Node 20+ and Docker Desktop installed):
+
+```powershell
+Copy-Item .env.example .env
+docker compose -f infra/docker-compose.yml up -d          # PostgreSQL 16
+cargo run -p wellos-server --bin migrate                  # migrations (incl. 0012 risk)
+cargo run -p wellos-server --bin seed                     # synthetic data incl. Riskdemo patients
+
+# API (loads .env into the current shell first)
+Get-Content .env | Where-Object { $_ -match '^\s*[^#].*=' } | ForEach-Object {
+  $name, $value = $_ -split '=', 2
+  [Environment]::SetEnvironmentVariable($name.Trim(), $value.Trim(), 'Process')
+}
+cargo run -p wellos-server
+
+# Web app (second PowerShell window)
+Set-Location apps/web; npm install; npm run dev            # http://localhost:3000
+
+# Demo: sign in as Dr. García, then open
+Start-Process http://localhost:3000/risk
+
+# Reset the demo dataset after exercising the workflows
+docker compose -f infra/docker-compose.yml exec postgres psql -U wellos -d wellos -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+cargo run -p wellos-server --bin migrate; cargo run -p wellos-server --bin seed
+
+# Insurer projection contract (dev auth; Carla Silva = clinical administrator)
+$patientId = '<uuid of Lucía Riskdemo from /patients search>'
+Invoke-RestMethod "http://127.0.0.1:8080/api/v1/patients/$patientId/risk/projection" `
+  -Headers @{ Authorization = 'Bearer dev-admin.silva'; 'X-Purpose-Of-Use' = 'operations' }
+```
+
 ## Tests
 
 ```bash
@@ -231,6 +306,13 @@ npm run test:e2e   # browser tests (Playwright; requires Postgres, seeds mutated
 - The dashboard cockpit stores only widget layout (order, hidden, density)
   in the browser; no patient or clinical data is ever placed in browser
   storage.
+- The risk engine (`risk-rules.v1`) is an explainable prioritisation aid,
+  not a validated clinical risk score; it produces domain levels and
+  evidence, never a numeric score, and its thresholds await clinical
+  sign-off. The dMind risk summary is assistive and cannot change a level.
+  The insurer projection is a governed read-only contract for future
+  integrations: there is no insurer identity, delivery, pricing,
+  underwriting, coverage, authorization or denial logic anywhere in WellOS.
 - Completing the demo workflow mutates the seed data; use `make reset` to
   restore the demo states.
 

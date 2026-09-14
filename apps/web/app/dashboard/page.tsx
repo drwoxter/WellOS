@@ -82,7 +82,8 @@ type Cockpit = {
     status: string;
     due_at: string | null;
     created_at: string;
-    service_request_id: string;
+    service_request_id: string | null;
+    patient_id: string;
     patient: PatientRef;
     can_open_detail: boolean;
   }[];
@@ -819,9 +820,15 @@ function DashboardContent() {
                     {task.can_open_detail ? (
                       <Link
                         className="navlink"
-                        href={`/requests/${task.service_request_id}`}
+                        href={
+                          task.service_request_id
+                            ? `/requests/${task.service_request_id}`
+                            : `/patients/${task.patient_id}/360`
+                        }
                       >
-                        {t(lang, "openResult")}
+                        {task.service_request_id
+                          ? t(lang, "openResult")
+                          : t(lang, "openPatient360")}
                       </Link>
                     ) : null}
                   </li>
