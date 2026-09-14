@@ -499,9 +499,9 @@ pub fn summarize(req: &RiskSummaryRequest) -> Result<RiskSummaryResponse, Gatewa
     let output = parse_summary(&raw, det)?;
     Ok(RiskSummaryResponse {
         output,
-        model: "dmind-fake-risk".into(),
-        model_version: "0.1.0".into(),
-        route: "local-fake".into(),
+        model: crate::FIXTURE_MODEL.into(),
+        model_version: crate::FIXTURE_MODEL_VERSION.into(),
+        route: crate::FIXTURE_ROUTE.into(),
         prompt_version: RISK_DETERMINISTIC_PROMPT_VERSION.into(),
         input_hash: risk_input_hash(req),
         usage: None,
@@ -601,7 +601,7 @@ mod tests {
         assert!(a.output.ai_generated);
         assert_eq!(a.output.schema_version, RISK_SUMMARY_SCHEMA);
         assert_eq!(a.output.domains.len(), 7);
-        assert_eq!(a.model, "dmind-fake-risk");
+        assert_eq!(a.model, crate::FIXTURE_MODEL);
         assert!(a
             .output
             .follow_up_suggestions

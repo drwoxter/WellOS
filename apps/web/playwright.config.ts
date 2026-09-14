@@ -5,8 +5,10 @@ import { defineConfig, devices } from "@playwright/test";
  *
  * Requires local Postgres (`make up && make migrate && make seed` from the
  * repository root). The API server and the Next.js dev server are started
- * automatically; reseed (`make seed`) between runs that complete workflow
- * transitions, because closing a loop mutates the demo data.
+ * automatically in explicit synthetic-fixture mode (`dev-fixtures` build,
+ * `WELLOS_ENV=test`, development sign-in, fake AI providers); reseed
+ * (`make seed`) between runs that complete workflow transitions, because
+ * closing a loop mutates the demo data.
  */
 export default defineConfig({
   testDir: "./e2e",
@@ -36,7 +38,7 @@ export default defineConfig({
   webServer: [
     {
       command:
-        "bash -c 'cd ../.. && DATABASE_URL=${DATABASE_URL:-postgres://wellos:wellos_dev@localhost:5432/wellos} WELLOS_ENV=development WELLOS_DEV_AUTH=true WELLOS_BIND_ADDR=127.0.0.1:8080 cargo run -p wellos-server'",
+        "bash -c 'cd ../.. && DATABASE_URL=${DATABASE_URL:-postgres://wellos:wellos_dev@localhost:5432/wellos} WELLOS_ENV=test WELLOS_DEV_AUTH=true DMIND_MODEL_PROVIDER=fake WELLOS_SCRIBE_PROVIDER=fake WELLOS_BIND_ADDR=127.0.0.1:8080 cargo run -p wellos-server --features dev-fixtures'",
       url: "http://127.0.0.1:8080/health",
       reuseExistingServer: true,
       timeout: 180_000,

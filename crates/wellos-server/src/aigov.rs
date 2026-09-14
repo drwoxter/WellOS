@@ -73,6 +73,7 @@ pub struct Provenance<'a> {
 pub async fn plan(
     state: &AppState,
     tenant_id: Uuid,
+    patient_id: Uuid,
     artifact_type: &str,
     op: Operation,
     input_hash: &str,
@@ -81,6 +82,9 @@ pub async fn plan(
     let status = state.gateway.status();
     if !status.state.is_callable() {
         return Err(capability_error("model", &status));
+    }
+    if status.external {
+        external_processing_allowed(state, tenant_id, patient_id).await?;
     }
     let info = state.gateway.info();
     let prompt_version = state.gateway.prompt_version(op);
@@ -156,6 +160,41 @@ pub async fn plan(
     .await?;
     tx.commit().await?;
     Ok(ExecutionPlan::Execute { execution_id })
+}
+
+/// Patient data may only leave the cell when the deployment permits it and
+/// the patient's `ai_external_processing` consent is active. Reuse of an
+/// existing artifact is not exempt: it still discloses the model's reading
+/// of that patient's data.
+pub async fn external_processing_allowed(
+    state: &AppState,
+    tenant_id: Uuid,
+    patient_id: Uuid,
+) -> Result<(), ApiError> {
+    if !state.allow_external_ai {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ai_external_disallowed",
+            "this deployment does not permit external AI processing of patient data",
+        ));
+    }
+    let consent: Option<(String,)> = sqlx::query_as(
+        "SELECT status FROM consents
+         WHERE tenant_id = $1 AND patient_id = $2 AND purpose = 'ai_external_processing'
+         ORDER BY version DESC, recorded_at DESC LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(patient_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if !matches!(consent, Some((ref s,)) if s == "active") {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "ai_external_consent_required",
+            "the patient has no active consent for external AI processing; the AI action is unavailable for this patient",
+        ));
+    }
+    Ok(())
 }
 
 async fn find_reusable(
@@ -245,6 +284,51 @@ pub async fn annotate(
     .execute(&mut *conn)
     .await?;
     Ok(())
+}
+
+/// Honest availability of every AI capability, as reported by readiness and
+/// consumed by the UI. `structured_note` is the end-to-end scribe path
+/// (transcription feeding the note-draft model operation), so it is only as
+/// available as the weaker of its two providers.
+pub fn capabilities(state: &AppState) -> Value {
+    use dmind_gateway::{CapabilityState, CapabilityStatus};
+    let model = state.gateway.status();
+    let transcription = state.scribe.status();
+    let structured_note = {
+        let rank = |s: CapabilityState| match s {
+            CapabilityState::InvalidConfiguration => 3,
+            CapabilityState::Disabled => 2,
+            CapabilityState::Degraded => 1,
+            CapabilityState::Ready => 0,
+        };
+        let (limiting, name) = if rank(transcription.state) >= rank(model.state) {
+            (&transcription, "transcription")
+        } else {
+            (&model, "model")
+        };
+        let reason = match limiting.state {
+            CapabilityState::Ready => None,
+            state => Some(format!(
+                "{name} capability is {}: {}",
+                state.as_str(),
+                limiting.reason.clone().unwrap_or_default()
+            )),
+        };
+        CapabilityStatus {
+            state: limiting.state,
+            provider: format!("{}+{}", transcription.provider, model.provider),
+            model: model.model.clone(),
+            reason,
+            external: transcription.external || model.external,
+            synthetic: transcription.synthetic || model.synthetic,
+        }
+    };
+    serde_json::json!({
+        "model": model,
+        "transcription": transcription,
+        "structured_note": structured_note,
+        "transcription_languages": state.runtime.scribe_languages,
+    })
 }
 
 /// Honest HTTP mapping of a capability that cannot serve requests.

@@ -13,6 +13,7 @@ use crate::auth::AuthContext;
 use crate::error::ApiError;
 use crate::state::AppState;
 use axum::http::HeaderMap;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::net::IpAddr;
@@ -49,6 +50,25 @@ impl Family {
     }
 }
 
+/// Time source for the fixed windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowClock {
+    /// PostgreSQL `now()`: one clock shared by every API replica.
+    Database,
+    /// A pinned instant. Tests use this so a sequence of requests can never
+    /// straddle a window boundary, whatever the wall clock says.
+    Fixed(DateTime<Utc>),
+}
+
+impl WindowClock {
+    fn fixed(self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Database => None,
+            Self::Fixed(at) => Some(at),
+        }
+    }
+}
+
 /// Per-minute limits, resolved once at startup.
 #[derive(Clone, Debug)]
 pub struct RateConfig {
@@ -62,6 +82,7 @@ pub struct RateConfig {
     /// login key (the BFF and/or reverse proxies). Empty means no peer is
     /// trusted and only the socket peer address is used.
     pub trusted_proxies: Vec<IpAddr>,
+    pub clock: WindowClock,
 }
 
 impl RateConfig {
@@ -81,18 +102,26 @@ const WINDOW_SECS: f64 = 60.0;
 
 /// Atomically count this request against `key`'s current window. Returns
 /// `Ok(())` when within the limit, or `Err(retry_after_secs)` when exhausted.
-async fn count(pool: &sqlx::PgPool, key: &str, limit: i64) -> Result<Result<(), u64>, sqlx::Error> {
+async fn count(
+    pool: &sqlx::PgPool,
+    clock: WindowClock,
+    key: &str,
+    limit: i64,
+) -> Result<Result<(), u64>, sqlx::Error> {
     let row = sqlx::query(
-        "INSERT INTO rate_limit_windows (key, window_start, count)
-         VALUES ($1, to_timestamp(floor(extract(epoch FROM now()) / $2) * $2), 1)
+        "WITH t AS (SELECT COALESCE($3::timestamptz, now()) AS at)
+         INSERT INTO rate_limit_windows (key, window_start, count)
+         SELECT $1, to_timestamp(floor(extract(epoch FROM t.at) / $2) * $2), 1 FROM t
          ON CONFLICT (key, window_start)
          DO UPDATE SET count = rate_limit_windows.count + 1
          RETURNING count,
                    GREATEST(extract(epoch FROM window_start
-                            + make_interval(secs => $2) - now()), 0)::float8 AS remaining",
+                            + make_interval(secs => $2)
+                            - COALESCE($3::timestamptz, now())), 0)::float8 AS remaining",
     )
     .bind(key)
     .bind(WINDOW_SECS)
+    .bind(clock.fixed())
     .fetch_one(pool)
     .await?;
     let n: i64 = row.get("count");
@@ -114,7 +143,7 @@ pub async fn enforce_for_principal(
 ) -> Result<(), ApiError> {
     let limit = state.auth.rate.limit(family);
     let key = format!("t:{}:u:{}:{}", ctx.tenant_id, ctx.user_id, family.as_str());
-    match count(&state.pool, &key, limit).await? {
+    match count(&state.pool, state.auth.rate.clock, &key, limit).await? {
         Ok(()) => Ok(()),
         Err(retry_after) => {
             audit::record_denial(
@@ -181,7 +210,14 @@ pub async fn enforce_for_client(
         "c:{}:login",
         hex::encode(Sha256::digest(address.as_bytes()))
     );
-    match count(&state.pool, &key, state.auth.rate.limit(Family::Login)).await? {
+    match count(
+        &state.pool,
+        state.auth.rate.clock,
+        &key,
+        state.auth.rate.limit(Family::Login),
+    )
+    .await?
+    {
         Ok(()) => Ok(()),
         Err(retry_after) => {
             // Anonymous denials have no tenant/principal for the audit table;

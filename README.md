@@ -41,25 +41,47 @@ audit work together:
 
 Prerequisites: Rust (stable ≥ 1.85), Node 20+, Docker.
 
+WellOS has two explicit local modes. Neither is inherited by the other:
+
+| Mode | Config file | Binary | What it enables |
+| --- | --- | --- | --- |
+| **Synthetic-fixture mode** (development/test) | `.env.development` from `.env.development.example` | `--features dev-fixtures` | Development sign-in for seeded synthetic users, deterministic offline `fake` AI providers (clearly labelled synthetic), synthetic seed |
+| **Real-provider mode** (production-intent) | `.env` from `.env.example` | default features | OIDC only, `disabled` or `openai_compatible` AI providers, no fixtures compiled in |
+
+`WELLOS_ENV` (`development` \| `test` \| `staging` \| `production`) is
+required and typed; a missing or unknown value fails startup. In `staging`
+and `production` the server refuses `WELLOS_DEV_AUTH=true`, `fake`
+providers, `WELLOS_ALLOW_SYNTHETIC_SEED=true` and the development-user
+endpoint unconditionally — even on a `dev-fixtures` build.
+
 ```bash
+# Synthetic-fixture mode
+cp .env.development.example .env.development
+make up               # start PostgreSQL 16 in Docker
+make migrate          # apply SQL migrations (idempotent)
+make seed             # SYNTHETIC data: requires WELLOS_ENV=development|test,
+                      # WELLOS_ALLOW_SYNTHETIC_SEED=true and a dev-fixtures build
+make server-fixtures  # API on :8080 with dev sign-in + fake AI (dev-fixtures build)
+make web              # clinician UI on :3000 (separate shell)
+
+# Real-provider mode (no fixtures compiled in; .env must configure OIDC and,
+# optionally, openai_compatible providers — see .env.example)
 cp .env.example .env
-make up        # start PostgreSQL 16 in Docker
-make migrate   # apply SQL migrations
-make seed      # load synthetic demo data (two tenants)
-make server    # run the API on :8080
-make web       # run the clinician UI on :3000 (separate shell)
+make server
 ```
 
-`make reset` drops all data and reloads the synthetic demo dataset (useful
-after completing the demo workflow, which closes the seeded critical loop).
+`make reset` drops all data and reloads the synthetic dataset (useful after
+completing the demo workflow, which closes the seeded critical loop).
 
-### Demo sign-in and screens
+### Sign-in and screens
 
-Open http://localhost:3000 and pick a demo role card (development builds
-only): **Dr. García** (physician), **Nurse Kim** (nurse), **Reg. Rivera**
-(registration staff) or **Privacy Officer Wolf**. The cards use the seeded
-synthetic users' development tokens (`dev-<username>`) under the hood; no
-token needs to be typed.
+The landing page asks the backend (`GET /api/auth/providers`) which sign-in
+methods exist. In synthetic-fixture mode it lists the seeded synthetic users
+(served by the backend from the synthetic tenant, never bundled in the
+client): **Dr. García** (physician), **Nurse Kim** (nurse), **Reg. Rivera**
+(registration staff), **Privacy Officer Wolf** and the others. Everywhere
+else only the configured OIDC provider is offered; no development
+credentials or placeholder controls are rendered.
 
 | URL | Screen |
 | --- | --- |
@@ -95,10 +117,10 @@ patient ready for consultation assigned to Dr. García with an open alert, the
 in-consultation visit behind Alba's draft encounter and a cancelled
 appointment from yesterday. `make reset` restores all demo states.
 
-Development tokens work only against
-seeded synthetic users and only when `WELLOS_ENV=development` and
-`WELLOS_DEV_AUTH=true` (the server refuses to start with dev auth enabled in
-any other environment). On sign-in the Next.js BFF exchanges the credential
+Development tokens work only against seeded synthetic users, only when
+`WELLOS_ENV=development|test` **and** `WELLOS_DEV_AUTH=true`, and only on a
+`dev-fixtures` build (the server refuses to start with dev auth enabled in
+any other environment; `WELLOS_DEV_AUTH` defaults to `false`). On sign-in the Next.js BFF exchanges the credential
 for an opaque server-side session (`wss_`, stored hashed in PostgreSQL with
 absolute + inactivity timeouts, rotation and logout revocation) held in an
 HttpOnly cookie, plus a CSRF cookie for state-changing requests; access
@@ -144,10 +166,14 @@ search, credential administration and general API traffic
 2. In the recording dock, press **Record consultation**, confirm **Patient
    consented — start recording** (the consent is audited) and grant the
    browser microphone permission. Pause/resume as you like, then **Finish**.
-   What you say is irrelevant: with the default `WELLOS_SCRIBE_PROVIDER=fake`
-   the server returns the same synthetic transcript for any recording of a
-   given duration and language, so the demo is reproducible and no audio
-   ever leaves the machine.
+   In synthetic-fixture mode (`WELLOS_SCRIBE_PROVIDER=fake`) what you say is
+   irrelevant: the server returns the same clearly-labelled synthetic
+   transcript for any recording of a given duration and language, so the
+   demo is reproducible and no audio ever leaves the machine. With
+   `openai_compatible` the actual audio is transcribed by the configured
+   provider and the transcript is passed to the structured-note dMind
+   operation; if either capability is disabled or unavailable the record
+   button is disabled with the real reason and nothing is fabricated.
 3. Review the transcript (timecoded, with speaker labels and per-segment
    confidence) and the structured draft mapped to the note sections, each
    with confidence, review-needed reasons and contradiction / uncertainty
@@ -231,17 +257,20 @@ Equivalent commands for the Makefile targets (run from the repository root,
 Rust, Node 20+ and Docker Desktop installed):
 
 ```powershell
-Copy-Item .env.example .env
-docker compose -f infra/docker-compose.yml up -d          # PostgreSQL 16
-cargo run -p wellos-server --bin migrate                  # migrations (incl. 0012 risk)
-cargo run -p wellos-server --bin seed                     # synthetic data incl. Riskdemo patients
-
-# API (loads .env into the current shell first)
-Get-Content .env | Where-Object { $_ -match '^\s*[^#].*=' } | ForEach-Object {
+# Synthetic-fixture mode (development/test only)
+Copy-Item .env.development.example .env.development
+Get-Content .env.development | Where-Object { $_ -match '^\s*[^#].*=' } | ForEach-Object {
   $name, $value = $_ -split '=', 2
   [Environment]::SetEnvironmentVariable($name.Trim(), $value.Trim(), 'Process')
 }
-cargo run -p wellos-server
+docker compose -f infra/docker-compose.yml up -d                     # PostgreSQL 16
+cargo run -p wellos-server --bin migrate                             # migrations (idempotent)
+cargo run -p wellos-server --bin seed --features dev-fixtures        # SYNTHETIC data (refused outside development/test)
+cargo run -p wellos-server --features dev-fixtures                   # API with dev sign-in + fake AI
+
+# Real-provider mode instead: load .env (OIDC + disabled/openai_compatible providers)
+# and run the default build, which has no fixtures compiled in.
+#   Get-Content .env | ... (same loop) ; cargo run -p wellos-server
 
 # Web app (second PowerShell window)
 Set-Location apps/web; npm install; npm run dev            # http://localhost:3000
@@ -251,7 +280,7 @@ Start-Process http://localhost:3000/risk
 
 # Reset the demo dataset after exercising the workflows
 docker compose -f infra/docker-compose.yml exec postgres psql -U wellos -d wellos -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
-cargo run -p wellos-server --bin migrate; cargo run -p wellos-server --bin seed
+cargo run -p wellos-server --bin migrate; cargo run -p wellos-server --bin seed --features dev-fixtures
 
 # Insurer projection contract (dev auth; Carla Silva = clinical administrator)
 $patientId = '<uuid of Lucía Riskdemo from /patients search>'
@@ -262,10 +291,32 @@ Invoke-RestMethod "http://127.0.0.1:8080/api/v1/patients/$patientId/risk/project
 ## Tests
 
 ```bash
-make lint               # cargo fmt --check, clippy -D warnings, next lint
+make lint               # cargo fmt --check, clippy -D warnings (production feature set), next lint
+make lint-fixtures      # clippy with dev-fixtures compiled in
 make test               # unit tests (domain rules, state machine, policy, gateway)
-make test-integration   # API integration tests (requires running PostgreSQL)
+make test-integration   # API integration tests in test/fixture mode (requires running PostgreSQL)
 ```
+
+Complete validation, exactly as CI runs it (Linux; PowerShell users run the
+same commands, setting the variables with `$env:WELLOS_ENV = 'test'` etc.):
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo build -p wellos-server --bins                     # production build: no fixtures compiled in
+cargo test --workspace --lib
+export WELLOS_ENV=test WELLOS_ALLOW_SYNTHETIC_SEED=true DMIND_MODEL_PROVIDER=fake WELLOS_SCRIBE_PROVIDER=fake
+cargo run -p wellos-server --bin migrate
+cargo run -p wellos-server --bin seed --features dev-fixtures
+cargo test --workspace --test '*'
+cargo audit
+gitleaks detect --source . --no-banner --redact
+cd apps/web && npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build
+```
+
+CI never calls an external AI provider: the `openai_compatible` adapters are
+exercised against a controlled local HTTP test server only.
 
 Frontend tests (from `apps/web`):
 
@@ -284,9 +335,13 @@ npm run test:e2e   # browser tests (Playwright; requires Postgres, seeds mutated
 - This remains a development system: no production deployment, compliance or
   clinical claims.
 - The FHIR R4 endpoints are a minimal read-only facade, not a FHIR server.
-- The AI provider is a deterministic offline fake; no external AI calls by
-  default. The optional OpenAI-compatible transcription adapter is opt-in and
-  not exercised in CI (a mocked HTTP server covers its contract).
+- AI providers default to `disabled`. The real `openai_compatible` model and
+  transcription adapters are implemented and hardened but have only been
+  exercised against a controlled local HTTP test server, never against a
+  live vendor from this repository; a real-provider smoke test with
+  synthetic patients is documented in `docs/architecture/ai-native-platform.md`.
+  The deterministic `fake` providers are development/test fixtures and
+  cannot be selected in staging or production.
 - The AI scribe is an assistive drafting aid: it cannot diagnose, prescribe,
   order, sign or alter signed records, and its output requires explicit
   clinician review. Speaker labels and confidence come from the provider and

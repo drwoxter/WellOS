@@ -9,6 +9,12 @@ import {
 import userEvent from "@testing-library/user-event";
 import EncounterPage from "@/app/encounters/[id]/page";
 import { SessionProvider } from "@/lib/session";
+import {
+  AI_READY,
+  DISABLED,
+  DEGRADED,
+  capabilities,
+} from "./fixtures/capabilities";
 
 // One shared router instance, as the App Router context provides: the
 // navigation guard wraps its methods and `next/link` navigates through it.
@@ -34,6 +40,7 @@ const META = {
       can_act_clinically: true,
     },
   ],
+  ai_capabilities: AI_READY,
 };
 
 type WorkspaceOverrides = Record<string, unknown>;

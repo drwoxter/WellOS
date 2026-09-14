@@ -130,11 +130,19 @@ pub struct AiQuotas {
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub env: RuntimeEnv,
+    /// Regional cell identifier (`WELLOS_CELL`) stamped on events and
+    /// provenance. Defaults to `cell-dev-1` only in local environments.
+    pub cell: String,
     pub model_provider: ProviderKind,
     pub scribe_provider: ProviderKind,
     /// `WELLOS_ALLOW_SYNTHETIC_SEED=true`; only honoured in local
     /// environments of a `dev-fixtures` build.
     pub allow_synthetic_seed: bool,
+    /// `WELLOS_ALLOW_EXTERNAL_AI=true`: the deployment permits patient data
+    /// to leave the cell towards an external provider. Required whenever an
+    /// `openai_compatible` provider is selected; per-patient
+    /// `ai_external_processing` consent is checked on top of it.
+    pub allow_external_ai: bool,
     /// Accepted BCP-47 language tags for consultation recordings.
     pub scribe_languages: Vec<String>,
     pub ai_quotas: AiQuotas,
@@ -164,6 +172,24 @@ impl RuntimeConfig {
         if allow_synthetic_seed {
             fixtures_allowed(env, "WELLOS_ALLOW_SYNTHETIC_SEED=true")?;
         }
+        let allow_external_ai = parse_bool("WELLOS_ALLOW_EXTERNAL_AI")?.unwrap_or(false);
+        for (var, kind) in [
+            ("DMIND_MODEL_PROVIDER", model_provider),
+            ("WELLOS_SCRIBE_PROVIDER", scribe_provider),
+        ] {
+            if kind == ProviderKind::OpenAiCompatible && !allow_external_ai {
+                anyhow::bail!(
+                    "{var}=openai_compatible sends patient data to an external provider and \
+                     requires WELLOS_ALLOW_EXTERNAL_AI=true (in addition to per-patient \
+                     ai_external_processing consent)"
+                );
+            }
+        }
+        let cell = match std::env::var("WELLOS_CELL") {
+            Ok(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
+            _ if env.is_local() => "cell-dev-1".to_string(),
+            _ => anyhow::bail!("WELLOS_CELL is required with WELLOS_ENV={env}"),
+        };
         let scribe_languages = parse_languages("WELLOS_SCRIBE_LANGUAGES", &["en", "es"])?;
         let ai_quotas = AiQuotas {
             tenant_per_hour: parse_positive_i64("DMIND_QUOTA_TENANT_PER_HOUR", 600)?,
@@ -171,9 +197,11 @@ impl RuntimeConfig {
         };
         Ok(Self {
             env,
+            cell,
             model_provider,
             scribe_provider,
             allow_synthetic_seed,
+            allow_external_ai,
             scribe_languages,
             ai_quotas,
         })
@@ -184,9 +212,11 @@ impl RuntimeConfig {
     pub fn test_fixtures() -> Self {
         Self {
             env: RuntimeEnv::Test,
+            cell: "cell-dev-1".into(),
             model_provider: ProviderKind::Fake,
             scribe_provider: ProviderKind::Fake,
             allow_synthetic_seed: true,
+            allow_external_ai: false,
             scribe_languages: vec!["en".into(), "es".into()],
             ai_quotas: AiQuotas {
                 tenant_per_hour: 100_000,

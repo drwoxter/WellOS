@@ -1,6 +1,6 @@
 use crate::error::ApiError;
 use crate::oidc::{JwksKeys, RemoteJwks};
-use crate::ratelimit::RateConfig;
+use crate::ratelimit::{RateConfig, WindowClock};
 use crate::runtime::{parse_bool, parse_positive_i64, RuntimeConfig, RuntimeEnv};
 use dmind_gateway::scribe::TranscriptionProvider;
 use dmind_gateway::ModelGateway;
@@ -225,6 +225,7 @@ impl AuthConfig {
                 scribe_per_min: 1_000,
                 visit_create_per_min: 10_000,
                 trusted_proxies: Vec::new(),
+                clock: WindowClock::Database,
             },
         }
     }
@@ -281,6 +282,8 @@ impl AuthConfig {
             scribe_per_min: parse_positive_i64("WELLOS_RATE_SCRIBE_PER_MIN", 6)?,
             visit_create_per_min: parse_positive_i64("WELLOS_RATE_VISIT_CREATE_PER_MIN", 30)?,
             trusted_proxies: parse_trusted_proxies("WELLOS_TRUSTED_PROXIES")?,
+            // Not configurable: deployments always share the database clock.
+            clock: WindowClock::Database,
         };
         Ok(Self {
             dev_auth_enabled,
@@ -343,7 +346,8 @@ pub struct AppState {
     /// processed in memory and never persisted.
     pub scribe: Arc<dyn TranscriptionProvider>,
     /// Whether routing patient data to external (off-cell) AI providers is
-    /// permitted by deployment configuration. Development default: false.
+    /// permitted by deployment configuration (`WELLOS_ALLOW_EXTERNAL_AI`).
+    /// Default: false.
     pub allow_external_ai: bool,
     /// Regional cell identifier for events and provenance.
     pub cell: String,
@@ -384,8 +388,8 @@ impl AppState {
             pool,
             gateway,
             scribe,
-            allow_external_ai: false,
-            cell: "cell-dev-1".to_string(),
+            allow_external_ai: runtime.allow_external_ai,
+            cell: runtime.cell.clone(),
             auth: Arc::new(auth),
             runtime: Arc::new(runtime),
         }

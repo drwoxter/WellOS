@@ -28,6 +28,14 @@ use serde::{Deserialize, Serialize};
 use wellos_domain::ai::{ProviderInfo, ResultSummaryV1};
 
 pub use notes::{NoteDraftRequest, NoteDraftResponse};
+
+/// Provenance identity shared by every deterministic fixture operation. A
+/// single model name across operations (the prompt version already names
+/// the operation) keeps fixture artifacts deduplicable on
+/// `(model, prompt_version, output_schema)` exactly like a real provider.
+pub const FIXTURE_MODEL: &str = "dmind-fake";
+pub const FIXTURE_MODEL_VERSION: &str = "0.1.0";
+pub const FIXTURE_ROUTE: &str = "local-fake";
 pub use risk::{RiskSummaryRequest, RiskSummaryResponse};
 pub use triage::{TriageRequest, TriageResponse};
 
@@ -62,6 +70,15 @@ impl CapabilityState {
     /// capabilities are never called.
     pub fn is_callable(self) -> bool {
         matches!(self, Self::Ready | Self::Degraded)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Disabled => "disabled",
+            Self::InvalidConfiguration => "invalid_configuration",
+        }
     }
 }
 

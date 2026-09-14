@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { t } from "@/lib/i18n";
 import type { Lang } from "@/lib/i18n";
 import { ApiRequestError, apiFetch } from "@/lib/session";
+import type { AiCapabilities } from "@/lib/capabilities";
 import type { RiskSection } from "@/lib/risk";
 import {
   DomainList,
@@ -18,6 +19,7 @@ type CockpitRiskProps = {
   lang: Lang;
   patientId: string;
   refreshKey: string;
+  capabilities: AiCapabilities | undefined;
 };
 
 /** Patient 360 summary shown inside the consultation cockpit.
@@ -58,7 +60,12 @@ export class CockpitRisk extends Component<
   }
 }
 
-function CockpitRiskPanel({ lang, patientId, refreshKey }: CockpitRiskProps) {
+function CockpitRiskPanel({
+  lang,
+  patientId,
+  refreshKey,
+  capabilities,
+}: CockpitRiskProps) {
   const [risk, setRisk] = useState<RiskSection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [denied, setDenied] = useState(false);
@@ -162,6 +169,7 @@ function CockpitRiskPanel({ lang, patientId, refreshKey }: CockpitRiskProps) {
               lang={lang}
               patientId={patientId}
               risk={risk}
+              capabilities={capabilities}
               onChanged={load}
               compact
             />

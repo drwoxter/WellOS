@@ -418,6 +418,9 @@ pub async fn transcribe(
     if !model_status.state.is_callable() {
         return Err(aigov::capability_error("model", &model_status));
     }
+    if scribe_status.external || model_status.external {
+        aigov::external_processing_allowed(&state, enc.tenant_id, enc.patient_id).await?;
+    }
 
     // Provenance for the recording without retaining it: a one-way hash.
     let audio_sha256 = hex::encode(Sha256::digest(&audio));
@@ -452,6 +455,7 @@ pub async fn transcribe(
     let plan = aigov::plan(
         &state,
         enc.tenant_id,
+        enc.patient_id,
         "scribe_draft",
         Operation::NoteDraft,
         &input_hash,

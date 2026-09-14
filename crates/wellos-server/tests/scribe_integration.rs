@@ -9,6 +9,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use dmind_gateway::scribe::{
     FakeTranscription, ScribeError, Transcription, TranscriptionProvider, TranscriptionRequest,
 };
@@ -17,6 +18,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
+use wellos_server::ratelimit::WindowClock;
 use wellos_server::state::{AppState, AuthConfig};
 
 fn database_url() -> String {
@@ -325,14 +327,18 @@ async fn transcription_validates_mime_size_duration_and_language() {
 
 #[tokio::test]
 async fn transcription_has_its_own_rate_limit_family() {
-    // dr.lopez is used here because dr.garcia's scribe window is shared
-    // with the other tests in this file running concurrently.
+    // The limiter clock is pinned, so every request in this test lands in
+    // the same fixed window regardless of when the test runs, and that window
+    // (a synthetic instant no real-clock test can reach) is emptied first so
+    // state left by an earlier run cannot leak in. dr.lopez is used because
+    // dr.garcia's windows are shared with the concurrently running tests.
+    let pinned: DateTime<Utc> = "2001-01-01T00:00:30Z".parse().unwrap();
     let mut cfg = AuthConfig::development();
     cfg.rate.scribe_per_min = 3;
+    cfg.rate.clock = WindowClock::Fixed(pinned);
     let (state, _) = state_with(cfg).await;
-    // Windows are fixed-minute and persisted, so a previous run within the
-    // same minute would otherwise leave this principal already exhausted.
-    sqlx::query("DELETE FROM rate_limit_windows WHERE key LIKE '%:scribe'")
+    sqlx::query("DELETE FROM rate_limit_windows WHERE window_start = date_trunc('minute', $1)")
+        .bind(pinned)
         .execute(&state.pool)
         .await
         .unwrap();
@@ -362,20 +368,37 @@ async fn transcription_has_its_own_rate_limit_family() {
         let (st, _) = transcribe(&state, &enc, "dev-dr.lopez").await;
         statuses.push(st);
     }
-    assert!(statuses.contains(&StatusCode::OK), "{statuses:?}");
-    assert!(
-        statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
-        "{statuses:?}"
+    assert_eq!(
+        statuses,
+        vec![
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
     );
-    let first_429 = statuses
-        .iter()
-        .position(|s| *s == StatusCode::TOO_MANY_REQUESTS)
+    // The denial reports the time left in the pinned window (30 s into a
+    // 60 s window), not a wall-clock-dependent value.
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/encounters/{enc}/scribe"))
+        .header("Authorization", "Bearer dev-dr.lopez")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            transcribe_body(&synthetic_audio(4_096), 90_000).to_string(),
+        ))
         .unwrap();
-    assert!(
-        statuses[first_429..]
-            .iter()
-            .all(|s| *s == StatusCode::TOO_MANY_REQUESTS),
-        "{statuses:?}"
+    let res = wellos_server::app(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        res.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("30")
     );
 
     // The general API family is unaffected: the workspace still loads.

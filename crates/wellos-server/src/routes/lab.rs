@@ -5,6 +5,7 @@
 //! in the ingestion transaction; AI summarization happens after commit and can
 //! fail without affecting the clinical record.
 
+use crate::aigov;
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
@@ -14,13 +15,13 @@ use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
 use chrono::{DateTime, DurationRound, Utc};
-use dmind_gateway::{GatewayError, SummaryRequest};
+use dmind_gateway::{GatewayError, Operation, SummaryRequest};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
-use wellos_domain::ai::{ArtifactStatus, AutonomyLevel};
+use wellos_domain::ai::{ArtifactStatus, AutonomyLevel, ProviderInfo};
 use wellos_domain::result_loop::{LoopState, LoopTransition};
 use wellos_domain::rules::{baseline_rules, RuleOutcome};
 use wellos_domain::units::Quantity;
@@ -474,38 +475,6 @@ async fn generate_summary(
     critical: bool,
     unit_mismatch: bool,
 ) -> Result<(), ApiError> {
-    // Consent/policy gate for optional EXTERNAL processing. Local (in-cell)
-    // deterministic summarization is part of care delivery; external routes
-    // additionally require active consent and deployment permission.
-    let external_consent: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM consents
-         WHERE tenant_id = $1 AND patient_id = $2 AND purpose = 'ai_external_processing'
-         ORDER BY version DESC, recorded_at DESC LIMIT 1",
-    )
-    .bind(tenant_id)
-    .bind(patient_id)
-    .fetch_optional(&state.pool)
-    .await?;
-    let external_allowed =
-        state.allow_external_ai && matches!(external_consent, Some((ref s,)) if s == "active");
-    if !external_allowed {
-        audit::record(
-            &state.pool,
-            ctx,
-            "ai.external_processing",
-            Some("ai_artifact"),
-            Some(artifact_id.to_string()),
-            "deny",
-            Some(if state.allow_external_ai {
-                "consent_not_active"
-            } else {
-                "deployment_disallows_external"
-            }),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-    }
-
     let mut facts = vec![(
         format!("observation:{obs_id}"),
         format!(
@@ -533,11 +502,54 @@ async fn generate_summary(
         facts,
         language: "en".into(),
     };
+    let input_refs: Vec<String> = req.facts.iter().map(|(r, _)| r.clone()).collect();
+    let hash = dmind_gateway::input_hash(&req);
+
+    // Governance first: capability, external-processing consent, artifact
+    // reuse and quota. A refusal leaves the draft visibly unavailable rather
+    // than fabricating a summary.
+    let plan = match aigov::plan(
+        state,
+        tenant_id,
+        patient_id,
+        "result_summary",
+        Operation::ResultSummary,
+        &hash,
+        "result-summary.v1",
+    )
+    .await
+    {
+        Ok(plan) => plan,
+        Err(refusal) => {
+            mark_generation_unavailable(state, ctx, artifact_id, refusal.code).await?;
+            return Ok(());
+        }
+    };
+    let (outcome, reused_from, execution_id) = match plan {
+        aigov::ExecutionPlan::Reuse(prior) => {
+            let output: wellos_domain::ai::ResultSummaryV1 = prior.output_as()?;
+            let resp = dmind_gateway::GatewayResponse {
+                output,
+                model: prior.model.clone(),
+                model_version: prior.model_version.clone(),
+                route: prior.route.clone(),
+                prompt_version: prior.prompt_version.clone(),
+                input_hash: hash.clone(),
+                usage: prior.usage_as(),
+            };
+            (Ok(resp), Some(prior.id), None)
+        }
+        aigov::ExecutionPlan::Execute { execution_id } => (
+            state.gateway.summarize_result(&req).await,
+            None,
+            Some(execution_id),
+        ),
+    };
 
     // Each lifecycle transition and its outbox event commit atomically, and
     // only apply while the artifact is still a draft (a concurrent amendment
     // may already have superseded it).
-    match state.gateway.summarize_result(&req).await {
+    match outcome {
         Ok(resp) => {
             let mut tx = state.pool.begin().await?;
             let updated = sqlx::query(
@@ -559,12 +571,33 @@ async fn generate_summary(
             .execute(&mut *tx)
             .await?;
             if updated.rows_affected() > 0 {
+                let provider = ProviderInfo {
+                    provider: resp.route.clone(),
+                    model: resp.model.clone(),
+                    model_version: resp.model_version.clone(),
+                };
+                aigov::annotate(
+                    &mut tx,
+                    artifact_id,
+                    &aigov::Provenance {
+                        provider: &provider,
+                        prompt_version: &resp.prompt_version,
+                        input_refs: &input_refs,
+                        usage: resp.usage.as_ref(),
+                        synthetic: state.runtime.synthetic_output(),
+                        reused_from,
+                    },
+                )
+                .await?;
+                if let Some(execution_id) = execution_id {
+                    aigov::bind_execution(&mut tx, execution_id, artifact_id).await?;
+                }
                 audit::emit(
                     &mut *tx,
                     ctx,
                     "ai.artifact.generated",
                     &state.cell,
-                    json!({ "artifact_id": artifact_id }),
+                    json!({ "artifact_id": artifact_id, "reused_from": reused_from }),
                     None,
                 )
                 .await
@@ -572,35 +605,50 @@ async fn generate_summary(
             }
             tx.commit().await?;
         }
-        Err(GatewayError::Unavailable(reason)) => {
+        Err(GatewayError::Unavailable(_)) | Err(GatewayError::Disabled(_)) => {
             // Care continues; the artifact visibly reports unavailability.
-            let mut tx = state.pool.begin().await?;
-            let updated =
-                sqlx::query("UPDATE ai_artifacts SET status=$1 WHERE id=$2 AND status=$3")
-                    .bind(ArtifactStatus::Unavailable.as_str())
-                    .bind(artifact_id)
-                    .bind(ArtifactStatus::Draft.as_str())
-                    .execute(&mut *tx)
-                    .await?;
-            if updated.rows_affected() > 0 {
-                audit::emit(
-                    &mut *tx,
-                    ctx,
-                    "ai.provider.unavailable",
-                    &state.cell,
-                    json!({ "artifact_id": artifact_id, "reason": reason }),
-                    None,
-                )
-                .await
-                .map_err(ApiError::internal)?;
-            }
-            tx.commit().await?;
+            mark_generation_unavailable(state, ctx, artifact_id, "provider_unavailable").await?;
         }
-        Err(other) => {
-            tracing::warn!(error = %other, "ai artifact generation failed");
-            mark_generation_failed(state, ctx, artifact_id, "provider_error").await?;
+        Err(GatewayError::InvalidOutput(_)) => {
+            tracing::warn!(%artifact_id, "model output rejected by schema validation");
+            mark_generation_failed(state, ctx, artifact_id, "invalid_output").await?;
+        }
+        Err(GatewayError::PolicyDenied(_)) => {
+            mark_generation_failed(state, ctx, artifact_id, "policy_denied").await?;
         }
     }
+    Ok(())
+}
+
+/// The provider could not be used (disabled, unavailable, consent, quota):
+/// the draft becomes `unavailable` with the failure class audited. No
+/// provider content or secret is ever recorded.
+async fn mark_generation_unavailable(
+    state: &AppState,
+    ctx: &AuthContext,
+    artifact_id: Uuid,
+    reason: &str,
+) -> Result<(), ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let updated = sqlx::query("UPDATE ai_artifacts SET status=$1 WHERE id=$2 AND status=$3")
+        .bind(ArtifactStatus::Unavailable.as_str())
+        .bind(artifact_id)
+        .bind(ArtifactStatus::Draft.as_str())
+        .execute(&mut *tx)
+        .await?;
+    if updated.rows_affected() > 0 {
+        audit::emit(
+            &mut *tx,
+            ctx,
+            "ai.provider.unavailable",
+            &state.cell,
+            json!({ "artifact_id": artifact_id, "reason": reason }),
+            None,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

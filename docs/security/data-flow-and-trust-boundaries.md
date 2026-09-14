@@ -15,9 +15,10 @@
    ├── B4: SQLx (parameterized, tenant-scoped) ──▶ [PostgreSQL]
    │        same txn: clinical write + rule eval + audit + outbox
    │
-   └── B5: after commit ──▶ [dMind gateway → FakeProvider]
-            consent + allow_external_ai gate; input hash recorded;
-            offline in development, no network egress
+   └── B5: after commit ──▶ [dMind gateway → disabled | openai_compatible | fake*]
+            capability + consent + allow_external_ai + quota/reuse gate;
+            input hash recorded; *fake only in dev-fixtures builds in
+            development/test; egress only to allowlisted HTTPS hosts
 ```
 
 ## Boundaries
@@ -51,8 +52,9 @@
   `user_identities`; optional MFA enforcement reads validated `amr`/`acr`
   claims and fails closed. Machines use hashed, scoped, expiring, revocable
   `wsk_` credentials; browsers use opaque hashed `wss_` sessions;
-  development tokens work only with `WELLOS_ENV=development` +
-  `WELLOS_DEV_AUTH=true` and startup fails closed otherwise. Outside
+  development tokens work only on `dev-fixtures` builds with
+  `WELLOS_ENV=development|test` + `WELLOS_DEV_AUTH=true` and startup fails
+  closed otherwise (including on a missing or unknown `WELLOS_ENV`). Outside
   development, startup also requires explicit `DATABASE_URL` and
   `WELLOS_ALLOWED_ORIGINS`, and responses carry nosniff/no-referrer/
   frame-deny/CSP headers plus HSTS.
@@ -71,8 +73,16 @@
 - **B4 Database**: single authoritative store. Observations and audit are
   append-only. Outbox rows carry identifiers, not clinical payloads.
 - **B5 AI gateway**: fires only after the clinical transaction commits;
-  failures produce an `unavailable` artifact. External providers are disabled
-  by default and additionally gated on purpose-specific consent.
+  failures produce an `unavailable` artifact or a recoverable error, never
+  fabricated output. Providers default to `disabled`; the external
+  `openai_compatible` adapter requires `WELLOS_ALLOW_EXTERNAL_AI=true`,
+  HTTPS to an exact-allowlisted host, no redirects, bounded timeouts /
+  response size / retries / concurrency, hourly per-tenant and per-task
+  quotas, and is additionally gated on tenant policy and purpose-specific
+  patient consent. Responses are schema-validated and evidence references
+  are checked against the supplied inputs before anything is stored. Fixture
+  providers exist only in `dev-fixtures` builds in development/test and are
+  flagged `synthetic` on every artifact and capability report.
 
 ## Data classes
 

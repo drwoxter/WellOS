@@ -6,6 +6,8 @@ import { t } from "@/lib/i18n";
 import type { Lang } from "@/lib/i18n";
 import { formatDateTime } from "@/lib/clinical";
 import { ApiRequestError, apiFetch } from "@/lib/session";
+import { aiAvailability } from "@/lib/capabilities";
+import type { AiCapabilities } from "@/lib/capabilities";
 import {
   domainKey,
   evidenceHref,
@@ -611,15 +613,19 @@ export function RiskSummaryPanel({
   lang,
   patientId,
   risk,
+  capabilities,
   onChanged,
   compact = false,
 }: {
   lang: Lang;
   patientId: string;
   risk: RiskSection;
+  /** Server-reported AI availability; generation is offered only when callable. */
+  capabilities: AiCapabilities | undefined;
   onChanged: () => Promise<unknown>;
   compact?: boolean;
 }) {
+  const model = aiAvailability(lang, capabilities, "model");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -734,15 +740,22 @@ export function RiskSummaryPanel({
             <p className="muted">{t(lang, "riskNoSummary")}</p>
           )}
           {canGenerate ? (
-            <button
-              type="button"
-              className="primary"
-              disabled={busy !== null}
-              aria-busy={busy === "generate"}
-              onClick={generate}
-            >
-              {t(lang, "riskGenerateSummary")}
-            </button>
+            <>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy !== null || !model.callable}
+                aria-busy={busy === "generate"}
+                onClick={generate}
+              >
+                {t(lang, "riskGenerateSummary")}
+              </button>
+              {model.notice ? (
+                <p className="muted" data-capability={model.state}>
+                  {model.notice}
+                </p>
+              ) : null}
+            </>
           ) : null}
         </>
       ) : out ? (

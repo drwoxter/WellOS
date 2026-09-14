@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import EncounterPage from "@/app/encounters/[id]/page";
 import { RecordingDock } from "@/app/encounters/[id]/scribe";
@@ -9,9 +9,16 @@ import {
   type Diagnostics,
 } from "@/app/encounters/[id]/brief";
 import { SessionProvider, useSession } from "@/lib/session";
+import {
+  AI_READY,
+  DISABLED,
+  DEGRADED,
+  capabilities,
+} from "./fixtures/capabilities";
 import type { AudioRecorder, Recording } from "@/lib/recorder";
 import { RecorderError } from "@/lib/recorder";
 import type { ScribeArtifact, TranscriptSegment } from "@/lib/scribe";
+import type { AiCapabilities } from "@/lib/capabilities";
 
 const router = { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() };
 vi.mock("next/navigation", () => ({
@@ -35,6 +42,7 @@ const META = {
       can_act_clinically: true,
     },
   ],
+  ai_capabilities: AI_READY,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -414,6 +422,8 @@ function setupDock(
     consented?: boolean;
     recorder?: () => AudioRecorder;
     lang?: "en" | "es";
+    /** `null` = the server status has not loaded yet. */
+    capabilities?: AiCapabilities | null;
   } = {},
   posts: Record<string, (body: unknown) => Response | Promise<Response>> = {},
 ) {
@@ -444,6 +454,11 @@ function setupDock(
         lang={props.lang ?? "en"}
         consented={props.consented ?? true}
         enabled
+        capabilities={
+          props.capabilities === null
+            ? undefined
+            : (props.capabilities ?? AI_READY)
+        }
         recorderFactory={factory}
         onConsentRecorded={onConsentRecorded}
         onDraft={onDraft}
@@ -484,6 +499,60 @@ describe("recording dock", () => {
     expect(consent).toHaveBeenCalledWith({ granted: true });
     expect(onConsentRecorded).toHaveBeenCalled();
     expect(FakeRecorder.instances[0].started).toBe(true);
+  });
+
+  it("keeps the record button but disables it with the real reason when the scribe is disabled", async () => {
+    const user = userEvent.setup();
+    setupDock({
+      capabilities: capabilities({
+        transcription: DISABLED,
+        structured_note: {
+          ...DISABLED,
+          reason:
+            "transcription capability is disabled: WELLOS_SCRIBE_PROVIDER=disabled",
+        },
+      }),
+    });
+    const button = screen.getByRole("button", { name: "Record consultation" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription(
+      /disabled by configuration for this deployment/,
+    );
+    await user.click(button);
+    expect(FakeRecorder.instances).toHaveLength(0);
+    expect(screen.queryByText("Patient consent required")).toBeNull();
+  });
+
+  it("withholds recording until the server has reported capability status", () => {
+    setupDock({ capabilities: null });
+    expect(
+      screen.getByRole("button", { name: "Record consultation" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("Checking AI capability availability…"),
+    ).toBeInTheDocument();
+  });
+
+  it("still allows recording on a degraded provider and labels synthetic fixtures", async () => {
+    setupDock({
+      capabilities: capabilities({
+        model: DEGRADED,
+        structured_note: DEGRADED,
+      }),
+    });
+    expect(
+      screen.getByRole("button", { name: "Record consultation" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByText(/reported recent failures.*2 consecutive/),
+    ).toBeInTheDocument();
+
+    cleanup();
+    setupDock();
+    expect(
+      screen.getByRole("button", { name: "Record consultation" }),
+    ).toBeEnabled();
+    expect(screen.getByText(/Synthetic fixture provider/)).toBeInTheDocument();
   });
 
   it("declining consent returns to idle without touching the microphone", async () => {

@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = wellos_server::connect_pool(&database_url).await?;
     wellos_server::run_migrations(&pool).await?;
     let Some(seeded) = wellos_server::seeddata::seed(&pool, &runtime).await? else {
-        println!("database already seeded (or holds non-synthetic tenants); skipping");
+        println!("database already seeded; skipping (synthetic seed is idempotent)");
         return Ok(());
     };
     println!("seeded SYNTHETIC data (environment: {}):", runtime.env);

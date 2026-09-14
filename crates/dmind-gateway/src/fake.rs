@@ -19,9 +19,9 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wellos_domain::ai::{ProviderInfo, ResultSummaryV1};
 
-pub const FAKE_MODEL: &str = "dmind-fake";
-pub const FAKE_MODEL_VERSION: &str = "0.1.0";
-pub const FAKE_ROUTE: &str = "local-fake";
+pub const FAKE_MODEL: &str = crate::FIXTURE_MODEL;
+pub const FAKE_MODEL_VERSION: &str = crate::FIXTURE_MODEL_VERSION;
+pub const FAKE_ROUTE: &str = crate::FIXTURE_ROUTE;
 /// Prompt version of the deterministic result-summary template.
 pub const RESULT_DETERMINISTIC_PROMPT_VERSION: &str = "result-summary-deterministic.v1";
 

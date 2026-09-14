@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { AiCapabilities } from "./capabilities";
 import { installHistoryIndex } from "./history-index";
 import type { Lang } from "./i18n";
 
@@ -26,6 +27,10 @@ export type TenantMeta = {
   tenant: { id: string; name: string; cell: string };
   user: { username: string; display_name: string; roles: string[] };
   facilities: Facility[];
+  /** Runtime environment and whether this tenant's data is synthetic. */
+  environment?: { name: string; synthetic_data: boolean };
+  /** Trusted per-capability AI availability reported by the server. */
+  ai_capabilities?: AiCapabilities;
 };
 
 type Session = {

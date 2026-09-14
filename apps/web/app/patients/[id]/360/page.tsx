@@ -736,6 +736,7 @@ function RiskExtras({
   lang: Lang;
   onChanged: () => Promise<unknown>;
 }) {
+  const { meta } = useSession();
   const risk = data.risk;
   if (!risk || !risk.current) return null;
   return (
@@ -752,6 +753,7 @@ function RiskExtras({
           lang={lang}
           patientId={data.patient.id}
           risk={risk}
+          capabilities={meta?.ai_capabilities}
           onChanged={onChanged}
         />
       </div>

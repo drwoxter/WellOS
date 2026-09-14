@@ -351,9 +351,9 @@ pub fn propose(req: &TriageRequest) -> Result<TriageResponse, GatewayError> {
     output.validate().map_err(GatewayError::InvalidOutput)?;
     Ok(TriageResponse {
         output,
-        model: "dmind-fake-triage".into(),
-        model_version: "0.1.0".into(),
-        route: "local-fake".into(),
+        model: crate::FIXTURE_MODEL.into(),
+        model_version: crate::FIXTURE_MODEL_VERSION.into(),
+        route: crate::FIXTURE_ROUTE.into(),
         prompt_version: TRIAGE_DETERMINISTIC_PROMPT_VERSION.into(),
         input_hash: triage_input_hash(req),
         usage: None,

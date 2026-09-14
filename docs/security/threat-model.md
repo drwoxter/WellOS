@@ -1,8 +1,10 @@
 # Threat Model
 
-Scope: the implemented slice (web UI, API server, PostgreSQL, fake AI
-provider). Method: STRIDE per trust boundary. Synthetic data only today; the
-model is written for the intended clinical use.
+Scope: the implemented system (web UI, API server, PostgreSQL, dMind model
+and transcription gateways with `disabled`/`openai_compatible` providers;
+`fake` fixtures exist only in `dev-fixtures` builds). Method: STRIDE per
+trust boundary. The repository ships synthetic data only; the model is
+written for the intended clinical use.
 
 ## Assets
 
@@ -16,8 +18,8 @@ provenance, credentials/tokens, tenant isolation guarantees.
 | Spoofing | Forged identity | OIDC JWT validation against static or discovery-resolved JWKS (issuer-pinned, HTTPS-only, cached with bounded auto-refresh; signature/iss/aud/exp/nbf/iat, asymmetric algorithms only), `(issuer, sub)`→local identity mapping; optional MFA enforcement from validated `amr`/`acr` claims (fails closed); hashed scoped service credentials with expiry/revocation and an audited admin API; opaque hashed browser sessions with rotation/revocation; dev tokens only in explicit local development (startup fails closed otherwise); tenant/roles derived server-side only | Token binding, SCIM provisioning |
 | Tampering | Modify clinical history or audit | Append-only observations & audit; amendments linked, never overwrite; parameterized SQL throughout | Audit hash chain; Postgres RLS; WORM storage for audit |
 | Repudiation | Deny having acted | Every access/transition/AI event audited with actor, purpose, correlation id; break-glass requires reason | Time-stamping service |
-| Information disclosure | Cross-tenant reads, resource-ID probing, PHI in logs/events, token theft via XSS | Tenant scoping in all queries; cross-tenant probes return 404 identical to missing resources (denial still audited); outbox/logs carry ids not clinical payloads; no access tokens in cookies — only opaque hashed `wss_` sessions in HttpOnly cookies via the BFF, CSRF double-submit on state-changing requests, security headers (nosniff/no-referrer/frame-deny/CSP/HSTS); external AI off by default + consent gate | Field-level encryption; redaction layer at model gateway |
-| Denial of service | Flooding ingestion, login endpoints or AI calls | Idempotent ingestion; AI async and non-blocking; bounded DB pool; shared PostgreSQL-backed rate limiting (anonymous login/callback per hashed client address, per-principal patient search / credential admin / general API, 429 + Retry-After, fail-closed store); per-user break-glass rate limit | Token-bucket limits, tenant-level aggregate quotas, WAF |
+| Information disclosure | Cross-tenant reads, resource-ID probing, PHI in logs/events, token theft via XSS | Tenant scoping in all queries; cross-tenant probes return 404 identical to missing resources (denial still audited); outbox/logs carry ids not clinical payloads; no access tokens in cookies — only opaque hashed `wss_` sessions in HttpOnly cookies via the BFF, CSRF double-submit on state-changing requests, security headers (nosniff/no-referrer/frame-deny/CSP/HSTS); external AI off by default (`disabled` provider), `WELLOS_ALLOW_EXTERNAL_AI` opt-in, exact host allowlist + HTTPS + no redirects for egress, consent gate, API keys/prompts/transcripts/responses never logged | Field-level encryption; redaction layer at model gateway |
+| Denial of service | Flooding ingestion, login endpoints or AI calls | Idempotent ingestion; AI async and non-blocking; bounded DB pool; shared PostgreSQL-backed rate limiting (anonymous login/callback per hashed client address, per-principal patient search / credential admin / general API, 429 + Retry-After, fail-closed store); per-user break-glass rate limit; transcription rate-limit family; AI provider timeouts, response-size caps, bounded retries, per-replica concurrency limit, hourly per-tenant/per-task quotas and reuse of identical artifacts (no duplicate spend) | Token-bucket limits, WAF |
 | Elevation of privilege | Role abuse, break-glass misuse, purpose-header widening, cross-facility access | Central least-privilege policy; typed purpose-of-use matrix (headers can only narrow access); facility scope enforced centrally with trusted-relationship facility derivation and an explicit NULL-facility allowlist; service credentials scope-limited and unable to act as humans; break-glass requires dedicated role + emergency purpose, read-only, same-tenant, facility-covered, bounded reason, per-user hourly limit, immutable event with mandatory privacy/security review | Anomaly detection on break-glass patterns |
 
 ## Abuse cases exercised by tests
@@ -33,7 +35,11 @@ unknown keys with unavailable JWKS (rejected), missing/malformed MFA claims
 under MFA policy (rejected), expired/idle/revoked/rotated-away sessions
 (rejected), missing/wrong CSRF token on writes (rejected), cross-tenant
 service-credential admin (404), emergency search without the break-glass
-role (denied), dev tokens outside development (rejected), duplicate inbound
+role (denied), dev tokens/fake providers/synthetic seed in staging or
+production and on builds without `dev-fixtures` (refused at startup),
+missing or unknown `WELLOS_ENV` (refused), schema-invalid or uncited model
+output (rejected, nothing stored), quota exhaustion (429), identical AI
+request (reused, provider not called), duplicate inbound
 results (no duplicates), stale version writes (409), cross-facility
 reads/search/registration/encounters/orders/worklists (denied or filtered),
 break-glass outside its assigned facility (denied), OIDC login
