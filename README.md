@@ -192,8 +192,8 @@ The seed adds six clearly synthetic `Riskdemo` patients (`SYN-0101` …
 `SYN-0106`): Lucía (stable low risk, consented to the insurer projection),
 Ramón (worsening chronic complexity), Teresa (critical unreviewed potassium),
 Hugo (penicillin allergy with active amoxicillin), Nora (preventive-care
-gaps, no responsible professional) and Iván (registered only — insufficient
-data).
+gaps, no responsible professional) and Iván (registered with a treating
+professional but no clinical data yet — insufficient data).
 
 1. Sign in as **Dr. García** and open **Risk** in the navigation. Teresa and
    Hugo (▲ Critical) lead, then Ramón (High, worsening) and Nora (High);
