@@ -779,39 +779,44 @@ fn acute_safety(input: &RiskInput) -> DomainBuilder {
                 );
             }
         }
-        // Vitals only speak to acute safety while they are current.
-        match &input.latest_vitals {
-            Some(vit) if now - vit.recorded_at <= Duration::hours(ACUTE_VITALS_MAX_AGE_HOURS) => {
-                let (priority, hits) = safety_floor(ArrivalKind::Scheduled, &[], &vit.vitals);
-                if priority >= Priority::Urgent {
-                    let rules = hits
-                        .iter()
-                        .map(|h| h.rule.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    b.factor(
-                        "abnormal_vitals",
-                        priority_to_level(priority),
-                        Some(rules),
-                        vec![evidence(
-                            "vital_signs",
-                            vit.id,
-                            "vital signs",
-                            vit.recorded_at,
-                        )],
+    }
+    // Vitals only speak to acute safety while they are current, wherever they
+    // were recorded (triage or a consultation started without a visit).
+    // Missing or stale vitals are only a gap while the patient is in contact.
+    let in_contact =
+        input.current_visit.is_some() || input.encounters.iter().any(|e| e.status == "in_progress");
+    match &input.latest_vitals {
+        Some(vit) if now - vit.recorded_at <= Duration::hours(ACUTE_VITALS_MAX_AGE_HOURS) => {
+            let (priority, hits) = safety_floor(ArrivalKind::Scheduled, &[], &vit.vitals);
+            if priority >= Priority::Urgent {
+                let rules = hits
+                    .iter()
+                    .map(|h| h.rule.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                b.factor(
+                    "abnormal_vitals",
+                    priority_to_level(priority),
+                    Some(rules),
+                    vec![evidence(
+                        "vital_signs",
+                        vit.id,
+                        "vital signs",
                         vit.recorded_at,
-                    );
-                }
+                    )],
+                    vit.recorded_at,
+                );
             }
-            Some(vit) => b.stale(
-                "vitals_stale",
-                "vital_signs",
-                Some(vit.id),
-                vit.recorded_at,
-                ACUTE_VITALS_MAX_AGE_HOURS / 24,
-            ),
-            None => b.missing("vitals_missing", "vital_signs"),
         }
+        Some(vit) if in_contact => b.stale(
+            "vitals_stale",
+            "vital_signs",
+            Some(vit.id),
+            vit.recorded_at,
+            ACUTE_VITALS_MAX_AGE_HOURS / 24,
+        ),
+        None if in_contact => b.missing("vitals_missing", "vital_signs"),
+        _ => {}
     }
     b
 }
@@ -2009,6 +2014,45 @@ mod tests {
             assess(&i).domain(RiskDomain::AcuteSafety).unwrap().level,
             RiskLevel::Critical
         );
+    }
+
+    #[test]
+    fn fresh_vitals_from_a_direct_consultation_count_without_a_visit() {
+        let mut i = stable_input();
+        assert!(i.current_visit.is_none());
+        i.latest_vitals = Some(VitalsFact {
+            id: Uuid::now_v7(),
+            recorded_at: now() - Duration::minutes(10),
+            vitals: TriageVitals {
+                systolic_mmhg: None,
+                heart_rate_bpm: None,
+                respiratory_rate_bpm: None,
+                temperature_c: None,
+                spo2_percent: Some(Decimal::from(80)),
+            },
+        });
+        let d = assess(&i);
+        assert_eq!(d.overall_level, RiskLevel::Critical);
+        let acute = d.domain(RiskDomain::AcuteSafety).unwrap();
+        assert_eq!(acute.level, RiskLevel::Critical);
+        assert_eq!(acute.factors[0].code, "abnormal_vitals");
+        assert_eq!(acute.factors[0].evidence[0].record_type, "vital_signs");
+        // Without an ongoing contact, absent vitals are not reported as a gap...
+        i.latest_vitals = None;
+        let acute = assess(&i);
+        let acute = acute.domain(RiskDomain::AcuteSafety).unwrap();
+        assert!(acute.missing_data.is_empty());
+        // ...but they are during an in-progress consultation without a visit.
+        i.encounters.push(EncounterFact {
+            id: Uuid::now_v7(),
+            status: "in_progress".into(),
+            encounter_type: "consultation".into(),
+            started_at: now(),
+            completed_at: None,
+        });
+        let acute = assess(&i);
+        let acute = acute.domain(RiskDomain::AcuteSafety).unwrap();
+        assert_eq!(acute.missing_data[0].code, "vitals_missing");
     }
 
     #[test]

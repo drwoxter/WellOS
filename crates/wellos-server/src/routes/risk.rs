@@ -42,7 +42,11 @@ use wellos_domain::triage::TriageVitals;
 const MAX_NOTE: usize = 2000;
 const HISTORY_LIMIT: i64 = 12;
 const WORKLIST_LIMIT: i64 = 200;
-const FACT_LIMIT: i64 = 200;
+/// Cap on *closed* historical records (used only for frequency and freshness
+/// rules). Currently actionable records — open alerts, open visits, open
+/// result loops, pending requests, in-progress encounters, open tasks — are
+/// always loaded in full so a critical signal can never fall outside the cap.
+const HISTORY_FACT_LIMIT: i64 = 200;
 const VISIT_LOOKBACK_DAYS: i64 = 365;
 /// Trend compares the new levels with the most recent snapshot at least this
 /// old (falling back to the oldest snapshot), so that recalculating twice in a
@@ -131,13 +135,38 @@ async fn lock_patient_risk(conn: &mut PgConnection, patient_id: Uuid) -> Result<
 // Fact collection (read-only; every fact points at its source record)
 // ---------------------------------------------------------------------------
 
-const OPEN_VISIT_STATUSES: [&str; 5] = [
-    "scheduled",
-    "arrived",
-    "triage_in_progress",
-    "ready_for_consultation",
-    "in_consultation",
-];
+const OPEN_VISIT_STATUSES: &str =
+    "('scheduled','arrived','triage_in_progress','ready_for_consultation','in_consultation')";
+
+/// Operational precedence when a patient has several open visits: a visit the
+/// patient is physically in (consultation, ready, triage, arrived) always wins
+/// over a booking, however recent the booking is. Among bookings the one
+/// closest to `now` is current.
+fn visit_precedence(status: &str) -> u8 {
+    match status {
+        "in_consultation" => 0,
+        "ready_for_consultation" => 1,
+        "triage_in_progress" => 2,
+        "arrived" => 3,
+        "scheduled" => 4,
+        _ => u8::MAX,
+    }
+}
+
+pub(crate) fn select_current_visit(visits: &[VisitFact], now: DateTime<Utc>) -> Option<VisitFact> {
+    visits
+        .iter()
+        .filter(|v| visit_precedence(&v.status) != u8::MAX)
+        .min_by_key(|v| {
+            let distance = if v.status == "scheduled" {
+                (v.occurred_at - now).num_seconds().abs()
+            } else {
+                (now - v.occurred_at).num_seconds()
+            };
+            (visit_precedence(&v.status), distance, v.id)
+        })
+        .cloned()
+}
 
 pub(crate) async fn collect_input(
     conn: &mut PgConnection,
@@ -146,13 +175,14 @@ pub(crate) async fn collect_input(
     birth_date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<RiskInput, ApiError> {
+    // Only open alerts feed the rules, and every one of them must be present.
     let alerts = sqlx::query(
         "SELECT id, severity, status, message, created_at FROM alerts
-         WHERE tenant_id = $1 AND patient_id = $2 ORDER BY created_at DESC LIMIT $3",
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'open'
+         ORDER BY created_at DESC",
     )
     .bind(tenant_id)
     .bind(patient_id)
-    .bind(FACT_LIMIT)
     .fetch_all(&mut *conn)
     .await?
     .iter()
@@ -165,23 +195,29 @@ pub(crate) async fn collect_input(
     })
     .collect();
 
-    let visit_rows = sqlx::query(
-        "SELECT v.id, v.status, v.arrival_kind, v.service, v.priority,
-                (SELECT ta.safety_floor FROM triage_assessments ta
-                 WHERE ta.tenant_id = v.tenant_id AND ta.visit_id = v.id) AS safety_floor,
-                COALESCE(v.arrived_at, v.scheduled_at, v.created_at) AS occurred_at
-         FROM visits v
-         WHERE v.tenant_id = $1 AND v.patient_id = $2
-           AND COALESCE(v.arrived_at, v.scheduled_at, v.created_at) >= $3
-         ORDER BY occurred_at DESC LIMIT $4",
-    )
+    // Every open visit is loaded (the current visit is chosen among them);
+    // closed visits are bounded history used for frequency rules only.
+    let visit_rows = sqlx::query(&format!(
+        "WITH v AS (
+            SELECT v.id, v.status, v.arrival_kind, v.service, v.priority,
+                   (SELECT ta.safety_floor FROM triage_assessments ta
+                    WHERE ta.tenant_id = v.tenant_id AND ta.visit_id = v.id) AS safety_floor,
+                   COALESCE(v.arrived_at, v.scheduled_at, v.created_at) AS occurred_at
+            FROM visits v
+            WHERE v.tenant_id = $1 AND v.patient_id = $2
+         )
+         (SELECT * FROM v WHERE status IN {OPEN_VISIT_STATUSES})
+         UNION ALL
+         (SELECT * FROM v WHERE status NOT IN {OPEN_VISIT_STATUSES} AND occurred_at >= $3
+          ORDER BY occurred_at DESC LIMIT $4)"
+    ))
     .bind(tenant_id)
     .bind(patient_id)
     .bind(now - chrono::Duration::days(VISIT_LOOKBACK_DAYS))
-    .bind(FACT_LIMIT)
+    .bind(HISTORY_FACT_LIMIT)
     .fetch_all(&mut *conn)
     .await?;
-    let visits: Vec<VisitFact> = visit_rows
+    let mut visits: Vec<VisitFact> = visit_rows
         .iter()
         .map(|r| VisitFact {
             id: r.get("id"),
@@ -193,10 +229,8 @@ pub(crate) async fn collect_input(
             occurred_at: r.get("occurred_at"),
         })
         .collect();
-    let current_visit = visits
-        .iter()
-        .find(|v| OPEN_VISIT_STATUSES.contains(&v.status.as_str()))
-        .cloned();
+    visits.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at).then(b.id.cmp(&a.id)));
+    let current_visit = select_current_visit(&visits, now);
 
     let latest_vitals = sqlx::query(
         "SELECT id, recorded_at, systolic_mmhg, heart_rate_bpm, respiratory_rate_bpm,
@@ -270,22 +304,34 @@ pub(crate) async fn collect_input(
     })
     .collect();
 
-    // Latest non-superseded observation per request; abnormality uses the
-    // same reference-range classification as the Patient Brief.
-    let results = sqlx::query(
-        "SELECT o.id, o.service_request_id, o.code_loinc, sr.display, o.value_num, o.unit,
-                o.reference_range, sr.loop_state, o.effective_at,
-                EXISTS (SELECT 1 FROM rule_evaluations re
-                        WHERE re.observation_id = o.id
-                          AND re.outcome->>'outcome' = 'critical') AS critical
-         FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
-         WHERE o.tenant_id = $1 AND o.patient_id = $2
-           AND NOT EXISTS (SELECT 1 FROM observations x WHERE x.amends = o.id)
-         ORDER BY o.effective_at DESC, o.id DESC LIMIT $3",
+    // Non-superseded observations; abnormality uses the same reference-range
+    // classification as the Patient Brief. Every observation whose result loop
+    // is still open is loaded; closed loops contribute the most recent result
+    // per analyte (preventive intervals) plus bounded recent history.
+    let results: Vec<ResultFact> = sqlx::query(
+        "WITH o AS (
+            SELECT o.id, o.service_request_id, o.code_loinc, sr.display, o.value_num, o.unit,
+                   o.reference_range, sr.loop_state, o.effective_at,
+                   EXISTS (SELECT 1 FROM rule_evaluations re
+                           WHERE re.observation_id = o.id
+                             AND re.outcome->>'outcome' = 'critical') AS critical
+            FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
+            WHERE o.tenant_id = $1 AND o.patient_id = $2
+              AND NOT EXISTS (SELECT 1 FROM observations x WHERE x.amends = o.id)
+         )
+         SELECT * FROM (
+            (SELECT * FROM o WHERE loop_state <> 'closed')
+            UNION
+            (SELECT DISTINCT ON (code_loinc) * FROM o WHERE loop_state = 'closed'
+             ORDER BY code_loinc, effective_at DESC, id DESC)
+            UNION
+            (SELECT * FROM o WHERE loop_state = 'closed'
+             ORDER BY effective_at DESC, id DESC LIMIT $3)
+         ) r ORDER BY effective_at DESC, id DESC",
     )
     .bind(tenant_id)
     .bind(patient_id)
-    .bind(FACT_LIMIT)
+    .bind(HISTORY_FACT_LIMIT)
     .fetch_all(&mut *conn)
     .await?
     .iter()
@@ -310,11 +356,10 @@ pub(crate) async fn collect_input(
     let open_requests = sqlx::query(
         "SELECT id, display, loop_state, created_at FROM service_requests
          WHERE tenant_id = $1 AND patient_id = $2 AND loop_state <> 'closed'
-         ORDER BY created_at DESC LIMIT $3",
+         ORDER BY created_at DESC",
     )
     .bind(tenant_id)
     .bind(patient_id)
-    .bind(FACT_LIMIT)
     .fetch_all(&mut *conn)
     .await?
     .iter()
@@ -326,13 +371,22 @@ pub(crate) async fn collect_input(
     })
     .collect();
 
+    // All in-progress encounters plus bounded closed history.
     let encounters = sqlx::query(
-        "SELECT id, status, encounter_type, started_at, completed_at FROM encounters
-         WHERE tenant_id = $1 AND patient_id = $2 ORDER BY started_at DESC LIMIT $3",
+        "WITH e AS (
+            SELECT id, status, encounter_type, started_at, completed_at FROM encounters
+            WHERE tenant_id = $1 AND patient_id = $2
+         )
+         SELECT * FROM (
+            (SELECT * FROM e WHERE status = 'in_progress')
+            UNION ALL
+            (SELECT * FROM e WHERE status <> 'in_progress'
+             ORDER BY started_at DESC, id DESC LIMIT $3)
+         ) r ORDER BY started_at DESC, id DESC",
     )
     .bind(tenant_id)
     .bind(patient_id)
-    .bind(FACT_LIMIT)
+    .bind(HISTORY_FACT_LIMIT)
     .fetch_all(&mut *conn)
     .await?
     .iter()
@@ -345,13 +399,16 @@ pub(crate) async fn collect_input(
     })
     .collect();
 
-    let tasks = sqlx::query(
+    // Only actionable tasks feed the rules (same statuses as the Patient Brief).
+    let tasks = sqlx::query(&format!(
         "SELECT id, description, status, priority, due_at, created_at FROM follow_up_tasks
-         WHERE tenant_id = $1 AND patient_id = $2 ORDER BY created_at DESC LIMIT $3",
-    )
+         WHERE tenant_id = $1 AND patient_id = $2
+           AND status IN {}
+         ORDER BY created_at DESC",
+        brief::ACTIONABLE_TASK_STATUSES
+    ))
     .bind(tenant_id)
     .bind(patient_id)
-    .bind(FACT_LIMIT)
     .fetch_all(&mut *conn)
     .await?
     .iter()
@@ -2222,6 +2279,41 @@ mod tests {
         assert_eq!(higher["superseded_by_higher_level"], true);
         let other = effective_review(&reviews, "acute_safety", RiskLevel::Low);
         assert_eq!(other["status"], "unreviewed");
+    }
+
+    fn visit(status: &str, offset_minutes: i64, now: DateTime<Utc>) -> VisitFact {
+        VisitFact {
+            id: Uuid::now_v7(),
+            status: status.into(),
+            arrival_kind: "scheduled".into(),
+            service: "general_medicine".into(),
+            priority: None,
+            safety_floor: None,
+            occurred_at: now + Duration::minutes(offset_minutes),
+        }
+    }
+
+    #[test]
+    fn current_visit_prefers_active_states_over_later_bookings() {
+        let now = Utc::now();
+        let later_booking = visit("scheduled", 180, now);
+        let arrived = visit("arrived", -40, now);
+        let triaged = visit("triage_in_progress", -90, now);
+        let closed = visit("completed", 5, now);
+        let visits = vec![
+            later_booking.clone(),
+            closed,
+            arrived.clone(),
+            triaged.clone(),
+        ];
+        assert_eq!(select_current_visit(&visits, now).unwrap().id, triaged.id);
+        let visits = vec![later_booking.clone(), arrived.clone()];
+        assert_eq!(select_current_visit(&visits, now).unwrap().id, arrived.id);
+        // Only bookings: the one nearest to now is current.
+        let soon = visit("scheduled", 20, now);
+        let visits = vec![later_booking, soon.clone(), visit("scheduled", -600, now)];
+        assert_eq!(select_current_visit(&visits, now).unwrap().id, soon.id);
+        assert!(select_current_visit(&[visit("no_show", -10, now)], now).is_none());
     }
 
     #[test]

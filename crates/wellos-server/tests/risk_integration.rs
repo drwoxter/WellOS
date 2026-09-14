@@ -931,26 +931,7 @@ async fn permissions_and_purposes_are_enforced() {
 /// Register a synthetic patient, order potassium and ingest a critical result,
 /// so the test owns every record it later reviews.
 async fn patient_with_critical_result(state: &AppState) -> Uuid {
-    let (st, meta) = call(state, "GET", "/api/v1/meta/tenant", "dev-reg.rivera", None).await;
-    assert_eq!(st, StatusCode::OK, "{meta}");
-    let facility = meta["facilities"][0]["id"].as_str().unwrap().to_string();
-    let (st, patient) = call(
-        state,
-        "POST",
-        "/api/v1/patients",
-        "dev-reg.rivera",
-        Some(json!({
-            "facility_id": facility,
-            "family_name": "Riskloop",
-            "given_name": "Synthetic",
-            "birth_date": "1968-02-02",
-            "sex": "male",
-            "identifier": format!("MRN-RISK-{}", Uuid::now_v7().simple()),
-        })),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{patient}");
-    let pid = Uuid::parse_str(patient["id"].as_str().unwrap()).unwrap();
+    let pid = register_patient(state).await;
     let (st, enc) = call(
         state,
         "POST",
@@ -991,6 +972,242 @@ async fn patient_with_critical_result(state: &AppState) -> Uuid {
     .await;
     assert_eq!(st, StatusCode::OK, "{res}");
     pid
+}
+
+async fn register_patient(state: &AppState) -> Uuid {
+    let (st, meta) = call(state, "GET", "/api/v1/meta/tenant", "dev-reg.rivera", None).await;
+    assert_eq!(st, StatusCode::OK, "{meta}");
+    let facility = meta["facilities"][0]["id"].as_str().unwrap().to_string();
+    let (st, patient) = call(
+        state,
+        "POST",
+        "/api/v1/patients",
+        "dev-reg.rivera",
+        Some(json!({
+            "facility_id": facility,
+            "family_name": "Riskloop",
+            "given_name": "Synthetic",
+            "birth_date": "1968-02-02",
+            "sex": "male",
+            "identifier": format!("MRN-RISK-{}", Uuid::now_v7().simple()),
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{patient}");
+    Uuid::parse_str(patient["id"].as_str().unwrap()).unwrap()
+}
+
+/// Vitals recorded in a consultation started directly from the chart (no
+/// access visit) must still drive acute safety: a critical SpO2 raises the
+/// domain and the overall level, citing the vital_signs row.
+#[tokio::test]
+async fn direct_consultation_vitals_raise_acute_safety_without_a_visit() {
+    let state = test_state().await;
+    let pid = register_patient(&state).await;
+    let (st, enc) = call(
+        &state,
+        "POST",
+        "/api/v1/encounters",
+        GARCIA,
+        Some(json!({ "patient_id": pid })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{enc}");
+    let no_visits: i64 = sqlx::query_scalar("SELECT count(*) FROM visits WHERE patient_id = $1")
+        .bind(pid)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(no_visits, 0);
+
+    let (st, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{}/vitals", enc["id"].as_str().unwrap()),
+        GARCIA,
+        Some(json!({ "spo2_percent": 82, "heart_rate_bpm": 118, "confirm_unusual": true })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    let (st, body) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/patients/{pid}/risk/recalculate"),
+        GARCIA,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["current"]["overall_level"], "critical", "{body}");
+    let acute = domain(&body["current"], "acute_safety");
+    assert_eq!(acute["level"], "critical", "{acute}");
+    let factor = acute["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "abnormal_vitals")
+        .unwrap_or_else(|| panic!("abnormal_vitals factor missing: {acute}"));
+    assert_eq!(factor["evidence"][0]["record_type"], "vital_signs");
+    assert_eq!(factor["evidence"][0]["record_id"], v["id"]);
+}
+
+/// A booking for later must never be taken as the current visit while the
+/// patient is physically in an active visit: acute safety follows the urgent
+/// arrival, not the future appointment.
+#[tokio::test]
+async fn active_visit_takes_precedence_over_a_future_appointment() {
+    let state = test_state().await;
+    let pid = register_patient(&state).await;
+    let (st, appt) = call(
+        &state,
+        "POST",
+        "/api/v1/visits",
+        "dev-reg.rivera",
+        Some(json!({
+            "patient_id": pid,
+            "arrival_kind": "scheduled",
+            "service": "general_medicine",
+            "scheduled_at": chrono::Utc::now() + chrono::Duration::hours(3),
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{appt}");
+    let (st, urgent) = call(
+        &state,
+        "POST",
+        "/api/v1/visits",
+        "dev-reg.rivera",
+        Some(json!({
+            "patient_id": pid,
+            "arrival_kind": "urgent",
+            "service": "emergency",
+            "reason": "Synthetic chest pain",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{urgent}");
+    assert_eq!(urgent["status"], "arrived");
+    let urgent_id = urgent["id"].as_str().unwrap();
+    let (st, t) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/visits/{urgent_id}/triage"),
+        NURSE,
+        Some(json!({
+            "version": urgent["version"],
+            "reason": "Synthetic chest pain",
+            "vitals": { "spo2_percent": 91, "heart_rate_bpm": 124 },
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["safety_floor"], "urgent");
+    // The appointment sorts newest by occurred_at, so a naive pick masks the arrival.
+    let latest: Uuid = sqlx::query_scalar(
+        "SELECT id FROM visits WHERE patient_id = $1
+         ORDER BY COALESCE(arrived_at, scheduled_at, created_at) DESC LIMIT 1",
+    )
+    .bind(pid)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(latest.to_string(), appt["id"]);
+
+    let (st, body) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/patients/{pid}/risk/recalculate"),
+        GARCIA,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let acute = domain(&body["current"], "acute_safety");
+    assert_eq!(acute["level"], "high", "{acute}");
+    let factor = acute["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "visit_priority")
+        .unwrap_or_else(|| panic!("visit_priority factor missing: {acute}"));
+    assert_eq!(factor["evidence"][0]["record_type"], "visit");
+    assert_eq!(factor["evidence"][0]["record_id"], urgent_id, "{factor}");
+    assert!(
+        acute["missing_data"].as_array().unwrap().is_empty(),
+        "{acute}"
+    );
+}
+
+/// Actionable records are loaded in full: an unreviewed critical result must
+/// raise the assessment even when hundreds of newer routine results exist.
+#[tokio::test]
+async fn critical_open_result_is_not_hidden_by_newer_history() {
+    let state = test_state().await;
+    let pid = patient_with_critical_result(&state).await;
+    let (tenant, encounter, requester): (Uuid, Uuid, Uuid) = sqlx::query_as(
+        "SELECT tenant_id, encounter_id, requester_id FROM service_requests
+         WHERE patient_id = $1 LIMIT 1",
+    )
+    .bind(pid)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    // 250 closed, normal glucose results, all newer than the critical potassium.
+    let mut tx = state.pool.begin().await.unwrap();
+    for i in 0..250_i64 {
+        let sr = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO service_requests
+               (id, tenant_id, encounter_id, patient_id, requester_id, code_loinc, display,
+                loop_state, created_at)
+             VALUES ($1, $2, $3, $4, $5, '2345-7', 'Glucose', 'closed', now() + ($6 * interval '1 second'))",
+        )
+        .bind(sr)
+        .bind(tenant)
+        .bind(encounter)
+        .bind(pid)
+        .bind(requester)
+        .bind(i + 1)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO observations
+               (id, tenant_id, service_request_id, patient_id, code_loinc, value_num, unit,
+                reference_range, source_system, idempotency_key, effective_at)
+             VALUES ($1, $2, $3, $4, '2345-7', 5.1, 'mmol/L', '3.9-5.5', 'fake-lab', $5,
+                     now() + ($6 * interval '1 second'))",
+        )
+        .bind(Uuid::now_v7())
+        .bind(tenant)
+        .bind(sr)
+        .bind(pid)
+        .bind(format!("risk-hist-{}", Uuid::now_v7().simple()))
+        .bind(i + 1)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let (st, body) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/patients/{pid}/risk/recalculate"),
+        GARCIA,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["current"]["overall_level"], "critical", "{body}");
+    let diag = domain(&body["current"], "diagnostic_result");
+    assert_eq!(diag["level"], "critical", "{diag}");
+    assert_eq!(diag["factors"][0]["code"], "critical_result_unreviewed");
+    assert_eq!(
+        diag["factors"][0]["evidence"][0]["record_type"],
+        "observation"
+    );
 }
 
 #[tokio::test]

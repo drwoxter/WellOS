@@ -59,7 +59,7 @@ assessment can be reproduced and audited.
 
 | Domain | Signals (rule codes) | Notes |
 | --- | --- | --- |
-| Acute safety | `open_critical_alert`, `visit_priority` (immediate/urgent arrival), `abnormal_vitals` (last 24 h) | Critical when an urgent alert is open or vitals breach the triage safety thresholds. |
+| Acute safety | `open_critical_alert`, `visit_priority` (immediate/urgent arrival), `abnormal_vitals` (last 24 h) | Critical when an urgent alert is open or vitals breach the triage safety thresholds. Vitals count wherever they were recorded (triage or a consultation started without a visit); missing/stale vitals are only reported as a gap while the patient is in contact (open visit or in-progress encounter). |
 | Chronic complexity | `multiple_chronic_conditions` (ICD-10 chapters for diabetes, CKD, heart failure, COPD, …), `polypharmacy` (≥ 5 / ≥ 10 active medications) | Stale monitoring results (> 365 d) are reported as stale data, not as a higher level. |
 | Medication & allergy safety | `medication_allergy_conflict`, `duplicate_medication`, `allergy_status_unknown` | Conflict matching is by normalised substance name; `allergy_status_unknown` is a data gap, never a low level. |
 | Diagnostic results | `critical_result_unreviewed`, `critical_result_open_loop`, `abnormal_result_unreviewed`, `abnormal_result_open_loop` | Reads the existing closed-loop state machine; an unreviewed critical result is always critical. |
@@ -77,6 +77,23 @@ comparable history).
 A patient with no encounters, visits, vitals, results or conditions is
 `insufficient_data` in every domain rather than `low`: absence of data is a
 finding, not reassurance.
+
+### Fact collection (`collect_input`)
+
+Currently actionable records are always loaded in full, regardless of age or
+count: open alerts, open visits, non-superseded observations whose result
+loop is still open, pending service requests, in-progress encounters and
+open/overdue follow-up tasks (the Patient Brief's actionable statuses). Only
+*closed* history is bounded — the 200 most recent closed visits (within 365
+d), closed encounters and closed-loop results, plus the latest closed result
+per analyte so preventive intervals see the real last measurement — and that
+history only feeds frequency and freshness rules. A critical signal can
+therefore never fall outside a cap.
+
+When a patient has several open visits, the *current visit* is chosen by
+operational precedence (`in_consultation` > `ready_for_consultation` >
+`triage_in_progress` > `arrived` > `scheduled`), then recency; among bookings
+the one nearest to now. A future appointment never masks an active arrival.
 
 ### When it runs
 
