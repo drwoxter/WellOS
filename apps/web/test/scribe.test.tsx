@@ -15,6 +15,7 @@ import {
   DEGRADED,
   capabilities,
 } from "./fixtures/capabilities";
+import { routeParams } from "./fixtures/params";
 import type { AudioRecorder, Recording } from "@/lib/recorder";
 import { RecorderError } from "@/lib/recorder";
 import type { ScribeArtifact, TranscriptSegment } from "@/lib/scribe";
@@ -411,7 +412,7 @@ function setupPage(
   vi.stubGlobal("fetch", fetchMock);
   render(
     <SessionProvider>
-      <EncounterPage params={{ id: "e1" }} />
+      <EncounterPage params={routeParams({ id: "e1" })} />
     </SessionProvider>,
   );
   return fetchMock;
@@ -1131,7 +1132,7 @@ describe("scribe review in the encounter workspace", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(
       <SessionProvider>
-        <EncounterPage params={{ id: "e1" }} />
+        <EncounterPage params={routeParams({ id: "e1" })} />
       </SessionProvider>,
     );
     const insert = (
@@ -1424,7 +1425,7 @@ describe("workspace language", () => {
     render(
       <SessionProvider>
         <LangSwitch />
-        <EncounterPage params={{ id: "e1" }} />
+        <EncounterPage params={routeParams({ id: "e1" })} />
       </SessionProvider>,
     );
     await user.click(await screen.findByText("Diagnostic history"));

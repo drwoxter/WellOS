@@ -12,6 +12,7 @@ import {
   DEGRADED,
   capabilities,
 } from "./fixtures/capabilities";
+import { routeParams } from "./fixtures/params";
 import {
   canReadRisk,
   evidenceHref,
@@ -732,7 +733,7 @@ describe("Patient 360", () => {
     });
     render(
       <SessionProvider>
-        <Patient360Page params={{ id: "p1" }} />
+        <Patient360Page params={routeParams({ id: "p1" })} />
       </SessionProvider>,
     );
     return mocks;

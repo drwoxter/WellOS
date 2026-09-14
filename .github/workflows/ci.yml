@@ -98,6 +98,12 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Web dependency audit
+        working-directory: apps/web
+        run: npm audit --audit-level=high
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@v2
         env:

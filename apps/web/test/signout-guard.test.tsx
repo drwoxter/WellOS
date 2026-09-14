@@ -5,6 +5,7 @@ import EncounterPage from "@/app/encounters/[id]/page";
 import { AppHeader, AppShell } from "@/app/chrome";
 import { SessionProvider } from "@/lib/session";
 import { useUnsavedChangesGuard } from "@/lib/unsaved-guard";
+import { routeParams } from "./fixtures/params";
 
 // One shared router instance, as the App Router context provides; the
 // unsaved guard wraps its methods while active, so assertions use the spy.
@@ -109,7 +110,7 @@ function setup(
         <AppHeader />
       </div>
       <AppShell>
-        <EncounterPage params={{ id: "e1" }} />
+        <EncounterPage params={routeParams({ id: "e1" })} />
       </AppShell>
     </SessionProvider>,
   );

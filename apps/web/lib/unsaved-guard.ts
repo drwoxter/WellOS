@@ -69,9 +69,14 @@ function dropTrapEntry() {
  * Confirms before leaving the current screen while `active`.
  *
  * Covered exits:
- * - `Link` clicks and programmatic `router.push` / `router.replace`: the
- *   shared App Router instance from `useRouter()` is what `next/link` also
- *   navigates through, so wrapping its methods intercepts both.
+ * - Programmatic `router.push` / `router.replace`: the methods of the shared
+ *   App Router instance from `useRouter()` are wrapped.
+ * - `Link` and plain anchor clicks: `next/link` dispatches its navigation
+ *   directly to the router core, not through `router.push`, so same-origin
+ *   left clicks are caught in the capture phase, default-prevented (which
+ *   makes `Link` stand down) and driven through the wrapped `push` instead.
+ *   Modified clicks, other targets, downloads, in-page fragments and
+ *   cross-origin destinations keep their browser behaviour.
  * - Browser Back: while active, a duplicate history entry for the current
  *   URL sits on top of the stack, so the first Back lands on the same screen
  *   (nothing unmounts) and can be confirmed — continuing backward — or
@@ -214,6 +219,24 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
         }
       };
 
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const target = e.target instanceof Element ? e.target : null;
+      const anchor = target?.closest("a[href]");
+      if (!(anchor instanceof HTMLAnchorElement)) return;
+      if (anchor.hasAttribute("download")) return;
+      if (anchor.target && anchor.target !== "_self") return;
+      const url = new URL(anchor.href, window.location.href);
+      if (url.origin !== window.location.origin) return;
+      const samePage =
+        url.pathname === window.location.pathname &&
+        url.search === window.location.search;
+      if (samePage && url.hash) return;
+      e.preventDefault();
+      guarded("push")(`${url.pathname}${url.search}${url.hash}`);
+    };
+
     if (readMark(window.history.state, id)?.pos === 1) {
       // Re-activated on our own duplicate entry (for example typing again
       // right after a save, before the previous guard's cleanup settled).
@@ -230,6 +253,7 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
     }
     const stopTraversals = onHistoryTraversal(onPopState);
     window.addEventListener("beforeunload", onBeforeUnload);
+    document.addEventListener("click", onClick, true);
     router.push = guarded("push");
     router.replace = guarded("replace");
     activeGuards.add(registration);
@@ -238,6 +262,7 @@ export function useUnsavedChangesGuard(active: boolean, message: string) {
       activeGuards.delete(registration);
       stopTraversals();
       window.removeEventListener("beforeunload", onBeforeUnload);
+      document.removeEventListener("click", onClick, true);
       router.push = original.push;
       router.replace = original.replace;
       if (afterPop) {

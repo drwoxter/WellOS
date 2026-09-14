@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, use } from "react";
 import { AppShell } from "../../chrome";
 import { t } from "@/lib/i18n";
 import type { Lang, TKey } from "@/lib/i18n";
@@ -2180,10 +2180,15 @@ function EncounterWorkspace({ id }: { id: string }) {
   );
 }
 
-export default function EncounterPage({ params }: { params: { id: string } }) {
+export default function EncounterPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = use(params);
   return (
     <AppShell>
-      <EncounterWorkspace id={params.id} />
+      <EncounterWorkspace id={id} />
     </AppShell>
   );
 }

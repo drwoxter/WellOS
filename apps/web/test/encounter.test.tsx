@@ -15,9 +15,11 @@ import {
   DEGRADED,
   capabilities,
 } from "./fixtures/capabilities";
+import { routeParams } from "./fixtures/params";
 
 // One shared router instance, as the App Router context provides: the
-// navigation guard wraps its methods and `next/link` navigates through it.
+// navigation guard wraps its methods (link clicks are caught at the DOM and
+// driven through the wrapped `push`).
 const router = { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() };
 vi.mock("next/navigation", () => ({
   useRouter: () => router,
@@ -173,7 +175,7 @@ function setup(
   vi.stubGlobal("fetch", fetchMock);
   render(
     <SessionProvider>
-      <EncounterPage params={{ id: "e1" }} />
+      <EncounterPage params={routeParams({ id: "e1" })} />
     </SessionProvider>,
   );
   return fetchMock;
@@ -534,7 +536,7 @@ describe("encounter documentation workspace", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(
       <SessionProvider>
-        <EncounterPage params={{ id: "e1" }} />
+        <EncounterPage params={routeParams({ id: "e1" })} />
       </SessionProvider>,
     );
 
@@ -696,6 +698,57 @@ describe("encounter documentation workspace", () => {
       expect(originalPush).toHaveBeenCalledWith("/patients/p1", undefined),
     );
     expect(confirmMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("confirms same-origin link clicks while dirty and leaves modified clicks alone", async () => {
+    const user = userEvent.setup();
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+    const originalPush = router.push;
+    setup(workspace(), {
+      "/api/v1/encounters/e1/note": () =>
+        jsonResponse({ id: "n1", status: "draft", version: 1 }),
+    });
+    const reason = await screen.findByLabelText(/Reason for consultation/);
+    await user.type(reason, "Chest pain");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    // A `Link` (or plain anchor) to another screen, as the shell nav renders.
+    const link = document.createElement("a");
+    link.href = "/patients?q=x";
+    link.textContent = "Patients";
+    document.body.appendChild(link);
+    const defaults: boolean[] = [];
+    link.addEventListener("click", (e) => {
+      defaults.push(e.defaultPrevented);
+      e.preventDefault(); // jsdom cannot perform the browser navigation
+    });
+
+    // Declined: the click is swallowed before `Link` sees it; still dirty.
+    await user.click(link);
+    expect(confirmMock).toHaveBeenCalledWith(
+      expect.stringMatching(/unsaved documentation/i),
+    );
+    expect(defaults).toEqual([true]);
+    expect(originalPush).not.toHaveBeenCalled();
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    // Modified click (new tab): never asked, browser behaviour kept.
+    await user.keyboard("{Control>}");
+    await user.click(link);
+    await user.keyboard("{/Control}");
+    expect(confirmMock).toHaveBeenCalledTimes(1);
+    expect(defaults).toEqual([true, false]);
+
+    // Accepted: navigation proceeds through the router exactly once.
+    confirmMock.mockReturnValue(true);
+    await user.click(link);
+    await waitFor(() =>
+      expect(originalPush).toHaveBeenCalledWith("/patients?q=x", undefined),
+    );
+    expect(originalPush).toHaveBeenCalledTimes(1);
+    expect(confirmMock).toHaveBeenCalledTimes(2);
+    link.remove();
   });
 
   it("keeps guarding after Forward onto a duplicate entry and only asks when Back leaves the screen", async () => {
@@ -1568,7 +1621,7 @@ describe("encounter documentation workspace", () => {
     );
     render(
       <SessionProvider>
-        <EncounterPage params={{ id: "e1" }} />
+        <EncounterPage params={routeParams({ id: "e1" })} />
       </SessionProvider>,
     );
     expect(

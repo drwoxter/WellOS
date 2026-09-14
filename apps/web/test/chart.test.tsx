@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import PatientPage from "@/app/patients/[id]/page";
 import { SessionProvider } from "@/lib/session";
+import { routeParams } from "./fixtures/params";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -146,7 +147,7 @@ function setup(
   );
   render(
     <SessionProvider>
-      <PatientPage params={{ id: "p1" }} />
+      <PatientPage params={routeParams({ id: "p1" })} />
     </SessionProvider>,
   );
   return { posts, chartLoads: () => chartLoads };

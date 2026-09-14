@@ -39,7 +39,7 @@ audit work together:
 
 ## Quick start
 
-Prerequisites: Rust (stable ≥ 1.85), Node 20+, Docker.
+Prerequisites: Rust (stable ≥ 1.85), Node 20.19+ (or 22.12+), Docker.
 
 WellOS has two explicit local modes. Neither is inherited by the other:
 
@@ -254,7 +254,7 @@ permissions and non-goals.
 #### Windows PowerShell
 
 Equivalent commands for the Makefile targets (run from the repository root,
-Rust, Node 20+ and Docker Desktop installed):
+Rust, Node 20.19+ (or 22.12+) and Docker Desktop installed):
 
 ```powershell
 # Synthetic-fixture mode (development/test only)
@@ -291,7 +291,7 @@ Invoke-RestMethod "http://127.0.0.1:8080/api/v1/patients/$patientId/risk/project
 ## Tests
 
 ```bash
-make lint               # cargo fmt --check, clippy -D warnings (production feature set), next lint
+make lint               # cargo fmt --check, clippy -D warnings (production feature set), eslint
 make lint-fixtures      # clippy with dev-fixtures compiled in
 make test               # unit tests (domain rules, state machine, policy, gateway)
 make test-integration   # API integration tests in test/fixture mode (requires running PostgreSQL)
@@ -313,6 +313,7 @@ cargo test --workspace --test '*'
 cargo audit
 gitleaks detect --source . --no-banner --redact
 cd apps/web && npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build
+npm audit --audit-level=high                            # web dependencies (runtime and tooling)
 ```
 
 CI never calls an external AI provider: the `openai_compatible` adapters are
