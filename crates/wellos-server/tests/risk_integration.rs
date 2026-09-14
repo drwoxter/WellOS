@@ -398,7 +398,10 @@ async fn ai_summary_never_lowers_deterministic_critical_floor() {
         .unwrap()
         .iter()
         .any(|l| l.as_str().unwrap().contains("diagnóstico")));
-    assert_eq!(body["summary"]["prompt_version"], "risk-summary-prompt.v1");
+    assert_eq!(
+        body["summary"]["prompt_version"], "risk-summary-deterministic.v1",
+        "the stored prompt version of the producing provider is reported"
+    );
     assert!(body["summary"]["model"].is_string() && body["summary"]["generated_at"].is_string());
     let artifact_id = body["id"].as_str().unwrap().to_string();
     assert!(event_count(&state, "ai.artifact.generated", &artifact_id).await >= 1);

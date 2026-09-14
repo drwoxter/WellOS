@@ -729,6 +729,147 @@ async fn consent_withdrawn_during_transcription_discards_the_transcript() {
     assert_eq!(st, StatusCode::OK, "{draft}");
 }
 
+/// Model gateway that pauses inside `draft_note`, so a test can change the
+/// encounter while "the model is structuring the transcript".
+struct GatedGateway {
+    inner: dmind_gateway::fake::FakeProvider,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl dmind_gateway::ModelGateway for GatedGateway {
+    fn info(&self) -> wellos_domain::ai::ProviderInfo {
+        self.inner.info()
+    }
+    fn status(&self) -> dmind_gateway::CapabilityStatus {
+        self.inner.status()
+    }
+    fn prompt_version(&self, op: dmind_gateway::Operation) -> String {
+        self.inner.prompt_version(op)
+    }
+    async fn summarize_result(
+        &self,
+        req: &dmind_gateway::SummaryRequest,
+    ) -> Result<dmind_gateway::GatewayResponse, dmind_gateway::GatewayError> {
+        self.inner.summarize_result(req).await
+    }
+    async fn propose_triage(
+        &self,
+        req: &dmind_gateway::TriageRequest,
+    ) -> Result<dmind_gateway::TriageResponse, dmind_gateway::GatewayError> {
+        self.inner.propose_triage(req).await
+    }
+    async fn summarize_risk(
+        &self,
+        req: &dmind_gateway::RiskSummaryRequest,
+    ) -> Result<dmind_gateway::RiskSummaryResponse, dmind_gateway::GatewayError> {
+        self.inner.summarize_risk(req).await
+    }
+    async fn draft_note(
+        &self,
+        req: &dmind_gateway::notes::NoteDraftRequest,
+    ) -> Result<dmind_gateway::notes::NoteDraftResponse, dmind_gateway::GatewayError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        self.inner.draft_note(req).await
+    }
+}
+
+/// A diagnosis recorded while the model is structuring the transcript: the
+/// draft was built from context that no longer describes the encounter, so
+/// it is discarded (`context_changed`) instead of being persisted as a
+/// current-looking proposal whose note version still matches.
+#[tokio::test]
+async fn diagnosis_change_during_structuring_discards_the_stale_draft() {
+    let (mut state, _) = test_state().await;
+    let gate = Arc::new(GatedGateway {
+        inner: dmind_gateway::fake::FakeProvider::new(),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    state.gateway = gate.clone();
+    let (_, enc) = start_consultation(&state).await;
+    grant_consent(&state, &enc).await;
+    let (st, dx) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/diagnoses"),
+        "dev-dr.garcia",
+        Some(
+            json!({ "display": "Essential hypertension", "code": "I10", "status": "provisional" }),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{dx}");
+
+    let in_flight = {
+        let state = state.clone();
+        let enc = enc.clone();
+        tokio::spawn(async move { transcribe(&state, &enc, "dev-dr.garcia").await })
+    };
+    gate.started.notified().await;
+
+    // A second diagnosis lands while the model is running.
+    let (st, dx) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/encounters/{enc}/diagnoses"),
+        "dev-dr.garcia",
+        Some(json!({ "display": "Type 2 diabetes mellitus", "code": "E11", "status": "provisional" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{dx}");
+
+    gate.release.notify_one();
+    let (st, err) = in_flight.await.unwrap();
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], json!("context_changed"));
+
+    let artifacts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ai_artifacts WHERE encounter_id = $1::uuid AND artifact_type = 'scribe_draft'",
+    )
+    .bind(&enc)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(artifacts, 0, "no stale draft is persisted");
+    let failures: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox_events WHERE event_type = 'ai.generation.failed'
+           AND resource_refs->>'encounter_id' = $1
+           AND resource_refs->>'stage' = 'context_changed'",
+    )
+    .bind(&enc)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(failures, 1);
+
+    // A new recording against the settled context cites both diagnoses.
+    let in_flight = {
+        let state = state.clone();
+        let enc = enc.clone();
+        tokio::spawn(async move { transcribe(&state, &enc, "dev-dr.garcia").await })
+    };
+    gate.started.notified().await;
+    gate.release.notify_one();
+    let (st, draft) = in_flight.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{draft}");
+    let citations: Value =
+        sqlx::query_scalar("SELECT citations FROM ai_artifacts WHERE id = $1::uuid")
+            .bind(draft["id"].as_str().unwrap())
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let conditions = citations
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c.as_str().unwrap().starts_with("condition:"))
+        .count();
+    assert_eq!(conditions, 2, "{citations}");
+}
+
 #[derive(Clone, Default)]
 struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
 

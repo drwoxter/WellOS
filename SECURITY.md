@@ -40,7 +40,9 @@ receive an acknowledgement within 5 business days.
   fail closed with 401. MFA is never inferred from email, role or any
   client-provided header.
 - **Development tokens** (`dev-<username>`) authenticate seeded synthetic
-  users only on a build compiled with `--features dev-fixtures`, when
+  users only (humans of a `data_class = 'synthetic'` tenant with no real
+  identity-provider subject; production-class users fail with 401 even in
+  fixture mode) on a build compiled with `--features dev-fixtures`, when
   `WELLOS_ENV` is `development` or `test` **and** `WELLOS_DEV_AUTH=true`
   (default `false`). Startup fails closed if dev auth is enabled in
   `staging`/`production` or on a build without the feature, if `WELLOS_ENV`

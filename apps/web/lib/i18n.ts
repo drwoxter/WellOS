@@ -417,6 +417,8 @@ const dict = {
     recordingTooLarge: "The recording is too large to transcribe.",
     scribeRateLimited:
       "Too many transcriptions in a short time. Wait a moment and retry.",
+    scribeContextChanged:
+      "The diagnoses changed while the draft was being prepared, so it was discarded. Retry to draft against the current diagnoses.",
     encounterClosedScribe:
       "This consultation is closed; the draft can no longer be applied.",
     elapsed: "Elapsed",
@@ -1365,6 +1367,8 @@ const dict = {
     recordingTooLarge: "La grabación es demasiado grande para transcribir.",
     scribeRateLimited:
       "Demasiadas transcripciones en poco tiempo. Espere un momento y reintente.",
+    scribeContextChanged:
+      "Los diagnósticos cambiaron mientras se preparaba el borrador, por lo que se descartó. Reintente para redactar con los diagnósticos actuales.",
     encounterClosedScribe:
       "Esta consulta está cerrada; el borrador ya no puede aplicarse.",
     elapsed: "Transcurrido",

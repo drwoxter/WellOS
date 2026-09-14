@@ -139,12 +139,20 @@ impl OpenAiCompatibleModel {
         })
     }
 
-    fn record_success(&self) {
-        self.health.record_success();
-    }
-
     fn record_failure(&self) {
         self.health.record_failure();
+    }
+
+    /// Health accounting for the typed-operation boundary: a completion only
+    /// counts as a success once its output passed every schema, citation,
+    /// evidence and safety check; a validation failure counts against the
+    /// provider like a transport failure does.
+    fn validated<T>(&self, result: Result<T, GatewayError>) -> Result<T, GatewayError> {
+        match &result {
+            Ok(_) => self.health.record_success(),
+            Err(_) => self.health.record_failure(),
+        }
+        result
     }
 
     async fn attempt(&self, body: &Value) -> Result<(Value, Option<Usage>), Retry> {
@@ -229,7 +237,9 @@ impl OpenAiCompatibleModel {
         Ok((object, usage))
     }
 
-    /// One structured completion with bounded retries and concurrency.
+    /// One structured completion with bounded retries and concurrency. Only
+    /// failures are recorded here; success is decided by the typed operation
+    /// after validating the output.
     async fn complete(
         &self,
         system: &str,
@@ -264,9 +274,8 @@ impl OpenAiCompatibleModel {
             }
         };
         drop(permit);
-        match &result {
-            Ok(_) => self.record_success(),
-            Err(_) => self.record_failure(),
+        if result.is_err() {
+            self.record_failure();
         }
         result
     }
@@ -483,51 +492,7 @@ impl ModelGateway for OpenAiCompatibleModel {
             "facts": facts_json(&req.facts),
         });
         let (raw, usage) = self.complete(&system, &user).await?;
-        let parsed: RawSummary = serde_json::from_value(raw).map_err(invalid)?;
-        if parsed.summary.trim().is_empty() || parsed.summary.chars().count() > MAX_SUMMARY_CHARS {
-            return Err(GatewayError::InvalidOutput(
-                "summary is empty or oversized".into(),
-            ));
-        }
-        let cited_sources = check_citations(&parsed.cited_sources, &req.facts, "summary")?;
-        if cited_sources.is_empty() && !req.facts.is_empty() {
-            return Err(GatewayError::InvalidOutput(
-                "summary cites no source".into(),
-            ));
-        }
-        check_list(&parsed.limitations, "limitations")?;
-        check_list(
-            &parsed.suggested_next_step_categories,
-            "suggested_next_step_categories",
-        )?;
-        if !parsed
-            .suggested_next_step_categories
-            .iter()
-            .all(|c| is_slug(c))
-        {
-            return Err(GatewayError::InvalidOutput(
-                "next-step categories must be short slugs".into(),
-            ));
-        }
-        let mut limitations = parsed.limitations;
-        limitations.push(external_limitation(&req.language));
-        self.record_success();
-        Ok(GatewayResponse {
-            output: ResultSummaryV1 {
-                schema_version: "result-summary.v1".into(),
-                summary: parsed.summary,
-                relevant_trend: parsed.relevant_trend.filter(|t| !t.trim().is_empty()),
-                cited_sources,
-                limitations,
-                suggested_next_step_categories: parsed.suggested_next_step_categories,
-            },
-            model: self.cfg.model.clone(),
-            model_version: "api".into(),
-            route: PROVIDER_NAME.into(),
-            prompt_version: RESULT_PROMPT_VERSION.into(),
-            input_hash: input_hash(req),
-            usage,
-        })
+        self.validated(self.validate_summary(req, raw, usage))
     }
 
     async fn propose_triage(&self, req: &TriageRequest) -> Result<TriageResponse, GatewayError> {
@@ -561,6 +526,163 @@ impl ModelGateway for OpenAiCompatibleModel {
             "facts": facts_json(&req.facts),
         });
         let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(self.validate_triage(req, raw, usage))
+    }
+    async fn summarize_risk(
+        &self,
+        req: &RiskSummaryRequest,
+    ) -> Result<RiskSummaryResponse, GatewayError> {
+        let det = &req.assessment;
+        let system = format!(
+            "{COMMON_RULES} Task: explain a deterministic risk assessment to a clinician. The levels \
+             were computed by versioned rules and are authoritative: repeat them exactly, never \
+             lower or raise them. {} Output schema: {{\"overall_level\": string, \
+             \"domains\": [{{\"domain\": string (exactly the supplied domain codes, each once), \
+             \"level\": string (the supplied level), \"summary\": string, \"reasons\": string[] (one per \
+             contributing factor, same order), \"cited_sources\": string[] (only references from the \
+             input facts)}}], \"missing_information\": string[], \"contradictions\": string[], \
+             \"follow_up_suggestions\": [{{\"category\": \"review_result\"|\"medication_reconciliation\"|\
+             \"schedule_follow_up\"|\"preventive_screening\"|\"care_team_assignment\"|\"complete_record\"|\
+             \"discuss_with_patient\", \"domain\": string, \"text\": string}}], \"limitations\": string[], \
+             \"cited_sources\": string[], \"confidence\": \"low\"|\"medium\"|\"high\"}}. A factor derived \
+             from the absence of data cites the matching \"rule:<rules_version>:<domain>\" reference \
+             listed under rule_references.",
+            language_instruction(&req.language)
+        );
+        let allowed = risk_citable_references(req);
+        let rule_references: Vec<String> = allowed[req.facts.len()..]
+            .iter()
+            .map(|(r, _)| r.clone())
+            .collect();
+        let user = json!({
+            "template": req.template,
+            "language": req.language,
+            "assessment": det,
+            "facts": facts_json(&req.facts),
+            "rule_references": rule_references,
+        });
+        let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(self.validate_risk(req, raw, usage))
+    }
+
+    async fn draft_note(&self, req: &NoteDraftRequest) -> Result<NoteDraftResponse, GatewayError> {
+        if req.template != NOTE_DRAFT_TEMPLATE {
+            return Err(GatewayError::PolicyDenied(format!(
+                "unsupported template {}",
+                req.template
+            )));
+        }
+        if req.transcript.is_empty() {
+            return Err(GatewayError::InvalidOutput("transcript is empty".into()));
+        }
+        let system = format!(
+            "{COMMON_RULES} Task: organize a consultation transcript into draft note sections for \
+             the treating clinician's review. Only restate what was said; never infer a diagnosis, \
+             add findings or propose treatment. Each section must cite the transcript segment \
+             indexes it restates. {} Allowed section codes, in order: {}. Output schema: \
+             {{\"sections\": [{{\"section\": string, \"text\": string, \"confidence\": \"low\"|\"medium\"|\"high\", \
+             \"review_needed\": boolean, \"reasons\": string[], \"segments\": integer[]}}], \
+             \"flags\": [{{\"kind\": \"contradiction\"|\"uncertain\", \"message\": string, \"segments\": integer[], \
+             \"sections\": string[]}}], \"limitations\": string[]}}. Omit sections the conversation \
+             does not cover. Mark review_needed when medications, doses, numeric values or \
+             clinical impressions are restated.",
+            language_instruction(&req.language),
+            wellos_domain::ai::NOTE_SECTIONS
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let user = json!({
+            "template": req.template,
+            "language": req.language,
+            "transcript": req.transcript.iter().map(|s| json!({
+                "index": s.index,
+                "speaker": s.speaker,
+                "text": s.text,
+            })).collect::<Vec<_>>(),
+            "context": facts_json(&req.context_facts),
+        });
+        let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(self.validate_note(req, raw, usage))
+    }
+}
+
+/// The supplied facts plus one `rule:<version>:<domain>` reference per
+/// assessed domain: everything a risk summary may cite.
+fn risk_citable_references(req: &RiskSummaryRequest) -> Vec<(String, String)> {
+    let det = &req.assessment;
+    let mut allowed: Vec<(String, String)> = req.facts.clone();
+    for d in &det.domains {
+        allowed.push((
+            format!("rule:{}:{}", det.rules_version, d.domain.as_str()),
+            "deterministic rule".into(),
+        ));
+    }
+    allowed
+}
+
+/// Output validation of each typed operation, separated from the network
+/// call so the outcome can be accounted for as one unit.
+impl OpenAiCompatibleModel {
+    fn validate_summary(
+        &self,
+        req: &SummaryRequest,
+        raw: Value,
+        usage: Option<Usage>,
+    ) -> Result<GatewayResponse, GatewayError> {
+        let parsed: RawSummary = serde_json::from_value(raw).map_err(invalid)?;
+        if parsed.summary.trim().is_empty() || parsed.summary.chars().count() > MAX_SUMMARY_CHARS {
+            return Err(GatewayError::InvalidOutput(
+                "summary is empty or oversized".into(),
+            ));
+        }
+        let cited_sources = check_citations(&parsed.cited_sources, &req.facts, "summary")?;
+        if cited_sources.is_empty() && !req.facts.is_empty() {
+            return Err(GatewayError::InvalidOutput(
+                "summary cites no source".into(),
+            ));
+        }
+        check_list(&parsed.limitations, "limitations")?;
+        check_list(
+            &parsed.suggested_next_step_categories,
+            "suggested_next_step_categories",
+        )?;
+        if !parsed
+            .suggested_next_step_categories
+            .iter()
+            .all(|c| is_slug(c))
+        {
+            return Err(GatewayError::InvalidOutput(
+                "next-step categories must be short slugs".into(),
+            ));
+        }
+        let mut limitations = parsed.limitations;
+        limitations.push(external_limitation(&req.language));
+        Ok(GatewayResponse {
+            output: ResultSummaryV1 {
+                schema_version: "result-summary.v1".into(),
+                summary: parsed.summary,
+                relevant_trend: parsed.relevant_trend.filter(|t| !t.trim().is_empty()),
+                cited_sources,
+                limitations,
+                suggested_next_step_categories: parsed.suggested_next_step_categories,
+            },
+            model: self.cfg.model.clone(),
+            model_version: "api".into(),
+            route: PROVIDER_NAME.into(),
+            prompt_version: RESULT_PROMPT_VERSION.into(),
+            input_hash: input_hash(req),
+            usage,
+        })
+    }
+
+    fn validate_triage(
+        &self,
+        req: &TriageRequest,
+        raw: Value,
+        usage: Option<Usage>,
+    ) -> Result<TriageResponse, GatewayError> {
         let parsed: RawTriage = serde_json::from_value(raw).map_err(invalid)?;
         for (items, name) in [
             (&parsed.important_facts, "important_facts"),
@@ -577,6 +699,17 @@ impl ModelGateway for OpenAiCompatibleModel {
             ));
         }
         let cited_sources = check_citations(&parsed.cited_sources, &req.facts, "triage proposal")?;
+        // A proposal built on supplied facts, or one asserting facts of its
+        // own, must trace them to the input; an uncited proposal is evidence-free.
+        if cited_sources.is_empty()
+            && (!req.facts.is_empty()
+                || !parsed.important_facts.is_empty()
+                || !parsed.handoff_summary.trim().is_empty())
+        {
+            return Err(GatewayError::InvalidOutput(
+                "triage proposal cites no source".into(),
+            ));
+        }
         let (floor, _) = safety_floor(req.arrival_kind, &req.red_flags, &req.vitals);
         let mut limitations = parsed.limitations;
         limitations.push(external_limitation(&req.language));
@@ -608,46 +741,13 @@ impl ModelGateway for OpenAiCompatibleModel {
         })
     }
 
-    async fn summarize_risk(
+    fn validate_risk(
         &self,
         req: &RiskSummaryRequest,
+        mut raw: Value,
+        usage: Option<Usage>,
     ) -> Result<RiskSummaryResponse, GatewayError> {
         let det = &req.assessment;
-        let system = format!(
-            "{COMMON_RULES} Task: explain a deterministic risk assessment to a clinician. The levels \
-             were computed by versioned rules and are authoritative: repeat them exactly, never \
-             lower or raise them. {} Output schema: {{\"overall_level\": string, \
-             \"domains\": [{{\"domain\": string (exactly the supplied domain codes, each once), \
-             \"level\": string (the supplied level), \"summary\": string, \"reasons\": string[] (one per \
-             contributing factor, same order), \"cited_sources\": string[] (only references from the \
-             input facts)}}], \"missing_information\": string[], \"contradictions\": string[], \
-             \"follow_up_suggestions\": [{{\"category\": \"review_result\"|\"medication_reconciliation\"|\
-             \"schedule_follow_up\"|\"preventive_screening\"|\"care_team_assignment\"|\"complete_record\"|\
-             \"discuss_with_patient\", \"domain\": string, \"text\": string}}], \"limitations\": string[], \
-             \"cited_sources\": string[], \"confidence\": \"low\"|\"medium\"|\"high\"}}. A factor derived \
-             from the absence of data cites the matching \"rule:<rules_version>:<domain>\" reference \
-             listed under rule_references.",
-            language_instruction(&req.language)
-        );
-        let mut allowed: Vec<(String, String)> = req.facts.clone();
-        for d in &det.domains {
-            allowed.push((
-                format!("rule:{}:{}", det.rules_version, d.domain.as_str()),
-                "deterministic rule".into(),
-            ));
-        }
-        let rule_references: Vec<String> = allowed[req.facts.len()..]
-            .iter()
-            .map(|(r, _)| r.clone())
-            .collect();
-        let user = json!({
-            "template": req.template,
-            "language": req.language,
-            "assessment": det,
-            "facts": facts_json(&req.facts),
-            "rule_references": rule_references,
-        });
-        let (mut raw, usage) = self.complete(&system, &user).await?;
         {
             let obj = raw
                 .as_object_mut()
@@ -691,7 +791,7 @@ impl ModelGateway for OpenAiCompatibleModel {
                 ));
             }
         }
-        check_citations(&cited, &allowed, "risk summary")?;
+        check_citations(&cited, &risk_citable_references(req), "risk summary")?;
         check_list(&output.missing_information, "missing_information")?;
         check_list(&output.contradictions, "contradictions")?;
         check_list(&output.limitations, "limitations")?;
@@ -716,45 +816,12 @@ impl ModelGateway for OpenAiCompatibleModel {
         })
     }
 
-    async fn draft_note(&self, req: &NoteDraftRequest) -> Result<NoteDraftResponse, GatewayError> {
-        if req.template != NOTE_DRAFT_TEMPLATE {
-            return Err(GatewayError::PolicyDenied(format!(
-                "unsupported template {}",
-                req.template
-            )));
-        }
-        if req.transcript.is_empty() {
-            return Err(GatewayError::InvalidOutput("transcript is empty".into()));
-        }
-        let system = format!(
-            "{COMMON_RULES} Task: organize a consultation transcript into draft note sections for \
-             the treating clinician's review. Only restate what was said; never infer a diagnosis, \
-             add findings or propose treatment. Each section must cite the transcript segment \
-             indexes it restates. {} Allowed section codes, in order: {}. Output schema: \
-             {{\"sections\": [{{\"section\": string, \"text\": string, \"confidence\": \"low\"|\"medium\"|\"high\", \
-             \"review_needed\": boolean, \"reasons\": string[], \"segments\": integer[]}}], \
-             \"flags\": [{{\"kind\": \"contradiction\"|\"uncertain\", \"message\": string, \"segments\": integer[], \
-             \"sections\": string[]}}], \"limitations\": string[]}}. Omit sections the conversation \
-             does not cover. Mark review_needed when medications, doses, numeric values or \
-             clinical impressions are restated.",
-            language_instruction(&req.language),
-            wellos_domain::ai::NOTE_SECTIONS
-                .iter()
-                .map(|s| format!("\"{s}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let user = json!({
-            "template": req.template,
-            "language": req.language,
-            "transcript": req.transcript.iter().map(|s| json!({
-                "index": s.index,
-                "speaker": s.speaker,
-                "text": s.text,
-            })).collect::<Vec<_>>(),
-            "context": facts_json(&req.context_facts),
-        });
-        let (raw, usage) = self.complete(&system, &user).await?;
+    fn validate_note(
+        &self,
+        req: &NoteDraftRequest,
+        raw: Value,
+        usage: Option<Usage>,
+    ) -> Result<NoteDraftResponse, GatewayError> {
         let parsed: RawDraft = serde_json::from_value(raw).map_err(invalid)?;
         let sections: Vec<ScribeSection> = parsed
             .sections
@@ -1080,7 +1147,8 @@ mod tests {
                 "proposed_priority": "urgent",
                 "proposed_service": "cardiology",
                 "handoff_summary": "x",
-                "confidence": "medium"
+                "confidence": "medium",
+                "cited_sources": ["visit:reason"]
             })),
         )])
         .await;
@@ -1095,7 +1163,8 @@ mod tests {
                 "proposed_priority": "critical",
                 "proposed_service": "emergency",
                 "handoff_summary": "x",
-                "confidence": "medium"
+                "confidence": "medium",
+                "cited_sources": ["visit:reason"]
             })),
         )])
         .await;
@@ -1104,6 +1173,118 @@ mod tests {
             m.propose_triage(&triage_req()).await,
             Err(GatewayError::InvalidOutput(_))
         ));
+    }
+
+    /// Facts were supplied, yet the proposal cites none of them: the
+    /// proposal is evidence-free and is rejected rather than persisted.
+    #[tokio::test]
+    async fn triage_proposal_without_citations_is_rejected() {
+        for cited in [json!([]), Value::Null] {
+            let mut body = json!({
+                "proposed_priority": "urgent",
+                "proposed_service": "emergency",
+                "important_facts": ["Chest pain for one hour"],
+                "handoff_summary": "Adult with acute chest pain.",
+                "confidence": "medium"
+            });
+            if !cited.is_null() {
+                body["cited_sources"] = cited;
+            }
+            let (endpoint, _mock) = mock_server(vec![(200, completion(body))]).await;
+            let m = OpenAiCompatibleModel::new(cfg(endpoint, 0)).unwrap();
+            match m.propose_triage(&triage_req()).await {
+                Err(GatewayError::InvalidOutput(reason)) => {
+                    assert!(reason.contains("cites no source"), "{reason}")
+                }
+                other => panic!("expected rejection, got {other:?}"),
+            }
+            assert_eq!(m.status().state, CapabilityState::Degraded);
+        }
+    }
+
+    /// Health follows the whole typed operation: a well-formed JSON object
+    /// that fails schema, citation or evidence validation is a provider
+    /// failure, and only a fully validated result restores readiness.
+    #[tokio::test]
+    async fn validation_failures_degrade_status_until_a_valid_operation() {
+        // Result summary: parseable, but cites a source that was never supplied.
+        let (endpoint, _mock) = mock_server(vec![(
+            200,
+            completion(json!({
+                "summary": "Potassium is critically high.",
+                "cited_sources": ["observation:999"]
+            })),
+        )])
+        .await;
+        let m = OpenAiCompatibleModel::new(cfg(endpoint, 0)).unwrap();
+        assert_eq!(m.status().state, CapabilityState::Ready);
+        assert!(m.summarize_result(&summary_req()).await.is_err());
+        assert_eq!(m.status().state, CapabilityState::Degraded);
+        assert!(m.status().reason.unwrap().contains("1 consecutive"));
+
+        // Note draft: a section citing a transcript segment that does not exist.
+        let (endpoint, _mock) = mock_server(vec![(
+            200,
+            completion(json!({
+                "sections": [{
+                    "section": "reason_for_encounter",
+                    "text": "Cough for three days.",
+                    "confidence": "high",
+                    "review_needed": false,
+                    "reasons": [],
+                    "segments": [42]
+                }],
+                "flags": [],
+                "limitations": []
+            })),
+        )])
+        .await;
+        let m = OpenAiCompatibleModel::new(cfg(endpoint, 0)).unwrap();
+        assert!(matches!(
+            m.draft_note(&note_req()).await,
+            Err(GatewayError::InvalidOutput(_))
+        ));
+        assert_eq!(m.status().state, CapabilityState::Degraded);
+
+        // Risk summary: parseable, but cites a record that was never supplied.
+        let req = risk_req();
+        let mut body = risk_completion(&req, None);
+        let mut content: Value =
+            serde_json::from_str(body["choices"][0]["message"]["content"].as_str().unwrap())
+                .unwrap();
+        content["cited_sources"] = json!(["observation:not-supplied"]);
+        body["choices"][0]["message"]["content"] = json!(content.to_string());
+        let (endpoint, _mock) = mock_server(vec![(200, body)]).await;
+        let m = OpenAiCompatibleModel::new(cfg(endpoint, 0)).unwrap();
+        assert!(matches!(
+            m.summarize_risk(&req).await,
+            Err(GatewayError::InvalidOutput(_))
+        ));
+        assert_eq!(m.status().state, CapabilityState::Degraded);
+
+        // Two validation failures, then a fully valid operation: readiness
+        // is restored only by the validated success.
+        let (endpoint, _mock) = mock_server(vec![
+            (
+                200,
+                completion(json!({ "summary": "", "cited_sources": ["observation:1"] })),
+            ),
+            (
+                200,
+                completion(json!({ "summary": "x", "cited_sources": [] })),
+            ),
+            (
+                200,
+                completion(json!({ "summary": "ok", "cited_sources": ["observation:1"] })),
+            ),
+        ])
+        .await;
+        let m = OpenAiCompatibleModel::new(cfg(endpoint, 0)).unwrap();
+        assert!(m.summarize_result(&summary_req()).await.is_err());
+        assert!(m.summarize_result(&summary_req()).await.is_err());
+        assert!(m.status().reason.unwrap().contains("2 consecutive"));
+        m.summarize_result(&summary_req()).await.unwrap();
+        assert_eq!(m.status().state, CapabilityState::Ready);
     }
 
     fn seg(i: u32, speaker: Option<&str>, text: &str) -> TranscriptSegment {

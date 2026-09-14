@@ -351,8 +351,10 @@ fn transcription_error(err: ScribeError) -> ApiError {
 /// Context the treating clinician is already authorized to see for this
 /// encounter and that the note-draft operation may cite: the diagnoses
 /// recorded on the encounter. Nothing outside the encounter is shared.
-async fn authorized_context_facts(
-    state: &AppState,
+/// Diagnoses are written under the encounter lock, so reading them under
+/// that lock yields the context current at that instant.
+async fn authorized_context_facts<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     tenant_id: Uuid,
     encounter_id: Uuid,
 ) -> Result<Vec<(String, String)>, ApiError> {
@@ -363,7 +365,7 @@ async fn authorized_context_facts(
     )
     .bind(tenant_id)
     .bind(encounter_id)
-    .fetch_all(&state.pool)
+    .fetch_all(executor)
     .await?;
     Ok(rows
         .into_iter()
@@ -386,7 +388,10 @@ async fn authorized_context_facts(
 /// sections through the governed model gateway. The audio is handed to the
 /// provider and dropped; the persisted artifact contains the transcript and
 /// the structured output, bound to the note version current at insertion
-/// (read under the encounter lock). Nothing is ever fabricated: a provider
+/// (read under the encounter lock). The encounter context handed to the
+/// model is re-read under that same lock: if a diagnosis changed while the
+/// provider was running, the draft no longer reflects the encounter and is
+/// discarded rather than persisted. Nothing is ever fabricated: a provider
 /// failure at either stage is returned as a recoverable error.
 pub async fn transcribe(
     State(state): State<AppState>,
@@ -442,14 +447,14 @@ pub async fn transcribe(
     drop(request);
 
     // Structure the transcript through the governed model gateway.
-    let context_facts = authorized_context_facts(&state, enc.tenant_id, id).await?;
+    let context_facts = authorized_context_facts(&state.pool, enc.tenant_id, id).await?;
     let mut input_refs: Vec<String> = vec![format!("recording:sha256:{audio_sha256}")];
     input_refs.extend(context_facts.iter().map(|(r, _)| r.clone()));
     let note_request = NoteDraftRequest {
         template: NOTE_DRAFT_TEMPLATE.to_string(),
         language: language.clone(),
         transcript: transcription.segments.clone(),
-        context_facts,
+        context_facts: context_facts.clone(),
     };
     let input_hash = note_input_hash(&note_request);
     let plan = aigov::plan(
@@ -529,6 +534,16 @@ pub async fn transcribe(
         drop(tx);
         record_generation_failure(&state, &ctx, id, "consent_withdrawn").await?;
         return Err(consent_required());
+    }
+    // The draft was structured against the encounter context read before the
+    // provider ran; if that context changed meanwhile the output is stale.
+    if authorized_context_facts(&mut *tx, enc.tenant_id, id).await? != context_facts {
+        drop(tx);
+        record_generation_failure(&state, &ctx, id, "context_changed").await?;
+        return Err(ApiError::conflict(
+            "context_changed",
+            "the encounter's diagnoses changed while the draft was being generated; record again",
+        ));
     }
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     let note_version: Option<i64> = sqlx::query_scalar(

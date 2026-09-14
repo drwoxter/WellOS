@@ -122,8 +122,11 @@ gateway (governed through `aigov`: reuse, quotas, consent; EN/ES),
 validates the structured output and its evidence references
 and stores an `ai_artifacts` row (autonomy A2, `awaiting_review`) bound to
 `risk_assessment_id`. Persisted provenance: provider, model, model version,
-route, prompt version `risk-summary-prompt.v1`, schema `risk-summary.v1`,
-input hash, generated-at.
+route, the prompt version of the provider that produced it
+(`risk-summary-deterministic.v1` for the fixture provider,
+`risk-summary-openai.v1` for `openai_compatible`), schema `risk-summary.v1`,
+input hash, generated-at. Reads return the stored prompt version; artifacts
+predating stored prompt provenance fall back to `risk-summary-prompt.v1`.
 
 The output contract (`RiskSummaryV1`):
 

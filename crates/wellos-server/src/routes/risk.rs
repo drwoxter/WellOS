@@ -796,7 +796,7 @@ async fn load_history(
 }
 
 const SUMMARY_ARTIFACT_COLUMNS: &str = "a.id, a.status, a.output, a.model, a.model_version, a.route, a.template,
-            a.risk_assessment_id, a.generated_at, a.reviewed_at, a.review_decision, a.review_note,
+            a.prompt_version, a.risk_assessment_id, a.generated_at, a.reviewed_at, a.review_decision, a.review_note,
             a.review_detail, u.display_name AS reviewer,
             (SELECT count(*) FROM follow_up_tasks t WHERE t.ai_artifact_id = a.id) AS confirmed_tasks";
 
@@ -859,7 +859,11 @@ fn summary_json(r: &sqlx::postgres::PgRow, current_assessment_id: Uuid) -> Value
             "model_version": r.get::<Option<String>,_>("model_version"),
             "route": r.get::<Option<String>,_>("route"),
             "template": r.get::<Option<String>,_>("template"),
-            "prompt_version": RISK_SUMMARY_PROMPT_VERSION,
+            // Artifacts generated before prompt provenance was stored all came
+            // from the fixture prompt family.
+            "prompt_version": r
+                .get::<Option<String>, _>("prompt_version")
+                .unwrap_or_else(|| RISK_SUMMARY_PROMPT_VERSION.to_string()),
             "generated_at": r.get::<Option<DateTime<Utc>>,_>("generated_at"),
             "reviewed_at": r.get::<Option<DateTime<Utc>>,_>("reviewed_at"),
             "review_decision": r.get::<Option<String>,_>("review_decision"),

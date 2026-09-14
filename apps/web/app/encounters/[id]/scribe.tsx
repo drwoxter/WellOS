@@ -53,6 +53,8 @@ function errorKey(kind: ScribeErrorKind): TKey {
       return "recordingTooLarge";
     case "encounter_closed":
       return "encounterClosedScribe";
+    case "context_changed":
+      return "scribeContextChanged";
     case "rate_limited":
       return "scribeRateLimited";
   }
@@ -74,6 +76,8 @@ function transcriptionFailure(err: unknown): {
         return { kind: "encounter_closed", retryable: false };
       case "consent_required":
         return { kind: "consent_failed", retryable: true };
+      case "context_changed":
+        return { kind: "context_changed", retryable: true };
       case "unsupported_media_type":
       case "validation_failed":
       case "audio_rejected":

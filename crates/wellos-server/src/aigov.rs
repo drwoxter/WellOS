@@ -16,7 +16,7 @@ use dmind_gateway::{GatewayError, Operation, Usage};
 use serde_json::Value;
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
-use wellos_domain::ai::ProviderInfo;
+use wellos_domain::ai::{ArtifactStatus, ProviderInfo};
 
 /// A prior artifact whose validated output applies verbatim to the current
 /// request.
@@ -114,8 +114,7 @@ pub async fn plan(
     let row = sqlx::query(
         "SELECT
             COUNT(*) FILTER (WHERE true) AS tenant_count,
-            COUNT(*) FILTER (WHERE artifact_type = $2) AS task_count,
-            MIN(executed_at) AS oldest
+            COUNT(*) FILTER (WHERE artifact_type = $2) AS task_count
          FROM ai_executions
          WHERE tenant_id = $1 AND executed_at > now() - interval '1 hour'",
     )
@@ -125,17 +124,35 @@ pub async fn plan(
     .await?;
     let tenant_count: i64 = row.get("tenant_count");
     let task_count: i64 = row.get("task_count");
-    if tenant_count >= quotas.tenant_per_hour || task_count >= quotas.task_per_hour {
-        let oldest: Option<chrono::DateTime<chrono::Utc>> = row.get("oldest");
-        let retry_after = oldest
-            .map(|o| (o + chrono::Duration::hours(1) - chrono::Utc::now()).num_seconds())
+    let tenant_exhausted = tenant_count >= quotas.tenant_per_hour;
+    let task_exhausted = task_count >= quotas.task_per_hour;
+    if tenant_exhausted || task_exhausted {
+        // Each exhausted window frees a slot when its N-th newest execution
+        // ages out; a request is admitted only once every exhausted window
+        // has done so, so the later of the two governs.
+        let mut frees_at: Option<chrono::DateTime<chrono::Utc>> = None;
+        if tenant_exhausted {
+            frees_at = window_frees_at(&mut tx, tenant_id, None, quotas.tenant_per_hour).await?;
+        }
+        if task_exhausted {
+            let task = window_frees_at(
+                &mut tx,
+                tenant_id,
+                Some(artifact_type),
+                quotas.task_per_hour,
+            )
+            .await?;
+            frees_at = frees_at.max(task);
+        }
+        let retry_after = frees_at
+            .map(|t| (t - chrono::Utc::now()).num_seconds())
             .filter(|s| *s > 0)
-            .unwrap_or(60) as u64;
+            .unwrap_or(1) as u64;
         tx.rollback().await?;
         let mut err = ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "ai_quota_exceeded",
-            if tenant_count >= quotas.tenant_per_hour {
+            if tenant_exhausted {
                 "the hourly dMind quota for this organization is exhausted; retry later"
             } else {
                 "the hourly dMind quota for this task is exhausted; retry later"
@@ -197,6 +214,51 @@ pub async fn external_processing_allowed(
     Ok(())
 }
 
+/// When the hourly window for the tenant (`task = None`) or one task admits
+/// a request again: one hour after its `limit`-th newest execution, i.e.
+/// the moment the in-window count drops below `limit`.
+async fn window_frees_at(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    task: Option<&str>,
+    limit: i64,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, ApiError> {
+    let row: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+        "SELECT executed_at + interval '1 hour'
+         FROM ai_executions
+         WHERE tenant_id = $1 AND ($2::text IS NULL OR artifact_type = $2)
+           AND executed_at > now() - interval '1 hour'
+         ORDER BY executed_at DESC, id DESC
+         OFFSET $3 LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(task)
+    .bind((limit - 1).max(0))
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Statuses of finished generations. Only the newest of these decides reuse:
+/// `awaiting_review`, `approved` and `superseded` (merely replaced by a newer
+/// proposal) still stand; `rejected` and `withdrawn` record a professional's
+/// decision against that output, which no older copy may override. Drafts,
+/// invalidated and unavailable artifacts never qualify.
+fn decided_statuses() -> [&'static str; 5] {
+    [
+        ArtifactStatus::AwaitingReview,
+        ArtifactStatus::Approved,
+        ArtifactStatus::Superseded,
+        ArtifactStatus::Rejected,
+        ArtifactStatus::Withdrawn,
+    ]
+    .map(ArtifactStatus::as_str)
+}
+
+fn output_stands(status: &str) -> bool {
+    status != ArtifactStatus::Rejected.as_str() && status != ArtifactStatus::Withdrawn.as_str()
+}
+
 async fn find_reusable(
     conn: &mut PgConnection,
     tenant_id: Uuid,
@@ -207,13 +269,13 @@ async fn find_reusable(
     output_schema: &str,
 ) -> Result<Option<ReusableArtifact>, ApiError> {
     let row = sqlx::query(
-        "SELECT id, output, citations, limitations, model, model_version, route,
+        "SELECT id, status, output, citations, limitations, model, model_version, route,
                 prompt_version, usage, synthetic
          FROM ai_artifacts
          WHERE tenant_id = $1 AND artifact_type = $2 AND input_hash = $3
            AND model = $4 AND prompt_version = $5 AND output_schema = $6
            AND output IS NOT NULL
-           AND status NOT IN ('invalidated', 'unavailable')
+           AND status = ANY($7)
          ORDER BY generated_at DESC NULLS LAST, id DESC
          LIMIT 1",
     )
@@ -223,9 +285,14 @@ async fn find_reusable(
     .bind(model)
     .bind(prompt_version)
     .bind(output_schema)
+    .bind(&decided_statuses()[..])
     .fetch_optional(&mut *conn)
     .await?;
-    Ok(row.map(|r| ReusableArtifact {
+    let r = match row {
+        Some(r) if output_stands(r.get::<String, _>("status").as_str()) => r,
+        _ => return Ok(None),
+    };
+    Ok(Some(ReusableArtifact {
         id: r.get("id"),
         output: r.get("output"),
         citations: r.get("citations"),

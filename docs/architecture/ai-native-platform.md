@@ -100,14 +100,20 @@ provider is called:
 1. capability callable; external processing permitted by tenant policy and
    the patient's `ai_external_processing` consent when the provider is
    external;
-2. **reuse**: an existing valid artifact with the same tenant, task, input
-   hash, model, prompt version and output-schema version is returned instead
-   (recorded via `reused_from`; no provider call, no quota consumption);
+2. **reuse**: the newest decided artifact with the same tenant, task, input
+   hash, model, prompt version and output-schema version controls the
+   decision. If it is `awaiting_review`, `approved` or `superseded` it is
+   returned instead (recorded via `reused_from`; no provider call, no quota
+   consumption); if it is `rejected` or `withdrawn` nothing is reused and a
+   fresh execution runs — an older approved copy never outranks a newer
+   professional rejection. `draft`, `invalidated` and `unavailable` rows
+   never qualify;
 3. **quotas**: hourly per-tenant (`DMIND_QUOTA_TENANT_PER_HOUR`) and
    per-task (`DMIND_QUOTA_TASK_PER_HOUR`) execution counts are checked under
    an advisory lock and a row is reserved in `ai_executions`, so concurrent
    requests cannot both pass the same check; exhaustion answers `429
-   ai_quota_exceeded`.
+   ai_quota_exceeded` with `Retry-After` derived from the window that is
+   actually exhausted (the later of the two when both are).
 
 A successful execution persists on the AIArtifact: tenant, patient/episode
 scope, task type, authorized input references (`input_refs`), input hash,
