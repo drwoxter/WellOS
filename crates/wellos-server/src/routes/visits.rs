@@ -1653,6 +1653,7 @@ pub(crate) fn vital_fact(measurement: &str, value: Decimal, source: Uuid) -> (St
 }
 
 /// Facts for a snapshot recorded entirely in one vital-sign row.
+#[cfg(feature = "dev-fixtures")]
 pub(crate) fn single_row_vital_facts(source: Uuid, v: &TriageVitals) -> Vec<(String, String)> {
     [
         ("systolic_mmhg", v.systolic_mmhg),

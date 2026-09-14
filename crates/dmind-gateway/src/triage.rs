@@ -6,7 +6,7 @@
 //! deterministic safety floor and the human review gate; the provider never
 //! diagnoses, assigns a professional, starts an encounter or notifies anyone.
 
-use crate::{hash_json, GatewayError};
+use crate::{hash_json, GatewayError, Usage};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use wellos_domain::ai::Confidence;
@@ -16,6 +16,8 @@ use wellos_domain::triage::{
 };
 
 pub const TRIAGE_TEMPLATE: &str = "triage-proposal@1.0.0";
+/// Prompt version of the deterministic offline proposer.
+pub const TRIAGE_DETERMINISTIC_PROMPT_VERSION: &str = "triage-proposal-deterministic.v1";
 
 /// Policy-filtered triage facts. `facts` carries the (reference, statement)
 /// pairs cited back in the proposal; the typed fields drive the heuristic.
@@ -41,7 +43,9 @@ pub struct TriageResponse {
     pub model: String,
     pub model_version: String,
     pub route: String,
+    pub prompt_version: String,
     pub input_hash: String,
+    pub usage: Option<Usage>,
 }
 
 pub fn triage_input_hash(req: &TriageRequest) -> String {
@@ -350,7 +354,9 @@ pub fn propose(req: &TriageRequest) -> Result<TriageResponse, GatewayError> {
         model: "dmind-fake-triage".into(),
         model_version: "0.1.0".into(),
         route: "local-fake".into(),
+        prompt_version: TRIAGE_DETERMINISTIC_PROMPT_VERSION.into(),
         input_hash: triage_input_hash(req),
+        usage: None,
     })
 }
 

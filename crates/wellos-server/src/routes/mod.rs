@@ -202,8 +202,7 @@ pub fn router(state: AppState) -> Router {
             "content-security-policy",
             "default-src 'none'; frame-ancestors 'none'",
         ));
-    let env = std::env::var("WELLOS_ENV").unwrap_or_else(|_| "development".to_string());
-    let router = if env != "development" {
+    let router = if state.runtime.env.is_deployed() {
         router.layer(header_layer(
             "strict-transport-security",
             "max-age=63072000; includeSubDomains",

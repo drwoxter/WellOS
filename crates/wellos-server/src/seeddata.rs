@@ -1,7 +1,13 @@
 //! Synthetic development seed data. All names, identifiers, and clinical
 //! values are clearly synthetic. No real PHI anywhere.
+//!
+//! Only compiled with the `dev-fixtures` feature, and only runs when the
+//! typed runtime permits it (`WELLOS_ENV=development|test` plus
+//! `WELLOS_ALLOW_SYNTHETIC_SEED=true`). Every tenant it creates is classed
+//! `synthetic`, and it refuses a database that holds any production tenant.
 
 use crate::routes::visits::single_row_vital_facts;
+use crate::runtime::RuntimeConfig;
 use dmind_gateway::triage::TRIAGE_TEMPLATE;
 use dmind_gateway::{ModelGateway, SummaryRequest, TriageRequest};
 use rand::RngCore;
@@ -41,7 +47,16 @@ pub fn generate_service_secret() -> String {
 
 /// Seed synthetic development data. Returns `None` when the database is
 /// already seeded (concurrent seeders serialize on an advisory lock).
-pub async fn seed(pool: &PgPool) -> anyhow::Result<Option<Seeded>> {
+pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Option<Seeded>> {
+    if !runtime.synthetic_seed_permitted() {
+        anyhow::bail!(
+            "synthetic seeding is not permitted (WELLOS_ENV={}, WELLOS_ALLOW_SYNTHETIC_SEED={}): \
+             it requires WELLOS_ENV=development|test, WELLOS_ALLOW_SYNTHETIC_SEED=true and a \
+             dev-fixtures build",
+            runtime.env,
+            runtime.allow_synthetic_seed
+        );
+    }
     let tenant_a = Uuid::now_v7();
     let tenant_b = Uuid::now_v7();
     let facility_a = Uuid::now_v7();
@@ -55,6 +70,17 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Option<Seeded>> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('wellos_seed'))")
         .execute(&mut *tx)
         .await?;
+    // Synthetic records never share a database with production tenants.
+    let (production_tenants,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM tenants WHERE data_class <> 'synthetic'")
+            .fetch_one(&mut *tx)
+            .await?;
+    if production_tenants > 0 {
+        tx.rollback().await?;
+        anyhow::bail!(
+            "refusing to seed: the database holds {production_tenants} non-synthetic tenant(s)"
+        );
+    }
     let (existing,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
         .fetch_one(&mut *tx)
         .await?;
@@ -85,12 +111,15 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Option<Seeded>> {
             }),
         ),
     ] {
-        sqlx::query("INSERT INTO tenants (id, cell, name, brand) VALUES ($1,'cell-dev-1',$2,$3)")
-            .bind(id)
-            .bind(name)
-            .bind(brand)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO tenants (id, cell, name, brand, data_class)
+             VALUES ($1,'cell-dev-1',$2,$3,'synthetic')",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(brand)
+        .execute(&mut *tx)
+        .await?;
     }
     sqlx::query("INSERT INTO facilities (id, tenant_id, name) VALUES ($1,$2,'Main Campus')")
         .bind(facility_a)
@@ -158,12 +187,6 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Option<Seeded>> {
             "research.diaz",
             "Rafael Díaz (Research)",
             "research_user",
-            false,
-        ),
-        (
-            "portal.patient",
-            "Patient Portal Placeholder",
-            "patient_representative",
             false,
         ),
         (
@@ -446,6 +469,16 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Option<Seeded>> {
             nurse: nurse_kim_id.expect("nurse.kim seeded"),
         },
     )
+    .await?;
+
+    // Every seeded dMind artifact is a deterministic fixture and is marked
+    // as such so no view can mistake it for a real model execution.
+    sqlx::query(
+        "UPDATE ai_artifacts SET synthetic = true, provider = COALESCE(provider, route)
+         WHERE tenant_id = ANY($1)",
+    )
+    .bind(vec![tenant_a, tenant_b])
+    .execute(&mut *tx)
     .await?;
 
     tx.commit().await?;

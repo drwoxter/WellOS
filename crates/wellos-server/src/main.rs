@@ -1,6 +1,5 @@
-use dmind_gateway::fake::FakeProvider;
-use std::sync::Arc;
-use wellos_server::state::{scribe_provider_from_env, AppState, AuthConfig};
+use wellos_server::runtime::{model_gateway_from_env, scribe_provider_from_env, RuntimeConfig};
+use wellos_server::state::{AppState, AuthConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -10,45 +9,50 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let env = std::env::var("WELLOS_ENV").unwrap_or_else(|_| "development".to_string());
-    // The development database fallback exists only for explicit local
-    // development; staging and production must configure DATABASE_URL.
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) if env == "development" => {
-            "postgres://wellos:wellos_dev@localhost:5432/wellos".into()
-        }
-        Err(_) => anyhow::bail!("DATABASE_URL is required when WELLOS_ENV is not development"),
-    };
-    // Browser origins must be explicit outside development; the localhost
-    // default is a development convenience only.
-    if env != "development" && std::env::var("WELLOS_ALLOWED_ORIGINS").is_err() {
-        anyhow::bail!("WELLOS_ALLOWED_ORIGINS is required when WELLOS_ENV is not development");
+    // One typed runtime: WELLOS_ENV is mandatory, fixtures are refused in
+    // staging/production and AI providers default to disabled.
+    let runtime = RuntimeConfig::from_env()?;
+    let env = runtime.env;
+    let database_url = wellos_server::database_url(env)?;
+    // Browser origins must be explicit outside local environments; the
+    // localhost default is a development convenience only.
+    if env.is_deployed() && std::env::var("WELLOS_ALLOWED_ORIGINS").is_err() {
+        anyhow::bail!("WELLOS_ALLOWED_ORIGINS is required with WELLOS_ENV={env}");
     }
     let bind_addr = std::env::var("WELLOS_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
 
-    // Fail closed before touching the network: dev tokens outside
-    // development, or a missing identity provider, abort startup.
-    let auth = AuthConfig::from_env()?;
+    // Fail closed before touching the network: dev tokens outside a local
+    // fixture build, or a missing identity provider, abort startup.
+    let auth = AuthConfig::from_env_for(env)?;
     if auth.dev_auth_enabled {
-        tracing::warn!("development authentication enabled (WELLOS_DEV_AUTH=true); never use outside local development");
+        tracing::warn!(
+            "development authentication enabled (WELLOS_DEV_AUTH=true); synthetic identities only"
+        );
     }
     // OIDC discovery and the initial JWKS fetch happen before serving
     // traffic: an unreachable or mispinned provider aborts startup.
     auth.initialize().await?;
 
+    // Providers are constructed before the database so a misconfigured real
+    // provider aborts startup instead of degrading to fixtures.
+    let gateway = model_gateway_from_env(&runtime)?;
+    let scribe = scribe_provider_from_env(&runtime)?;
+    let model_status = gateway.status();
+    let scribe_status = scribe.status();
+    tracing::info!(
+        environment = %env,
+        model_provider = runtime.model_provider.as_str(),
+        model_state = ?model_status.state,
+        scribe_provider = runtime.scribe_provider.as_str(),
+        scribe_state = ?scribe_status.state,
+        fixtures_compiled = wellos_server::runtime::DEV_FIXTURES_ENABLED,
+        "runtime configuration resolved"
+    );
+
     let pool = wellos_server::connect_pool(&database_url).await?;
     wellos_server::run_migrations(&pool).await?;
 
-    // Only the deterministic fake provider is wired in the development
-    // baseline; external providers require explicit configuration, consent,
-    // and policy routes (see ADR-0007).
-    let gateway = Arc::new(FakeProvider::new());
-    // Speech-to-text defaults to the deterministic offline fake; an external
-    // OpenAI-compatible endpoint is opt-in via WELLOS_SCRIBE_PROVIDER.
-    let scribe = scribe_provider_from_env(env == "development")?;
-    let mut state = AppState::with_auth(pool, gateway, auth);
-    state.scribe = scribe;
+    let state = AppState::from_runtime(pool, gateway, scribe, auth, runtime);
 
     let app = wellos_server::app(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;

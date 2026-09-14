@@ -21,3 +21,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["multipart"] }
+
+[features]
+# Deterministic offline fixtures (fake model + fake transcription). Never
+# enabled in production builds; the server also refuses them at runtime
+# outside WELLOS_ENV=development|test.
+dev-fixtures = []

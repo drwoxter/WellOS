@@ -1,9 +1,11 @@
+use wellos_server::runtime::RuntimeEnv;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://wellos:wellos_dev@localhost:5432/wellos".into());
+    let env = RuntimeEnv::from_env()?;
+    let database_url = wellos_server::database_url(env)?;
     let pool = wellos_server::connect_pool(&database_url).await?;
     wellos_server::run_migrations(&pool).await?;
-    println!("migrations applied");
+    println!("migrations applied ({env})");
     Ok(())
 }

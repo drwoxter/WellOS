@@ -32,7 +32,12 @@ async fn state_with(auth: AuthConfig) -> (AppState, Arc<FakeTranscription>) {
         .await
         .unwrap();
     if seeded.map(|(n,)| n).unwrap_or(0) == 0 {
-        wellos_server::seeddata::seed(&pool).await.unwrap();
+        wellos_server::seeddata::seed(
+            &pool,
+            &wellos_server::runtime::RuntimeConfig::test_fixtures(),
+        )
+        .await
+        .unwrap();
     }
     let gateway = Arc::new(dmind_gateway::fake::FakeProvider::new());
     let scribe = Arc::new(FakeTranscription::new());
@@ -411,7 +416,9 @@ async fn transcription_yields_valid_structured_draft_bound_to_note_version() {
     assert_eq!(st, StatusCode::OK, "{draft}");
     assert_eq!(draft["status"], json!("awaiting_review"));
     assert_eq!(draft["note_version"], json!(1));
-    assert_eq!(draft["route"], json!("dmind-fake"));
+    assert_eq!(draft["route"], json!("local-fake"));
+    assert_eq!(draft["model"], json!("dmind-fake"));
+    assert_eq!(draft["synthetic"], json!(true));
     let output = &draft["output"];
     assert_eq!(output["schema_version"], json!("scribe-draft.v1"));
     assert_eq!(output["source_note_version"], json!(1));
@@ -598,6 +605,9 @@ struct GatedTranscription {
 impl TranscriptionProvider for GatedTranscription {
     fn info(&self) -> wellos_domain::ai::ProviderInfo {
         self.inner.info()
+    }
+    fn status(&self) -> dmind_gateway::CapabilityStatus {
+        self.inner.status()
     }
     async fn transcribe(&self, req: &TranscriptionRequest) -> Result<Transcription, ScribeError> {
         self.started.notify_one();
