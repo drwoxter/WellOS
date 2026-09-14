@@ -409,6 +409,19 @@ pub async fn ingest_result(
     )
     .await
     .map_err(ApiError::internal)?;
+    super::risk::recalculate_after_change(
+        &mut tx,
+        &ctx,
+        &state,
+        tenant_id,
+        patient_id,
+        if is_amendment {
+            "result.amended"
+        } else {
+            "result.received"
+        },
+    )
+    .await?;
 
     tx.commit().await?;
 

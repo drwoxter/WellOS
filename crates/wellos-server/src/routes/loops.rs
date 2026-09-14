@@ -172,6 +172,8 @@ async fn transition(
     )
     .await
     .map_err(ApiError::internal)?;
+    super::risk::recalculate_after_change(&mut tx, ctx, state, sr.tenant_id, sr.patient_id, event)
+        .await?;
     tx.commit().await?;
     Ok(Json(json!({
         "id": id,

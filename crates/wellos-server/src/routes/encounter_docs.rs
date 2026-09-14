@@ -884,6 +884,15 @@ pub async fn sign(
     )
     .await
     .map_err(ApiError::internal)?;
+    crate::routes::risk::recalculate_after_change(
+        &mut tx,
+        &ctx,
+        &state,
+        enc.tenant_id,
+        enc.patient_id,
+        "encounter.note.signed",
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(
         json!({ "id": note_id, "status": "signed", "encounter_status": "completed" }),

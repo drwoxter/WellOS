@@ -11,6 +11,7 @@ pub mod lab;
 pub mod loops;
 pub mod oidc_login;
 pub mod patients;
+pub mod risk;
 pub mod scribe;
 pub mod session;
 pub mod visits;
@@ -60,6 +61,38 @@ pub fn router(state: AppState) -> Router {
             post(patients::register).get(patients::search),
         )
         .route("/api/v1/patients/:id", get(patients::chart))
+        .route("/api/v1/patients/:id/360", get(risk::patient_360))
+        .route("/api/v1/patients/:id/risk", get(risk::get_risk))
+        .route(
+            "/api/v1/patients/:id/risk/recalculate",
+            post(risk::recalculate_risk),
+        )
+        .route(
+            "/api/v1/patients/:id/risk/acknowledge",
+            post(risk::acknowledge),
+        )
+        .route(
+            "/api/v1/patients/:id/risk/review",
+            post(risk::mark_reviewed),
+        )
+        .route("/api/v1/patients/:id/risk/assign", post(risk::assign))
+        .route(
+            "/api/v1/patients/:id/risk/summary",
+            post(risk::propose_summary),
+        )
+        .route(
+            "/api/v1/patients/:id/risk/summary/:artifact_id/review",
+            post(risk::review_summary),
+        )
+        .route(
+            "/api/v1/patients/:id/risk/summary/:artifact_id/confirm",
+            post(risk::confirm_suggestion),
+        )
+        .route(
+            "/api/v1/patients/:id/risk/projection",
+            get(risk::projection),
+        )
+        .route("/api/v1/risk/worklist", get(risk::worklist))
         .route("/api/v1/encounters", post(encounters::start))
         .route("/api/v1/encounters/:id", get(encounter_docs::workspace))
         .route(

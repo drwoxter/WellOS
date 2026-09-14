@@ -437,6 +437,16 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<Option<Seeded>> {
         },
     )
     .await?;
+    seed_risk_scenarios(
+        &mut tx,
+        RiskSeed {
+            tenant: tenant_a,
+            facility: facility_a,
+            physician: dr_garcia,
+            nurse: nurse_kim_id.expect("nurse.kim seeded"),
+        },
+    )
+    .await?;
 
     tx.commit().await?;
     Ok(Some(Seeded {
@@ -2018,5 +2028,722 @@ async fn seed_demo_loop(
         .execute(&mut *tx)
         .await?;
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Patient 360 / risk engine demo scenarios
+// ---------------------------------------------------------------------------
+
+struct RiskSeed {
+    tenant: Uuid,
+    facility: Uuid,
+    physician: Uuid,
+    nurse: Uuid,
+}
+
+/// Six clearly identifiable synthetic risk scenarios (family name `Riskdemo`,
+/// identifiers `SYN-0101`..`SYN-0106`). Every record is written through the
+/// same tables the clinical workflows use, and the risk snapshots are
+/// computed by the real deterministic engine over those records — nothing
+/// is hand-scored.
+async fn seed_risk_scenarios(tx: &mut PgConnection, s: RiskSeed) -> anyhow::Result<()> {
+    let now = chrono::Utc::now();
+    let days = chrono::Duration::days;
+
+    // --- SYN-0101 Lucía: stable, low risk ---------------------------------
+    let lucia = risk_patient(tx, &s, "Lucía", "1992-05-20", "female", "SYN-0101").await?;
+    risk_allergy(
+        tx,
+        &s,
+        lucia,
+        "No known drug allergies (synthetic)",
+        "low",
+        now - days(400),
+    )
+    .await?;
+    risk_care_team(tx, &s, lucia, s.physician, now - days(400)).await?;
+    // Lucía has consented to share her governed risk projection (demo of the
+    // insurer-facing contract); no other Riskdemo patient has.
+    sqlx::query(
+        "INSERT INTO consents (id, tenant_id, patient_id, purpose, status)
+         VALUES ($1,$2,$3,$4,'active')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(s.tenant)
+    .bind(lucia)
+    .bind(crate::routes::risk::PROJECTION_CONSENT_PURPOSE)
+    .execute(&mut *tx)
+    .await?;
+    let enc = risk_signed_consultation(
+        tx,
+        &s,
+        lucia,
+        now - days(60),
+        (
+            "Routine check-up (synthetic)",
+            "Asymptomatic; exercises regularly (synthetic).",
+            "No active problems (synthetic).",
+            "Continue healthy habits; routine review in 12 months (synthetic).",
+        ),
+    )
+    .await?;
+    seed_vitals(
+        tx,
+        s.tenant,
+        enc,
+        lucia,
+        s.physician,
+        now - days(60),
+        (118, 76, 68, 14, "36.6", 99, "61.0", 167),
+    )
+    .await?;
+    for (hours_ago, value) in [(400 * 24, "91"), (200 * 24, "89"), (60 * 24, "88")] {
+        risk_result(
+            tx,
+            &s,
+            lucia,
+            "2345-7",
+            "Glucose [Mass/volume] in Serum",
+            value,
+            "mg/dL",
+            "70-99 mg/dL",
+            DemoStage::Closed,
+            hours_ago,
+        )
+        .await?;
+    }
+    risk_result(
+        tx,
+        &s,
+        lucia,
+        "2823-3",
+        "Potassium [Moles/volume] in Serum",
+        "4.0",
+        "mmol/L",
+        "3.5-5.1 mmol/L",
+        DemoStage::Closed,
+        60 * 24,
+    )
+    .await?;
+
+    // --- SYN-0102 Ramón: worsening chronic complexity ---------------------
+    let ramon = risk_patient(tx, &s, "Ramón", "1958-02-11", "male", "SYN-0102").await?;
+    risk_condition(
+        tx,
+        &s,
+        ramon,
+        "E11.9",
+        "Type 2 diabetes mellitus (synthetic)",
+        now - days(3 * 365),
+    )
+    .await?;
+    risk_condition(
+        tx,
+        &s,
+        ramon,
+        "N18.3",
+        "Chronic kidney disease stage 3 (synthetic)",
+        now - days(20),
+    )
+    .await?;
+    risk_condition(
+        tx,
+        &s,
+        ramon,
+        "I50.9",
+        "Heart failure (synthetic)",
+        now - days(10),
+    )
+    .await?;
+    for (name, at) in [
+        ("Metformin 850 mg twice daily (synthetic)", 3 * 365),
+        ("Insulin glargine 20 U nightly (synthetic)", 400),
+        ("Enalapril 10 mg daily (synthetic)", 400),
+        ("Atorvastatin 40 mg nightly (synthetic)", 400),
+        ("Furosemide 40 mg daily (synthetic)", 10),
+        ("Bisoprolol 2.5 mg daily (synthetic)", 10),
+    ] {
+        risk_medication(tx, &s, ramon, name, now - days(at)).await?;
+    }
+    risk_allergy(tx, &s, ramon, "Sulfonamide", "low", now - days(3 * 365)).await?;
+    risk_care_team(tx, &s, ramon, s.physician, now - days(3 * 365)).await?;
+    for (at, value) in [(300, "7.4"), (150, "8.1"), (20, "9.0")] {
+        risk_result(
+            tx,
+            &s,
+            ramon,
+            "4548-4",
+            "Hemoglobin A1c/Hemoglobin.total in Blood",
+            value,
+            "%",
+            "4.0-5.6 %",
+            DemoStage::Closed,
+            at * 24,
+        )
+        .await?;
+    }
+    for (at, value) in [(200, "1.4"), (15, "1.9")] {
+        risk_result(
+            tx,
+            &s,
+            ramon,
+            "2160-0",
+            "Creatinine [Mass/volume] in Serum",
+            value,
+            "mg/dL",
+            "0.7-1.2 mg/dL",
+            DemoStage::Closed,
+            at * 24,
+        )
+        .await?;
+    }
+    risk_result(
+        tx,
+        &s,
+        ramon,
+        "2093-3",
+        "Cholesterol [Mass/volume] in Serum",
+        "212",
+        "mg/dL",
+        "<200 mg/dL",
+        DemoStage::Closed,
+        400 * 24,
+    )
+    .await?;
+    risk_result(
+        tx,
+        &s,
+        ramon,
+        "2823-3",
+        "Potassium [Moles/volume] in Serum",
+        "5.6",
+        "mmol/L",
+        "3.5-5.1 mmol/L",
+        DemoStage::Received,
+        2 * 24,
+    )
+    .await?;
+    for at in [45, 12] {
+        risk_completed_visit(
+            tx,
+            &s,
+            ramon,
+            ArrivalKind::Urgent,
+            "emergency",
+            "Dyspnoea and leg swelling (synthetic)",
+            now - days(at),
+        )
+        .await?;
+    }
+    let enc = risk_signed_consultation(
+        tx,
+        &s,
+        ramon,
+        now - days(12),
+        (
+            "Worsening dyspnoea and oedema (synthetic)",
+            "Two unscheduled visits in six weeks; reduced exercise tolerance (synthetic).",
+            "Decompensating heart failure with progressive renal impairment and poor glycaemic control (synthetic).",
+            "Adjust diuretics; nephrology and cardiology review; repeat potassium and creatinine (synthetic).",
+        ),
+    )
+    .await?;
+    seed_vitals(
+        tx,
+        s.tenant,
+        enc,
+        ramon,
+        s.physician,
+        now - days(12),
+        (152, 94, 92, 20, "36.9", 94, "88.0", 172),
+    )
+    .await?;
+    // A snapshot from 30 days ago, computed from the records that existed
+    // then, makes the current trend "worsening" rather than "unknown".
+    risk_snapshot_as_of(tx, &s, ramon, now - days(30)).await?;
+
+    // --- SYN-0103 Teresa: critical unreviewed diagnostic result -----------
+    let teresa = risk_patient(tx, &s, "Teresa", "1949-08-30", "female", "SYN-0103").await?;
+    risk_condition(
+        tx,
+        &s,
+        teresa,
+        "I10",
+        "Essential hypertension (synthetic)",
+        now - days(5 * 365),
+    )
+    .await?;
+    risk_medication(
+        tx,
+        &s,
+        teresa,
+        "Amlodipine 5 mg daily (synthetic)",
+        now - days(5 * 365),
+    )
+    .await?;
+    risk_medication(
+        tx,
+        &s,
+        teresa,
+        "Spironolactone 25 mg daily (synthetic)",
+        now - days(30),
+    )
+    .await?;
+    risk_allergy(tx, &s, teresa, "Latex", "low", now - days(5 * 365)).await?;
+    risk_care_team(tx, &s, teresa, s.physician, now - days(5 * 365)).await?;
+    let enc = risk_signed_consultation(
+        tx,
+        &s,
+        teresa,
+        now - days(100),
+        (
+            "Hypertension review (synthetic)",
+            "Well; home readings slightly above target (synthetic).",
+            "Hypertension, suboptimal control (synthetic).",
+            "Add spironolactone; check electrolytes in one month (synthetic).",
+        ),
+    )
+    .await?;
+    seed_vitals(
+        tx,
+        s.tenant,
+        enc,
+        teresa,
+        s.physician,
+        now - days(100),
+        (146, 88, 74, 14, "36.7", 97, "70.5", 160),
+    )
+    .await?;
+    risk_result(
+        tx,
+        &s,
+        teresa,
+        "2093-3",
+        "Cholesterol [Mass/volume] in Serum",
+        "188",
+        "mg/dL",
+        "<200 mg/dL",
+        DemoStage::Closed,
+        2 * 365 * 24,
+    )
+    .await?;
+    // Critical potassium received three hours ago and not yet reviewed:
+    // the lab pipeline's alert and follow-up task are recreated by the loop
+    // seeder, so acute safety and diagnostic risk are both critical.
+    risk_result(
+        tx,
+        &s,
+        teresa,
+        "2823-3",
+        "Potassium [Moles/volume] in Serum",
+        "6.8",
+        "mmol/L",
+        "3.5-5.1 mmol/L",
+        DemoStage::Received,
+        3,
+    )
+    .await?;
+
+    // --- SYN-0104 Hugo: medication / allergy conflict ---------------------
+    let hugo = risk_patient(tx, &s, "Hugo", "1988-12-05", "male", "SYN-0104").await?;
+    risk_allergy(tx, &s, hugo, "Penicillin", "high", now - days(2 * 365)).await?;
+    risk_condition(
+        tx,
+        &s,
+        hugo,
+        "J02.9",
+        "Acute pharyngitis (synthetic)",
+        now - days(1),
+    )
+    .await?;
+    risk_medication(
+        tx,
+        &s,
+        hugo,
+        "Amoxicillin 500 mg every 8 h (synthetic)",
+        now - days(1),
+    )
+    .await?;
+    risk_care_team(tx, &s, hugo, s.physician, now - days(1)).await?;
+    let enc = risk_signed_consultation(
+        tx,
+        &s,
+        hugo,
+        now - days(1),
+        (
+            "Sore throat and fever (synthetic)",
+            "Three days of odynophagia and fever (synthetic).",
+            "Acute pharyngitis (synthetic).",
+            "Antibiotic course prescribed; review if no improvement in 72 h (synthetic).",
+        ),
+    )
+    .await?;
+    seed_vitals(
+        tx,
+        s.tenant,
+        enc,
+        hugo,
+        s.physician,
+        now - days(1),
+        (124, 78, 88, 16, "38.1", 98, "79.0", 180),
+    )
+    .await?;
+
+    // --- SYN-0105 Nora: preventive-care gaps ------------------------------
+    let nora = risk_patient(tx, &s, "Nora", "1961-04-18", "female", "SYN-0105").await?;
+    risk_condition(
+        tx,
+        &s,
+        nora,
+        "E11.9",
+        "Type 2 diabetes mellitus (synthetic)",
+        now - days(4 * 365),
+    )
+    .await?;
+    risk_condition(
+        tx,
+        &s,
+        nora,
+        "I10",
+        "Essential hypertension (synthetic)",
+        now - days(4 * 365),
+    )
+    .await?;
+    risk_medication(
+        tx,
+        &s,
+        nora,
+        "Metformin 500 mg twice daily (synthetic)",
+        now - days(4 * 365),
+    )
+    .await?;
+    risk_allergy(tx, &s, nora, "Codeine", "low", now - days(4 * 365)).await?;
+    risk_care_team(tx, &s, nora, s.physician, now - days(4 * 365)).await?;
+    let enc = risk_signed_consultation(
+        tx,
+        &s,
+        nora,
+        now - days(500),
+        (
+            "Diabetes follow-up (synthetic)",
+            "No complaints; irregular attendance (synthetic).",
+            "Type 2 diabetes and hypertension, stable (synthetic).",
+            "Repeat HbA1c, renal function and lipids; review in 6 months (synthetic).",
+        ),
+    )
+    .await?;
+    seed_vitals(
+        tx,
+        s.tenant,
+        enc,
+        nora,
+        s.physician,
+        now - days(500),
+        (138, 86, 76, 14, "36.6", 98, "74.0", 162),
+    )
+    .await?;
+    risk_result(
+        tx,
+        &s,
+        nora,
+        "4548-4",
+        "Hemoglobin A1c/Hemoglobin.total in Blood",
+        "7.2",
+        "%",
+        "4.0-5.6 %",
+        DemoStage::Closed,
+        400 * 24,
+    )
+    .await?;
+
+    // --- SYN-0106 Iván: insufficient data ---------------------------------
+    // Registered only; no encounters, results, problems or medications.
+    let ivan = risk_patient(tx, &s, "Iván", "1979-09-09", "male", "SYN-0106").await?;
+
+    for pid in [lucia, ramon, teresa, hugo, nora, ivan] {
+        risk_snapshot_as_of(tx, &s, pid, now).await?;
+    }
+    Ok(())
+}
+
+async fn risk_patient(
+    tx: &mut PgConnection,
+    s: &RiskSeed,
+    given: &str,
+    birth: &str,
+    sex: &str,
+    mrn: &str,
+) -> anyhow::Result<Uuid> {
+    let pid = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO patients (id, tenant_id, facility_id, family_name, given_name, birth_date, sex, identifier)
+         VALUES ($1,$2,$3,'Riskdemo',$4,$5::date,$6,$7)",
+    )
+    .bind(pid)
+    .bind(s.tenant)
+    .bind(s.facility)
+    .bind(given)
+    .bind(birth)
+    .bind(sex)
+    .bind(mrn)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO consents (id, tenant_id, patient_id, purpose, status) VALUES ($1,$2,$3,'care_delivery','active')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(s.tenant)
+    .bind(pid)
+    .execute(&mut *tx)
+    .await?;
+    Ok(pid)
+}
+
+async fn risk_condition(
+    tx: &mut PgConnection,
+    s: &RiskSeed,
+    patient: Uuid,
+    code: &str,
+    display: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO conditions (id, tenant_id, patient_id, code, display, clinical_status, recorded_at)
+         VALUES ($1,$2,$3,$4,$5,'active',$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(s.tenant)
+    .bind(patient)
+    .bind(code)
+    .bind(display)
+    .bind(at)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+async fn risk_medication(
+    tx: &mut PgConnection,
+    s: &RiskSeed,
+    patient: Uuid,
+    name: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO medications (id, tenant_id, patient_id, name, status, recorded_at)
+         VALUES ($1,$2,$3,$4,'active',$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(s.tenant)
+    .bind(patient)
+    .bind(name)
+    .bind(at)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+async fn risk_allergy(
+    tx: &mut PgConnection,
+    s: &RiskSeed,
+    patient: Uuid,
+    substance: &str,
+    criticality: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO allergies (id, tenant_id, patient_id, substance, criticality, recorded_at)
+         VALUES ($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(s.tenant)
+    .bind(patient)
+    .bind(substance)
+    .bind(criticality)
+    .bind(at)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+async fn risk_care_team(
+    tx: &mut PgConnection,
+    s: &RiskSeed,
+    patient: Uuid,
+    professional: Uuid,
+    since: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO care_team_assignments
+         (id, tenant_id, facility_id, patient_id, assignee_user_id, function, active,
+          starts_at, source, assigned_by, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,'treating_professional',true,$6,'registration',$7,$6,$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(s.tenant)
+    .bind(s.facility)
+    .bind(patient)
+    .bind(professional)
+    .bind(since)
+    .bind(s.nurse)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// A completed consultation with a signed note, returned for vitals.
+async fn risk_signed_consultation(
+    tx: &mut PgConnection,
+    s: &RiskSeed,
+    patient: Uuid,
+    started: chrono::DateTime<chrono::Utc>,
+    (reason, history, assessment, plan): (&str, &str, &str, &str),
+) -> anyhow::Result<Uuid> {
+    let enc = Uuid::now_v7();
+    let signed_at = started + chrono::Duration::minutes(25);
+    sqlx::query(
+        "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id, status,
+                                 encounter_type, started_at, completed_at)
+         VALUES ($1,$2,$3,$4,$5,'completed','consultation',$6,$7)",
+    )
+    .bind(enc)
+    .bind(s.tenant)
+    .bind(s.facility)
+    .bind(patient)
+    .bind(s.physician)
+    .bind(started)
+    .bind(signed_at)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO encounter_notes
+         (id, tenant_id, encounter_id, patient_id, author_id, status, version,
+          reason_for_encounter, history_present_illness, assessment, plan,
+          created_at, updated_at, signed_at, signed_by)
+         VALUES ($1,$2,$3,$4,$5,'signed',2,$6,$7,$8,$9,$10,$11,$11,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(s.tenant)
+    .bind(enc)
+    .bind(patient)
+    .bind(s.physician)
+    .bind(reason)
+    .bind(history)
+    .bind(assessment)
+    .bind(plan)
+    .bind(started)
+    .bind(signed_at)
+    .execute(&mut *tx)
+    .await?;
+    Ok(enc)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn risk_result(
+    tx: &mut PgConnection,
+    s: &RiskSeed,
+    patient: Uuid,
+    code_loinc: &'static str,
+    display: &'static str,
+    value: &str,
+    unit: &'static str,
+    reference_range: &'static str,
+    stage: DemoStage,
+    hours_ago: i64,
+) -> anyhow::Result<()> {
+    seed_demo_loop(
+        tx,
+        s.tenant,
+        s.facility,
+        s.physician,
+        &DemoLoopSpec {
+            patient_id: patient,
+            code_loinc,
+            display,
+            value: value.parse()?,
+            unit,
+            reference_range,
+            stage,
+            hours_ago,
+        },
+    )
+    .await
+}
+
+async fn risk_completed_visit(
+    tx: &mut PgConnection,
+    s: &RiskSeed,
+    patient: Uuid,
+    arrival_kind: ArrivalKind,
+    service: &str,
+    reason: &str,
+    arrived: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    let v = VisitSeed {
+        id: Uuid::now_v7(),
+        facility: s.facility,
+        patient,
+        status: "completed",
+        arrival_kind,
+        service,
+        reason,
+        scheduled_at: None,
+        arrived_at: Some(arrived),
+        triage_started_at: Some(arrived + chrono::Duration::minutes(5)),
+        ready_at: Some(arrived + chrono::Duration::minutes(20)),
+        consultation_started_at: Some(arrived + chrono::Duration::minutes(40)),
+        closed_at: None,
+        closed_reason: None,
+        priority: Some(Priority::Urgent),
+        handoff_summary: Some("Urgent arrival; assessed and treated (synthetic)."),
+        encounter_id: None,
+        version: 5,
+        created_by: s.nurse,
+    };
+    insert_visit(tx, s.tenant, &v).await?;
+    sqlx::query("UPDATE visits SET completed_at = $2 WHERE id = $1")
+        .bind(v.id)
+        .bind(arrived + chrono::Duration::hours(2))
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
+/// Store a deterministic risk snapshot computed from the patient's records
+/// as they stood at `as_of` (facts recorded later are excluded).
+async fn risk_snapshot_as_of(
+    tx: &mut PgConnection,
+    s: &RiskSeed,
+    patient: Uuid,
+    as_of: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    let birth_date: chrono::NaiveDate =
+        sqlx::query_scalar("SELECT birth_date FROM patients WHERE id = $1")
+            .bind(patient)
+            .fetch_one(&mut *tx)
+            .await?;
+    let mut input = crate::routes::risk::collect_input(tx, s.tenant, patient, birth_date, as_of)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}: {}", e.code, e.message))?;
+    input.alerts.retain(|a| a.created_at <= as_of);
+    input.visits.retain(|v| v.occurred_at <= as_of);
+    if input
+        .latest_vitals
+        .as_ref()
+        .is_some_and(|v| v.recorded_at > as_of)
+    {
+        input.latest_vitals = None;
+    }
+    input.conditions.retain(|c| c.recorded_at <= as_of);
+    input.medications.retain(|m| m.recorded_at <= as_of);
+    input.allergies.retain(|a| a.recorded_at <= as_of);
+    input.results.retain(|r| r.effective_at <= as_of);
+    input.open_requests.retain(|r| r.created_at <= as_of);
+    input.encounters.retain(|e| e.started_at <= as_of);
+    input.tasks.retain(|t| t.created_at <= as_of);
+    crate::routes::risk::store_snapshot(tx, s.tenant, patient, s.facility, &input, "seed", None)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}: {}", e.code, e.message))?;
     Ok(())
 }

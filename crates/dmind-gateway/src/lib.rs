@@ -7,6 +7,7 @@
 //! clinical workflow.
 
 pub mod fake;
+pub mod risk;
 pub mod scribe;
 pub mod trends;
 pub mod triage;
@@ -15,6 +16,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use wellos_domain::ai::ResultSummaryV1;
 
+pub use risk::{RiskSummaryRequest, RiskSummaryResponse};
 pub use triage::{TriageRequest, TriageResponse};
 
 /// A request for an A1/A2 structured result summary.
@@ -62,13 +64,23 @@ pub trait ModelGateway: Send + Sync {
     /// the result to the deterministic safety floor and gates it behind an
     /// explicit human decision.
     async fn propose_triage(&self, req: &TriageRequest) -> Result<TriageResponse, GatewayError>;
+
+    /// A2 risk explanation: turns a deterministic risk assessment into a
+    /// structured `risk-summary.v1` proposal. The caller aligns the output
+    /// to the deterministic floor and gates every suggestion behind an
+    /// explicit human confirmation.
+    async fn summarize_risk(
+        &self,
+        req: &RiskSummaryRequest,
+    ) -> Result<RiskSummaryResponse, GatewayError>;
 }
 
 pub fn input_hash(req: &SummaryRequest) -> String {
     hash_json(req)
 }
 
-pub(crate) fn hash_json<T: Serialize>(value: &T) -> String {
+/// Stable SHA-256 of a value's canonical JSON, used as provenance input hash.
+pub fn hash_json<T: Serialize>(value: &T) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(value).expect("serializable"));

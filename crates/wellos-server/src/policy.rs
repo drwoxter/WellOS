@@ -74,6 +74,17 @@ pub mod actions {
     pub const CARE_TEAM_ASSIGN: &str = "care_team.assign";
     /// Acknowledge directed internal alerts.
     pub const ALERT_ACKNOWLEDGE: &str = "alert.acknowledge";
+    /// Read a patient's deterministic risk assessment, its history and the
+    /// facility risk worklist.
+    pub const RISK_READ: &str = "risk.read";
+    /// Recalculate risk, acknowledge a risk item, assign a follow-up owner.
+    pub const RISK_MANAGE: &str = "risk.manage";
+    /// Clinical review of a risk item, dMind risk-summary proposal and its
+    /// human review, confirming a suggestion into a follow-up task.
+    pub const RISK_REVIEW: &str = "risk.review";
+    /// Read the minimal consent-gated risk projection prepared for future
+    /// insurer collaboration. Never a coverage, pricing or denial decision.
+    pub const RISK_PROJECTION_READ: &str = "risk.projection_read";
 
     pub const ALL: &[&str] = &[
         PATIENT_REGISTER,
@@ -101,6 +112,10 @@ pub mod actions {
         TRIAGE_WRITE,
         CARE_TEAM_ASSIGN,
         ALERT_ACKNOWLEDGE,
+        RISK_READ,
+        RISK_MANAGE,
+        RISK_REVIEW,
+        RISK_PROJECTION_READ,
     ];
 
     /// Whether `s` names a known action (used to validate service scopes).
@@ -127,10 +142,15 @@ pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
         | PATIENT_NOTIFY
         | LOOP_CLOSE
         | AI_REVIEW
-        | TRIAGE_WRITE => &[Purpose::Treatment],
-        VISIT_MANAGE | VISIT_READ | CARE_TEAM_ASSIGN | ALERT_ACKNOWLEDGE => {
+        | TRIAGE_WRITE
+        | RISK_REVIEW => &[Purpose::Treatment],
+        VISIT_MANAGE | VISIT_READ | CARE_TEAM_ASSIGN | ALERT_ACKNOWLEDGE | RISK_MANAGE => {
             &[Purpose::Treatment, Purpose::Operations]
         }
+        RISK_READ => &[Purpose::Treatment, Purpose::Operations, Purpose::Quality],
+        // The insurer projection is an operational data-sharing surface:
+        // never a treatment context, never emergency access.
+        RISK_PROJECTION_READ => &[Purpose::Operations],
         RESULT_INGEST => &[Purpose::Treatment, Purpose::Operations],
         AUDIT_READ => &[Purpose::Operations, Purpose::Quality],
         CONSENT_WRITE => &[Purpose::Treatment, Purpose::Operations],
@@ -162,6 +182,9 @@ pub mod roles {
     pub const PATIENT_REP: &str = "patient_representative";
     pub const DMIND_SERVICE: &str = "dmind_service_agent";
     pub const LAB_INTERFACE: &str = "lab_interface_agent";
+    /// Machine role for future insurer integrations: consent-gated risk
+    /// projection only, no chart, notes or clinical writes.
+    pub const INSURER_INTEGRATION: &str = "insurer_integration_agent";
     /// Grants no actions by itself: marks users allowed to invoke
     /// break-glass emergency read access.
     pub const BREAK_GLASS_AUTHORIZED: &str = "break_glass_authorized";
@@ -178,6 +201,7 @@ pub mod roles {
         PATIENT_REP,
         DMIND_SERVICE,
         LAB_INTERFACE,
+        INSURER_INTEGRATION,
         BREAK_GLASS_AUTHORIZED,
     ];
 }
@@ -213,6 +237,9 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             TRIAGE_WRITE,
             CARE_TEAM_ASSIGN,
             ALERT_ACKNOWLEDGE,
+            RISK_READ,
+            RISK_MANAGE,
+            RISK_REVIEW,
             TENANT_META_READ,
         ],
         // Nurses have no PATIENT_NOTIFY grant: result notification requires
@@ -228,13 +255,19 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             TRIAGE_WRITE,
             CARE_TEAM_ASSIGN,
             ALERT_ACKNOWLEDGE,
+            RISK_READ,
+            RISK_MANAGE,
+            RISK_REVIEW,
             TENANT_META_READ,
         ],
         LAB => &[RESULT_INGEST, WORKLIST_READ, TENANT_META_READ],
+        // Pharmacists read risk (medication/allergy safety domain) but the
+        // review actions stay with the responsible clinical professional.
         PHARMACIST => &[
             PATIENT_SEARCH,
             PATIENT_READ,
             WORKLIST_READ,
+            RISK_READ,
             TENANT_META_READ,
         ],
         CLINICAL_ADMIN => &[
@@ -244,6 +277,9 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             VISIT_MANAGE,
             VISIT_READ,
             CARE_TEAM_ASSIGN,
+            RISK_READ,
+            RISK_MANAGE,
+            RISK_PROJECTION_READ,
             JOBS_RUN,
             TENANT_META_READ,
         ],
@@ -267,6 +303,7 @@ pub fn role_allows(role: &str, action: &str) -> bool {
         // dMind generates suggestions only; it never writes clinical results.
         DMIND_SERVICE => &[],
         LAB_INTERFACE => &[RESULT_INGEST],
+        INSURER_INTEGRATION => &[RISK_PROJECTION_READ],
         BREAK_GLASS_AUTHORIZED => &[],
         _ => &[],
     };
@@ -287,6 +324,7 @@ pub fn null_facility_is_tenant_wide(role: &str) -> bool {
             | roles::SECURITY_AUDITOR
             | roles::DMIND_SERVICE
             | roles::LAB_INTERFACE
+            | roles::INSURER_INTEGRATION
             | roles::BREAK_GLASS_AUTHORIZED
     )
 }
@@ -473,7 +511,8 @@ pub async fn authorize_with_limit(
         | actions::LOOP_CLOSE
         | actions::AI_REVIEW
         | actions::ENCOUNTER_DOCUMENT
-        | actions::ENCOUNTER_SIGN => true,
+        | actions::ENCOUNTER_SIGN
+        | actions::RISK_REVIEW => true,
         // Chart reads require a relationship for physicians; other clinical
         // roles read within their facility scope (enforced above), and
         // tenant-wide administrative reads remain explicit and audited.
@@ -556,7 +595,10 @@ async fn has_care_relationship(
     if encounter.is_some() {
         return Ok(true);
     }
-    if action != actions::PATIENT_READ {
+    // Risk review is a care-coordination judgement: an explicit care-team
+    // assignment (including the risk follow-up owner assigned from the
+    // worklist) establishes the relationship, as it does for chart reads.
+    if action != actions::PATIENT_READ && action != actions::RISK_REVIEW {
         return Ok(false);
     }
     let assignment: Option<(Uuid,)> = sqlx::query_as(

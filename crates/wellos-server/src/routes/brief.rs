@@ -221,7 +221,7 @@ pub(crate) async fn diagnostic_history(
             .or_insert_with(|| Series::new(r.get("display"), series_unit.clone()));
         entry.results.push(json!({
             "id": id,
-            "service_request_id": r.get::<Uuid,_>("service_request_id"),
+            "service_request_id": r.get::<Option<Uuid>,_>("service_request_id"),
             "value": value,
             "unit": unit,
             "normalized_value": normalized,
@@ -363,7 +363,7 @@ pub(crate) async fn patient_brief(
             "priority": r.get::<String,_>("priority"),
             "status": r.get::<String,_>("status"),
             "due_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("due_at"),
-            "service_request_id": r.get::<Uuid,_>("service_request_id"),
+            "service_request_id": r.get::<Option<Uuid>,_>("service_request_id"),
         })
     })
     .collect::<Vec<_>>();
@@ -450,7 +450,7 @@ async fn recent_abnormal(
             };
             abnormal.push(json!({
                 "id": r.get::<Uuid,_>("id"),
-                "service_request_id": r.get::<Uuid,_>("service_request_id"),
+                "service_request_id": r.get::<Option<Uuid>,_>("service_request_id"),
                 "code": r.get::<String,_>("code_loinc"),
                 "display": r.get::<String,_>("display"),
                 "value": value,
