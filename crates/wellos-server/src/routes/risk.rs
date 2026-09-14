@@ -1366,7 +1366,15 @@ pub async fn worklist(
                 ru.display_name AS reviewer,
                 CASE WHEN rr.id IS NULL THEN 'unreviewed'
                      WHEN {rank_review} <= {rank_focus} THEN rr.status
-                     ELSE 'unreviewed' END AS effective_review
+                     ELSE 'unreviewed' END AS effective_review,
+                (EXISTS (SELECT 1 FROM encounters e
+                         WHERE e.tenant_id = $1 AND e.patient_id = ra.patient_id
+                           AND e.practitioner_id = $11)
+                 OR EXISTS (SELECT 1 FROM care_team_assignments c
+                            WHERE c.tenant_id = $1 AND c.patient_id = ra.patient_id
+                              AND c.assignee_user_id = $11 AND c.active
+                              AND c.starts_at <= now()
+                              AND (c.ends_at IS NULL OR c.ends_at > now()))) AS related
          FROM risk_assessments ra
          JOIN patients p ON p.id = ra.patient_id
          JOIN facilities f ON f.id = ra.facility_id
@@ -1406,6 +1414,7 @@ pub async fn worklist(
         .bind(include_low)
         .bind(review.map(|r| r.as_str()))
         .bind(WORKLIST_LIMIT)
+        .bind(ctx.user_id)
         .fetch_all(&state.pool)
         .await?;
 
@@ -1481,8 +1490,7 @@ pub async fn worklist(
                 "can_assign": in_scope(&manage_scope, facility_id),
                 "can_review": in_scope(&review_scope, facility_id),
                 // Display hint only; the Patient 360 guard is authoritative.
-                "can_open_360": !can_open_needs_relationship
-                    || r.get::<Option<Uuid>,_>("owner_id") == Some(ctx.user_id),
+                "can_open_360": !can_open_needs_relationship || r.get::<bool,_>("related"),
             },
         }));
     }
