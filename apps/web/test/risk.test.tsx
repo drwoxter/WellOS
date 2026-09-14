@@ -972,6 +972,31 @@ describe("dMind risk summary panel", () => {
       screen.queryByRole("button", { name: "Create follow-up task…" }),
     ).not.toBeInTheDocument();
   });
+
+  it("keeps an approved summary visible after risk was recalculated", () => {
+    renderPanel(
+      section({
+        summary: {
+          ...SUMMARY,
+          assessment_id: "as-0",
+          for_current_assessment: false,
+          confirmed_tasks: 1,
+        },
+      }),
+    );
+    expect(screen.getByRole("note")).toHaveTextContent(
+      /explains an earlier assessment/,
+    );
+    expect(
+      screen.getByText("A critical potassium result is awaiting review."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Create follow-up task…" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Generate a new summary" }),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("consultation cockpit risk", () => {

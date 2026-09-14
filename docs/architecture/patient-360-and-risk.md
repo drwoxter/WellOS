@@ -135,8 +135,15 @@ is no longer current (`409 artifact_stale`). Only after approval may a
 follow-up suggestion be turned into a task through `POST .../confirm`
 (`suggestion_index`, optional `priority`), which requires an approved
 artifact, refuses double confirmation (`409 already_confirmed`), records
-`risk.suggestion.confirmed`, and creates an ordinary `follow_up_tasks` row
-owned by the confirming professional. There is no
+`risk.suggestion.confirmed`, creates an ordinary `follow_up_tasks` row
+owned by the confirming professional and recalculates risk in the same
+transaction (open tasks are a care-coordination input). Because that
+recalculation produces a new snapshot, the `summary` returned with a risk
+section is the artifact bound to the current assessment or, failing that,
+the most recent *approved* artifact of an earlier assessment, flagged
+`for_current_assessment: false` so the UI can say it explains an earlier
+assessment while its remaining suggestions stay confirmable. Awaiting
+artifacts of older assessments are superseded and never shown. There is no
 path from an artifact to an order, a prescription, a diagnosis, a source
 record change or an insurance decision.
 
@@ -230,7 +237,7 @@ visible focus.
 | SYN-0103 | Teresa Riskdemo | critical potassium awaiting review | critical (diagnostic results) |
 | SYN-0104 | Hugo Riskdemo | penicillin allergy + active amoxicillin, duplicate NSAID | critical (medication & allergy safety) |
 | SYN-0105 | Nora Riskdemo | preventive gaps: overdue HbA1c, renal, lipid, BP; no responsible professional | high |
-| SYN-0106 | Iván Riskdemo | registered only, no clinical data | insufficient data |
+| SYN-0106 | Iván Riskdemo | registered with a treating professional, no clinical data | insufficient data |
 
 ## Clinical governance before production use
 

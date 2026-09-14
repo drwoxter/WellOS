@@ -766,6 +766,11 @@ export function RiskSummaryPanel({
           {out.raised_to_floor ? (
             <p className="muted">{t(lang, "riskRaisedToFloor")}</p>
           ) : null}
+          {summary.for_current_assessment === false ? (
+            <p className="muted" role="note">
+              {t(lang, "riskSummaryEarlierAssessment")}
+            </p>
+          ) : null}
           <ul className="risk-explanations">
             {sortDomains(out.domains)
               .filter((d) => !compact || d.reasons.length > 0)

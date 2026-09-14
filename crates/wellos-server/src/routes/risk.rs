@@ -120,7 +120,7 @@ fn parse_domain_key(s: &str) -> Result<String, ApiError> {
 /// the same patient (manual, encounter sign, result review) commit one
 /// `is_current` snapshot at a time instead of racing on the unique index.
 async fn lock_patient_risk(conn: &mut PgConnection, patient_id: Uuid) -> Result<(), ApiError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('risk:' || $1::text, 0))")
         .bind(patient_id.to_string())
         .execute(&mut *conn)
         .await?;
@@ -737,29 +737,65 @@ async fn load_history(
     .collect())
 }
 
+const SUMMARY_ARTIFACT_COLUMNS: &str = "a.id, a.status, a.output, a.model, a.model_version, a.route, a.template,
+            a.risk_assessment_id, a.generated_at, a.reviewed_at, a.review_decision, a.review_note,
+            a.review_detail, u.display_name AS reviewer,
+            (SELECT count(*) FROM follow_up_tasks t WHERE t.ai_artifact_id = a.id) AS confirmed_tasks";
+
+/// The summary bound to `assessment_id`, if any.
 async fn load_summary_artifact(
     conn: &mut PgConnection,
     tenant_id: Uuid,
     assessment_id: Uuid,
 ) -> Result<Option<Value>, ApiError> {
-    let row = sqlx::query(
-        "SELECT a.id, a.status, a.output, a.model, a.model_version, a.route, a.template,
-                a.generated_at, a.reviewed_at, a.review_decision, a.review_note, a.review_detail,
-                u.display_name AS reviewer,
-                (SELECT count(*) FROM follow_up_tasks t WHERE t.ai_artifact_id = a.id) AS confirmed_tasks
+    let row = sqlx::query(&format!(
+        "SELECT {SUMMARY_ARTIFACT_COLUMNS}
          FROM ai_artifacts a LEFT JOIN users u ON u.id = a.reviewer_id
          WHERE a.tenant_id = $1 AND a.risk_assessment_id = $2 AND a.artifact_type = $3
-         ORDER BY a.generated_at DESC, a.id DESC LIMIT 1",
-    )
+         ORDER BY a.generated_at DESC, a.id DESC LIMIT 1"
+    ))
     .bind(tenant_id)
     .bind(assessment_id)
     .bind(ARTIFACT_TYPE)
     .fetch_optional(&mut *conn)
     .await?;
-    Ok(row.map(|r| {
-        json!({
+    Ok(row.map(|r| summary_json(&r, assessment_id)))
+}
+
+/// The summary to show for a patient: the one bound to the current
+/// assessment, otherwise the most recent *approved* summary of an earlier
+/// assessment (an approved summary keeps its suggestions actionable, and a
+/// task confirmed from it recalculates risk, which must not hide it).
+/// Awaiting summaries of older assessments are superseded, never shown.
+async fn load_patient_summary(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    patient_id: Uuid,
+    current_assessment_id: Uuid,
+) -> Result<Option<Value>, ApiError> {
+    let row = sqlx::query(&format!(
+        "SELECT {SUMMARY_ARTIFACT_COLUMNS}
+         FROM ai_artifacts a LEFT JOIN users u ON u.id = a.reviewer_id
+         WHERE a.tenant_id = $1 AND a.patient_id = $2 AND a.artifact_type = $3
+           AND (a.risk_assessment_id = $4 OR a.status = 'approved')
+         ORDER BY (a.risk_assessment_id = $4) DESC, a.generated_at DESC, a.id DESC LIMIT 1"
+    ))
+    .bind(tenant_id)
+    .bind(patient_id)
+    .bind(ARTIFACT_TYPE)
+    .bind(current_assessment_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.map(|r| summary_json(&r, current_assessment_id)))
+}
+
+fn summary_json(r: &sqlx::postgres::PgRow, current_assessment_id: Uuid) -> Value {
+    let assessment_id: Uuid = r.get("risk_assessment_id");
+    json!({
             "id": r.get::<Uuid,_>("id"),
             "status": r.get::<String,_>("status"),
+            "assessment_id": assessment_id,
+            "for_current_assessment": assessment_id == current_assessment_id,
             "output": r.get::<Option<Value>,_>("output"),
             "model": r.get::<Option<String>,_>("model"),
             "model_version": r.get::<Option<String>,_>("model_version"),
@@ -773,8 +809,7 @@ async fn load_summary_artifact(
             "review_detail": r.get::<Value,_>("review_detail"),
             "reviewer": r.get::<Option<String>,_>("reviewer"),
             "confirmed_tasks": r.get::<i64,_>("confirmed_tasks"),
-        })
-    }))
+    })
 }
 
 async fn load_care_team(
@@ -877,7 +912,7 @@ async fn risk_payload(
     let (assessment, summary) = match &current {
         Some(c) => (
             Some(present_assessment(c, &reviews)?),
-            load_summary_artifact(conn, p.tenant_id, c.id).await?,
+            load_patient_summary(conn, p.tenant_id, p.id, c.id).await?,
         ),
         None => (None, None),
     };

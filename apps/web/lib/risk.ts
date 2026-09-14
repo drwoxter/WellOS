@@ -132,6 +132,8 @@ export type RiskSummary = {
   review_decision: string | null;
   review_note: string | null;
   confirmed_tasks: number;
+  assessment_id?: string;
+  for_current_assessment?: boolean;
   output: RiskSummaryOutput;
 };
 

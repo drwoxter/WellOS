@@ -850,6 +850,8 @@ const dict = {
     riskNoSummary: "No dMind summary has been generated for this assessment.",
     riskSummaryStale:
       "The previous dMind summary refers to an older assessment and is no longer actionable.",
+    riskSummaryEarlierAssessment:
+      "This approved summary explains an earlier assessment; the risk has since been recalculated. Regenerate it to explain the current levels.",
     riskGenerateSummary: "Generate dMind summary",
     riskRegenerateSummary: "Generate a new summary",
     riskSummaryGenerated: "dMind summary generated — awaiting your review.",
@@ -1782,6 +1784,8 @@ const dict = {
       "No se ha generado ningún resumen dMind para esta evaluación.",
     riskSummaryStale:
       "El resumen dMind anterior se refiere a una evaluación antigua y ya no es accionable.",
+    riskSummaryEarlierAssessment:
+      "Este resumen aprobado explica una evaluación anterior; el riesgo se ha recalculado desde entonces. Vuelva a generarlo para explicar los niveles actuales.",
     riskGenerateSummary: "Generar resumen dMind",
     riskRegenerateSummary: "Generar un nuevo resumen",
     riskSummaryGenerated: "Resumen dMind generado — pendiente de su revisión.",

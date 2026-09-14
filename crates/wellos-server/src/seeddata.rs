@@ -2458,8 +2458,10 @@ async fn seed_risk_scenarios(tx: &mut PgConnection, s: RiskSeed) -> anyhow::Resu
     .await?;
 
     // --- SYN-0106 Iván: insufficient data ---------------------------------
-    // Registered only; no encounters, results, problems or medications.
+    // Registered two days ago with a treating professional, but no encounters,
+    // results, problems or medications yet.
     let ivan = risk_patient(tx, &s, "Iván", "1979-09-09", "male", "SYN-0106").await?;
+    risk_care_team(tx, &s, ivan, s.physician, now - days(2)).await?;
 
     for pid in [lucia, ramon, teresa, hugo, nora, ivan] {
         risk_snapshot_as_of(tx, &s, pid, now).await?;

@@ -542,6 +542,18 @@ async fn confirmation_is_required_before_a_suggestion_becomes_work() {
     .await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert!(body.to_string().contains(&task_id), "{body}");
+
+    // The confirmation recalculated risk (new snapshot), yet the approved
+    // summary stays visible, flagged as explaining an earlier assessment.
+    let section = &body["risk"];
+    assert_eq!(section["summary"]["id"], json!(artifact_id), "{section}");
+    assert_eq!(section["summary"]["status"], "approved");
+    assert_eq!(section["summary"]["for_current_assessment"], false);
+    assert_ne!(
+        section["summary"]["assessment_id"], section["current"]["id"],
+        "{section}"
+    );
+    assert_eq!(section["summary"]["confirmed_tasks"], 1);
 }
 
 #[tokio::test]
