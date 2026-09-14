@@ -345,7 +345,7 @@ pub(crate) async fn patient_brief(
     .collect::<Vec<_>>();
 
     let open_tasks = sqlx::query(&format!(
-        "SELECT id, description, priority, status, due_at, service_request_id
+        "SELECT id, description, priority, status, due_at, service_request_id, source
          FROM follow_up_tasks
          WHERE tenant_id = $1 AND patient_id = $2 AND status IN {ACTIONABLE_TASK_STATUSES}
          ORDER BY {} LIMIT 10",
@@ -364,6 +364,7 @@ pub(crate) async fn patient_brief(
             "status": r.get::<String,_>("status"),
             "due_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("due_at"),
             "service_request_id": r.get::<Option<Uuid>,_>("service_request_id"),
+            "source": r.get::<String,_>("source"),
         })
     })
     .collect::<Vec<_>>();

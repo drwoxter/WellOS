@@ -648,7 +648,7 @@ pub async fn create(
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     // The patient lock serializes concurrent arrivals; the partial unique
     // index is the invariant, the pre-check gives a clear message.
-    sqlx::query("SELECT id FROM patients WHERE id = $1 FOR UPDATE")
+    sqlx::query("SELECT id FROM patients WHERE id = $1 FOR NO KEY UPDATE")
         .bind(body.patient_id)
         .execute(&mut *tx)
         .await?;
@@ -807,7 +807,7 @@ async fn manage_transition(
     if t == VisitTransition::Arrive {
         // Same lock order as `create` (patient, then visit): one open visit
         // per patient is the invariant, the pre-check gives a clear message.
-        sqlx::query("SELECT id FROM patients WHERE id = $1 FOR UPDATE")
+        sqlx::query("SELECT id FROM patients WHERE id = $1 FOR NO KEY UPDATE")
             .bind(v.patient_id)
             .execute(&mut *tx)
             .await?;
@@ -2402,7 +2402,7 @@ pub async fn start_consultation(
     let mut tx = state.pool.begin().await?;
     // Lock order: patient first (as encounters::start does), then visit, so
     // create-or-resume and the visit handoff serialize the same way.
-    sqlx::query("SELECT id FROM patients WHERE id = $1 FOR UPDATE")
+    sqlx::query("SELECT id FROM patients WHERE id = $1 FOR NO KEY UPDATE")
         .bind(v.patient_id)
         .execute(&mut *tx)
         .await?;

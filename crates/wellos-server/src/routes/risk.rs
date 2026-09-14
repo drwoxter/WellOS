@@ -21,7 +21,7 @@ use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use dmind_gateway::risk::{RiskSummaryRequest, RISK_TEMPLATE};
 use dmind_gateway::GatewayError;
 use rust_decimal::Decimal;
@@ -44,6 +44,10 @@ const HISTORY_LIMIT: i64 = 12;
 const WORKLIST_LIMIT: i64 = 200;
 const FACT_LIMIT: i64 = 200;
 const VISIT_LOOKBACK_DAYS: i64 = 365;
+/// Trend compares the new levels with the most recent snapshot at least this
+/// old (falling back to the oldest snapshot), so that recalculating twice in a
+/// row does not erase a real change.
+const TREND_BASELINE_DAYS: i64 = 7;
 /// Care-team function of the professional who owns risk follow-up for a
 /// patient (assigned from the worklist).
 pub const RISK_FOLLOW_UP_FUNCTION: &str = "risk_follow_up";
@@ -380,11 +384,19 @@ pub(crate) async fn collect_input(
     .collect();
 
     let previous = sqlx::query(
-        "SELECT calculated_at, domain_levels FROM risk_assessments
-         WHERE tenant_id = $1 AND patient_id = $2 AND is_current",
+        "SELECT calculated_at, domain_levels FROM (
+           (SELECT calculated_at, domain_levels, 0 AS pref FROM risk_assessments
+             WHERE tenant_id = $1 AND patient_id = $2 AND calculated_at <= $3
+             ORDER BY calculated_at DESC LIMIT 1)
+           UNION ALL
+           (SELECT calculated_at, domain_levels, 1 AS pref FROM risk_assessments
+             WHERE tenant_id = $1 AND patient_id = $2
+             ORDER BY calculated_at ASC LIMIT 1)
+         ) b ORDER BY pref LIMIT 1",
     )
     .bind(tenant_id)
     .bind(patient_id)
+    .bind(now - Duration::days(TREND_BASELINE_DAYS))
     .fetch_optional(&mut *conn)
     .await?
     .map(|r| {
@@ -834,6 +846,26 @@ async fn risk_section(
     Ok(Some(risk_payload(&mut conn, ctx, p).await?))
 }
 
+/// Professionals a risk follow-up can be assigned to (clinical roles only,
+/// never service principals).
+async fn assignable_professionals(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+) -> Result<Vec<Value>, ApiError> {
+    Ok(sqlx::query(
+        "SELECT DISTINCT u.id, u.display_name FROM role_assignments ra
+         JOIN users u ON u.id = ra.user_id
+         WHERE ra.tenant_id = $1 AND ra.role IN ('physician', 'nurse') AND NOT u.is_service
+         ORDER BY u.display_name",
+    )
+    .bind(tenant_id)
+    .fetch_all(&mut *conn)
+    .await?
+    .iter()
+    .map(|r| json!({ "id": r.get::<Uuid,_>("id"), "display_name": r.get::<String,_>("display_name") }))
+    .collect())
+}
+
 async fn risk_payload(
     conn: &mut PgConnection,
     ctx: &AuthContext,
@@ -867,16 +899,23 @@ async fn risk_payload(
             "display_name": r.get::<String,_>("display_name"),
         })
     });
+    let can_assign = covers(ctx, actions::RISK_MANAGE, p.facility_id);
+    let professionals = if can_assign {
+        assignable_professionals(conn, p.tenant_id).await?
+    } else {
+        Vec::new()
+    };
     Ok(json!({
         "rules_version": RISK_RULES_VERSION,
         "current": assessment,
         "history": history,
         "summary": summary,
         "follow_up_owner": follow_up_owner,
+        "professionals": professionals,
         "capabilities": {
             "can_recalculate": covers(ctx, actions::RISK_MANAGE, p.facility_id),
             "can_acknowledge": covers(ctx, actions::RISK_MANAGE, p.facility_id),
-            "can_assign": covers(ctx, actions::RISK_MANAGE, p.facility_id),
+            "can_assign": can_assign,
             "can_review": covers(ctx, actions::RISK_REVIEW, p.facility_id),
         },
     }))
@@ -1324,9 +1363,14 @@ pub async fn worklist(
         .filter(|s| !s.is_empty());
     let scope = facility_scope(&ctx, actions::RISK_READ);
     if matches!(&scope, Some(ids) if ids.is_empty()) {
-        return Ok(Json(
-            json!({ "items": [], "rules_version": RISK_RULES_VERSION }),
-        ));
+        return Ok(Json(json!({
+            "items": [],
+            "services": [],
+            "professionals": [],
+            "domains": RiskDomain::ALL.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
+            "rules_version": RISK_RULES_VERSION,
+            "limit": WORKLIST_LIMIT,
+        })));
     }
     let include_low = q.include_low.unwrap_or(false);
 
@@ -1502,18 +1546,9 @@ pub async fn worklist(
     .bind(ctx.tenant_id)
     .fetch_all(&state.pool)
     .await?;
-    let professionals = sqlx::query(
-        "SELECT DISTINCT u.id, u.display_name FROM role_assignments ra
-         JOIN users u ON u.id = ra.user_id
-         WHERE ra.tenant_id = $1 AND ra.role IN ('physician', 'nurse') AND NOT u.is_service
-         ORDER BY u.display_name",
-    )
-    .bind(ctx.tenant_id)
-    .fetch_all(&state.pool)
-    .await?
-    .iter()
-    .map(|r| json!({ "id": r.get::<Uuid,_>("id"), "display_name": r.get::<String,_>("display_name") }))
-    .collect::<Vec<_>>();
+    let mut conn = state.pool.acquire().await?;
+    let professionals = assignable_professionals(&mut conn, ctx.tenant_id).await?;
+    drop(conn);
     Ok(Json(json!({
         "items": items,
         "services": services,

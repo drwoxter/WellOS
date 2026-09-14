@@ -456,13 +456,12 @@ async fn confirmation_is_required_before_a_suggestion_becomes_work() {
     .await;
     assert_eq!(st, StatusCode::CONFLICT, "{body}");
     assert_eq!(code(&body), "invalid_artifact_state");
-    let (tasks_before,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM follow_up_tasks WHERE patient_id = $1 AND source = 'risk_suggestion'",
-    )
-    .bind(hugo)
-    .fetch_one(&state.pool)
-    .await
-    .unwrap();
+    let (tasks_before,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM follow_up_tasks WHERE ai_artifact_id = $1")
+            .bind(Uuid::parse_str(&artifact_id).unwrap())
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
     assert_eq!(tasks_before, 0);
 
     // A nurse without the treatment relationship cannot review; the owner can.
@@ -606,7 +605,19 @@ async fn worklist_orders_critical_first_and_filters() {
         .iter()
         .map(|i| i["patient"]["identifier"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, vec!["SYN-0102"], "{body}");
+    assert!(ids.contains(&"SYN-0102"), "{body}");
+    assert!(
+        !ids.contains(&"SYN-0101") && !ids.contains(&"SYN-0103"),
+        "{ids:?}"
+    );
+    assert!(
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i["trend"] == "worsening"),
+        "{body}"
+    );
 
     let (st, body) = call(
         &state,
@@ -901,11 +912,75 @@ async fn permissions_and_purposes_are_enforced() {
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
+/// Register a synthetic patient, order potassium and ingest a critical result,
+/// so the test owns every record it later reviews.
+async fn patient_with_critical_result(state: &AppState) -> Uuid {
+    let (st, meta) = call(state, "GET", "/api/v1/meta/tenant", "dev-reg.rivera", None).await;
+    assert_eq!(st, StatusCode::OK, "{meta}");
+    let facility = meta["facilities"][0]["id"].as_str().unwrap().to_string();
+    let (st, patient) = call(
+        state,
+        "POST",
+        "/api/v1/patients",
+        "dev-reg.rivera",
+        Some(json!({
+            "facility_id": facility,
+            "family_name": "Riskloop",
+            "given_name": "Synthetic",
+            "birth_date": "1968-02-02",
+            "sex": "male",
+            "identifier": format!("MRN-RISK-{}", Uuid::now_v7().simple()),
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{patient}");
+    let pid = Uuid::parse_str(patient["id"].as_str().unwrap()).unwrap();
+    let (st, enc) = call(
+        state,
+        "POST",
+        "/api/v1/encounters",
+        GARCIA,
+        Some(json!({ "patient_id": pid })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{enc}");
+    let (st, sr) = call(
+        state,
+        "POST",
+        "/api/v1/service-requests",
+        GARCIA,
+        Some(json!({
+            "encounter_id": enc["id"],
+            "code_loinc": "2823-3",
+            "display": "Potassium",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{sr}");
+    let (st, res) = call(
+        state,
+        "POST",
+        "/api/v1/lab/results",
+        LAB,
+        Some(json!({
+            "service_request_id": sr["id"],
+            "code_loinc": "2823-3",
+            "value": 6.9,
+            "unit": "mmol/L",
+            "source_system": "fake-lab",
+            "idempotency_key": format!("risk-{}", Uuid::now_v7().simple()),
+            "effective_at": chrono::Utc::now(),
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    pid
+}
+
 #[tokio::test]
 async fn confirmed_result_review_recalculates_risk_in_the_same_transaction() {
     let state = test_state().await;
-    // SYN-0003 carries the foundation demo's critical potassium awaiting review.
-    let pid = patient_by_identifier(&state, "SYN-0003").await;
+    let pid = patient_with_critical_result(&state).await;
     let (st, before) = call(
         &state,
         "POST",

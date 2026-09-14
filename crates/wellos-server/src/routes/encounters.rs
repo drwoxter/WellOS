@@ -67,7 +67,7 @@ pub async fn start(
     if body.resume && encounter_type == "consultation" {
         // The patient row lock serializes concurrent create-or-resume calls
         // so two clicks cannot open two consultations.
-        sqlx::query("SELECT id FROM patients WHERE id = $1 FOR UPDATE")
+        sqlx::query("SELECT id FROM patients WHERE id = $1 FOR NO KEY UPDATE")
             .bind(body.patient_id)
             .execute(&mut *tx)
             .await?;
