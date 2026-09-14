@@ -17,6 +17,7 @@ import {
   patientName,
 } from "@/lib/clinical";
 import type { VisitItem } from "@/lib/visits";
+import { canReadRisk } from "@/lib/risk";
 import { NewVisit } from "../../access/new-visit";
 import { VisitCard, useVisitActions } from "../../access/visit-card";
 
@@ -491,6 +492,11 @@ function PatientWorkspace({ id }: { id: string }) {
             {sexLabel(lang, p.sex)} · {t(lang, "born")}{" "}
             {formatDate(lang, p.birth_date)}
           </span>
+          {canReadRisk(meta?.user.roles ?? []) ? (
+            <Link className="navlink" href={`/patients/${id}/360`}>
+              {t(lang, "openPatient360")}
+            </Link>
+          ) : null}
         </div>
       </div>
 

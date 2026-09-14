@@ -713,13 +713,17 @@ async fn assign_and_review_are_audited_and_version_bound() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    let ids: Vec<&str> = body["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|i| i["patient"]["identifier"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, vec!["SYN-0102"], "{body}");
+    let items = body["items"].as_array().unwrap();
+    assert!(
+        items
+            .iter()
+            .any(|i| i["patient"]["identifier"] == "SYN-0102"),
+        "{body}"
+    );
+    assert!(
+        items.iter().all(|i| i["owner"]["user_id"] == json!(nurse)),
+        "assignee filter must only return the nurse's follow-ups: {body}"
+    );
 
     // A recalculation that changes nothing keeps the review; the worklist
     // still shows the patient at the top of the high band.

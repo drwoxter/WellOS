@@ -115,6 +115,29 @@ lab/research denial), component, Playwright golden path across three roles,
 keyboard, accessibility, 390px and Spanish coverage. Hazards H-13–H-17
 recorded; not a validated triage scale.
 
+Patient 360, Explainable Risk Engine and dMind Risk Agent MVP: a one-screen
+`/patients/[id]/360` composed from the existing chart, brief, encounters,
+results, tasks, visits, alerts and care team (no parallel records); a pure,
+versioned deterministic engine (`risk-rules.v1`, `wellos_domain::risk`)
+returning seven domain levels (`insufficient_data` → `critical`) with rule
+codes, source-record evidence, detected/calculated timestamps, missing and
+stale data and snapshot-to-snapshot trend — deliberately no numeric score;
+append-only `risk_assessments` snapshots recalculated in the same transaction
+as result ingestion/amendment, loop transitions, note signing, vitals and
+diagnoses; level-bound `risk_reviews` (acknowledge / assign / mark reviewed,
+`409` on stale snapshots); dMind `risk-summary.v1` proposals (deterministic
+offline fake, EN/ES) aligned to the deterministic floor, validated, bound to
+the assessment, approve/reject, and follow-up tasks only after explicit
+confirmation; `/risk` worklist (critical first, five filters, plain-language
+reasons, expandable technical evidence, audited actions); consultation
+cockpit card that re-reads after confirmed changes without touching the
+note; a consent- and purpose-gated, fully audited `risk-projection.v1` for
+future insurer integrations with explicit non-goals; six `Riskdemo`
+synthetic scenarios. Domain, gateway, integration (scenarios, safety floor,
+confirmation, worklist, audit, permissions/purposes, same-transaction
+recalculation), component, Playwright, keyboard, accessibility, 390px and
+Spanish coverage. Hazards H-18–H-22 recorded; not a validated risk score.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
@@ -144,8 +167,16 @@ recorded; not a validated triage scale.
 10. **Real model provider adapter** behind the gateway with redaction,
    evaluation harness, and shadow-mode comparison against the fake provider;
    streaming/chunked transcription and speaker diarization quality
-   evaluation for the scribe once a real provider is enabled.
-11. **Backup/restore automation** and load smoke tests in CI against a
+   evaluation for the scribe once a real provider is enabled; clinical
+   sign-off and prospective evaluation of `risk-rules.v1` thresholds
+   (alert burden, sensitivity) before any real use, and a versioned rule
+   library process (`risk-rules.v2`, …).
+11. **Insurer integration**: an insurer identity/service credential
+    lifecycle, consent capture UI for `insurer_risk_sharing`, delivery and
+    export jobs for `risk-projection.v1`, and contractual review. Pricing,
+    underwriting, coverage, authorization and denial decisions remain out of
+    scope for WellOS.
+12. **Backup/restore automation** and load smoke tests in CI against a
     disposable environment.
 
 ## Later

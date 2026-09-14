@@ -6,6 +6,7 @@ import { t } from "@/lib/i18n";
 import { useSession } from "@/lib/session";
 import { canReadWorklist, canSearchPatients } from "@/lib/clinical";
 import { canReadVisits } from "@/lib/visits";
+import { canReadRisk } from "@/lib/risk";
 import { confirmLeaveUnsaved } from "@/lib/unsaved-guard";
 
 /** Sign-out confirmed against unsaved documentation before the session is
@@ -76,6 +77,9 @@ function NavLinks() {
       : []),
     ...(canReadWorklist(roles)
       ? [{ href: "/results", label: t(lang, "navResults") }]
+      : []),
+    ...(canReadRisk(roles)
+      ? [{ href: "/risk", label: t(lang, "navRisk") }]
       : []),
   ];
   return (

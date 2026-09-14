@@ -27,7 +27,8 @@ export type BriefTask = {
   priority: string;
   status: string;
   due_at: string | null;
-  service_request_id: string;
+  service_request_id: string | null;
+  source?: string;
 };
 
 export type BriefRequest = {
@@ -239,12 +240,24 @@ export function PatientBrief({
                       ? t(lang, "overdue")
                       : t(lang, "followUpTasks")}
                   </span>{" "}
-                  <Link
-                    className="navlink"
-                    href={`/requests/${task.service_request_id}`}
-                  >
-                    {task.description}
-                  </Link>
+                  {task.service_request_id ? (
+                    <Link
+                      className="navlink"
+                      href={`/requests/${task.service_request_id}`}
+                    >
+                      {task.description}
+                    </Link>
+                  ) : (
+                    task.description
+                  )}
+                  {task.source === "risk_suggestion" ? (
+                    <>
+                      {" "}
+                      <span className="badge neutral">
+                        {t(lang, "riskAiGenerated")}
+                      </span>
+                    </>
+                  ) : null}
                   {task.due_at ? (
                     <span className="muted">
                       {" "}

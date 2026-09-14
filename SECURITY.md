@@ -120,6 +120,20 @@ receive an acknowledgement within 5 business days.
   returns a bounded JSON `429` with `Retry-After`; denials are audited
   without secrets or clinical payloads; if the store is unavailable the
   request fails closed.
+- **Risk and insurer projection.** Patient 360 and risk reads (`risk.read`)
+  follow the chart's care-relationship and facility rules; review actions
+  (`risk.review`) are treatment-purpose only and reserved to physicians and
+  nurses; recalculation/assignment (`risk.manage`) admit operations purpose.
+  The insurer-facing projection (`risk.projection_read`) is a separate
+  permission held only by clinical administrators and the
+  `insurer_integration_agent` service scope, requires `purpose_of_use=
+  operations` and the patient's active `insurer_risk_sharing` consent, and
+  returns levels, versions, review state and record provenance only — never
+  names, notes, diagnoses, medications or result values. Every projection
+  call, including refused or consent-withheld ones, is audited
+  (`risk.projection.accessed`). WellOS makes no pricing, underwriting,
+  coverage, authorization or denial decisions. See
+  `docs/architecture/patient-360-and-risk.md`.
 
 ## Browser sessions
 
