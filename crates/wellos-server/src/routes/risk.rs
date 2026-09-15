@@ -13,6 +13,7 @@
 //! audited event.
 
 use super::{brief, guard, patients};
+use crate::aigov;
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
@@ -23,14 +24,14 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use dmind_gateway::risk::{RiskSummaryRequest, RISK_TEMPLATE};
-use dmind_gateway::GatewayError;
+use dmind_gateway::{GatewayError, Operation};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{PgConnection, Row};
 use std::collections::BTreeMap;
 use uuid::Uuid;
-use wellos_domain::ai::{ArtifactStatus, ReviewDecision};
+use wellos_domain::ai::{ArtifactStatus, ProviderInfo, ReviewDecision};
 use wellos_domain::risk::{
     self as risk_rules, AlertFact, AllergyFact, CareTeamFact, ConditionFact, EncounterFact,
     MedicationFact, PreviousAssessment, ResultFact, RiskAssessment, RiskDomain, RiskInput,
@@ -795,7 +796,7 @@ async fn load_history(
 }
 
 const SUMMARY_ARTIFACT_COLUMNS: &str = "a.id, a.status, a.output, a.model, a.model_version, a.route, a.template,
-            a.risk_assessment_id, a.generated_at, a.reviewed_at, a.review_decision, a.review_note,
+            a.prompt_version, a.risk_assessment_id, a.generated_at, a.reviewed_at, a.review_decision, a.review_note,
             a.review_detail, u.display_name AS reviewer,
             (SELECT count(*) FROM follow_up_tasks t WHERE t.ai_artifact_id = a.id) AS confirmed_tasks";
 
@@ -858,7 +859,11 @@ fn summary_json(r: &sqlx::postgres::PgRow, current_assessment_id: Uuid) -> Value
             "model_version": r.get::<Option<String>,_>("model_version"),
             "route": r.get::<Option<String>,_>("route"),
             "template": r.get::<Option<String>,_>("template"),
-            "prompt_version": RISK_SUMMARY_PROMPT_VERSION,
+            // Artifacts generated before prompt provenance was stored all came
+            // from the fixture prompt family.
+            "prompt_version": r
+                .get::<Option<String>, _>("prompt_version")
+                .unwrap_or_else(|| RISK_SUMMARY_PROMPT_VERSION.to_string()),
             "generated_at": r.get::<Option<DateTime<Utc>>,_>("generated_at"),
             "reviewed_at": r.get::<Option<DateTime<Utc>>,_>("reviewed_at"),
             "review_decision": r.get::<Option<String>,_>("review_decision"),
@@ -1728,47 +1733,76 @@ pub async fn propose_summary(
     )
     .await
     .map_err(ApiError::internal)?;
-    let resp = match state.gateway.summarize_risk(&req).await {
-        Ok(r) => r,
-        Err(GatewayError::Unavailable(_)) => {
-            audit::emit(
-                &mut *tx,
-                &ctx,
-                "ai.provider.unavailable",
-                &state.cell,
-                json!({ "patient_id": id, "assessment_id": current.id, "template": RISK_TEMPLATE }),
+    // The summary is bound to `current.id`; releasing the lock here means no
+    // patient row stays locked while a (possibly external) provider runs.
+    tx.commit().await?;
+
+    let input_refs: Vec<String> = req.facts.iter().map(|(r, _)| r.clone()).collect();
+    let hash = dmind_gateway::risk::risk_input_hash(&req);
+    let plan = aigov::plan(
+        &state,
+        p.tenant_id,
+        id,
+        ARTIFACT_TYPE,
+        Operation::RiskSummary,
+        &hash,
+        RISK_SUMMARY_SCHEMA,
+    )
+    .await?;
+    let (resp, reused_from, execution_id) = match plan {
+        aigov::ExecutionPlan::Reuse(prior) => {
+            let output: wellos_domain::risk::RiskSummaryV1 = prior.output_as()?;
+            (
+                dmind_gateway::risk::RiskSummaryResponse {
+                    output,
+                    model: prior.model.clone(),
+                    model_version: prior.model_version.clone(),
+                    route: prior.route.clone(),
+                    prompt_version: prior.prompt_version.clone(),
+                    input_hash: hash.clone(),
+                    usage: prior.usage_as(),
+                },
+                Some(prior.id),
                 None,
             )
-            .await
-            .map_err(ApiError::internal)?;
-            tx.commit().await?;
-            return Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "ai_unavailable",
-                "the risk assistant is unavailable; the deterministic assessment stands",
-            ));
         }
-        Err(GatewayError::InvalidOutput(e)) => {
-            audit::emit(
-                &mut *tx,
-                &ctx,
-                "ai.generation.failed",
-                &state.cell,
-                json!({ "patient_id": id, "assessment_id": current.id, "template": RISK_TEMPLATE, "reason": "invalid_output" }),
-                None,
-            )
-            .await
-            .map_err(ApiError::internal)?;
-            tx.commit().await?;
-            tracing::warn!(error = %e, "risk summary rejected");
-            return Err(ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                "ai_invalid_output",
-                "the risk assistant produced an invalid summary; nothing was recorded",
-            ));
+        aigov::ExecutionPlan::Execute { execution_id } => {
+            match state.gateway.summarize_risk(&req).await {
+                Ok(r) => (r, None, Some(execution_id)),
+                Err(err) => {
+                    audit::record(
+                        &state.pool,
+                        &ctx,
+                        "ai.generation.failed",
+                        Some("patient"),
+                        Some(id.to_string()),
+                        "deny",
+                        Some(match err {
+                            GatewayError::Unavailable(_) => "provider_unavailable",
+                            GatewayError::Disabled(_) => "provider_disabled",
+                            GatewayError::InvalidOutput(_) => "invalid_output",
+                            GatewayError::PolicyDenied(_) => "policy_denied",
+                        }),
+                    )
+                    .await
+                    .map_err(ApiError::internal)?;
+                    return Err(aigov::gateway_error(err));
+                }
+            }
         }
-        Err(other) => return Err(ApiError::internal(other)),
     };
+
+    let mut tx = state.pool.begin().await?;
+    lock_patient_risk(&mut tx, id).await?;
+    let still_current = load_current(&mut tx, p.tenant_id, id)
+        .await?
+        .is_some_and(|c| c.id == current.id);
+    if !still_current {
+        return Err(ApiError::conflict(
+            "assessment_stale",
+            "the risk assessment changed while the summary was generated; request it again",
+        ));
+    }
     // Defense in depth: the gateway already aligned and validated; the server
     // re-runs the same rules against the exact snapshot it stores.
     let output = resp
@@ -1815,6 +1849,27 @@ pub async fn propose_summary(
     .bind(serde_json::to_value(&output.limitations).map_err(ApiError::internal)?)
     .execute(&mut *tx)
     .await?;
+    let provider = ProviderInfo {
+        provider: resp.route.clone(),
+        model: resp.model.clone(),
+        model_version: resp.model_version.clone(),
+    };
+    aigov::annotate(
+        &mut tx,
+        artifact_id,
+        &aigov::Provenance {
+            provider: &provider,
+            prompt_version: &resp.prompt_version,
+            input_refs: &input_refs,
+            usage: resp.usage.as_ref(),
+            synthetic: state.runtime.synthetic_output(),
+            reused_from,
+        },
+    )
+    .await?;
+    if let Some(execution_id) = execution_id {
+        aigov::bind_execution(&mut tx, execution_id, artifact_id).await?;
+    }
     audit::emit(
         &mut *tx,
         &ctx,
@@ -1825,9 +1880,10 @@ pub async fn propose_summary(
             "patient_id": id,
             "assessment_id": current.id,
             "template": RISK_TEMPLATE,
-            "prompt_version": RISK_SUMMARY_PROMPT_VERSION,
+            "prompt_version": resp.prompt_version,
             "model": resp.model,
             "input_hash": resp.input_hash,
+            "reused_from": reused_from,
             "raised_to_floor": output.raised_to_floor,
         }),
         None,

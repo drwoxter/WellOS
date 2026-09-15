@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, use } from "react";
 import { AppShell } from "../../chrome";
 import { t } from "@/lib/i18n";
 import type { Lang, TKey } from "@/lib/i18n";
@@ -14,6 +14,8 @@ import type { ApplyOutcome } from "./scribe";
 import { DiagnosticHistory, PatientBrief } from "./brief";
 import { CockpitRisk } from "../../risk/cockpit-risk";
 import { canReadRisk } from "@/lib/risk";
+import { aiAvailability } from "@/lib/capabilities";
+import type { AiCapabilities } from "@/lib/capabilities";
 import type { Brief, Diagnostics } from "./brief";
 import {
   LAB_TESTS,
@@ -790,6 +792,7 @@ function AiDocAid({
   lang,
   draft,
   canDocument,
+  capabilities,
   locked,
   dirty,
   onPersistNote,
@@ -800,6 +803,8 @@ function AiDocAid({
   lang: Lang;
   draft: AiDraft | null;
   canDocument: boolean;
+  /** Server-reported AI availability; generation is offered only when callable. */
+  capabilities: AiCapabilities | undefined;
   /** The parent note is being finalised; no review may start or apply. */
   locked: boolean;
   /** The note has edits the server — and so any draft — has not seen. */
@@ -814,7 +819,8 @@ function AiDocAid({
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const disabled = busy || locked;
+  const model = aiAvailability(lang, capabilities, "model");
+  const disabled = busy || locked || !model.callable;
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -916,13 +922,20 @@ function AiDocAid({
         </p>
       ) : null}
       {canDocument ? (
-        <button
-          className="secondary"
-          disabled={disabled}
-          onClick={() => void generate()}
-        >
-          {t(lang, "aiGenerateDraft")}
-        </button>
+        <>
+          <button
+            className="secondary"
+            disabled={disabled}
+            onClick={() => void generate()}
+          >
+            {t(lang, "aiGenerateDraft")}
+          </button>
+          {model.notice ? (
+            <p className="muted" data-capability={model.state}>
+              {model.notice}
+            </p>
+          ) : null}
+        </>
       ) : null}
       {outdated ? (
         <p className="muted" role="status">
@@ -1805,6 +1818,7 @@ function EncounterWorkspace({ id }: { id: string }) {
               lang={lang}
               consented={ws.recording_consent?.granted === true}
               enabled={!signed}
+              capabilities={meta?.ai_capabilities}
               onConsentRecorded={onConsentRecorded}
               onDraft={onScribeDraft}
             />
@@ -1814,6 +1828,7 @@ function EncounterWorkspace({ id }: { id: string }) {
               lang={lang}
               patientId={ws.patient.id}
               refreshKey={riskRefreshKey}
+              capabilities={meta?.ai_capabilities}
             />
           ) : null}
           {!orderOnly && ws.brief ? (
@@ -2037,6 +2052,7 @@ function EncounterWorkspace({ id }: { id: string }) {
               lang={lang}
               draft={ws.ai_draft}
               canDocument={ws.capabilities.can_document}
+              capabilities={meta?.ai_capabilities}
               locked={busy}
               dirty={dirty}
               onPersistNote={persistForAi}
@@ -2164,10 +2180,15 @@ function EncounterWorkspace({ id }: { id: string }) {
   );
 }
 
-export default function EncounterPage({ params }: { params: { id: string } }) {
+export default function EncounterPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = use(params);
   return (
     <AppShell>
-      <EncounterWorkspace id={params.id} />
+      <EncounterWorkspace id={id} />
     </AppShell>
   );
 }

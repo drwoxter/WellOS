@@ -12,6 +12,7 @@
 //!   consultation), plus a dedicated transcription rate-limit family;
 //! - provider credentials are server-side configuration only.
 
+use crate::aigov;
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
@@ -22,13 +23,16 @@ use crate::routes::encounter_docs::{
     validate_sections, write_draft_note, SaveNote, NOTE_SECTION_MAX_CHARS,
 };
 use crate::routes::guard;
+use crate::runtime::RuntimeConfig;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use base64::Engine;
 use chrono::Utc;
-use dmind_gateway::scribe::{extract_sections, extraction_info, ScribeError, TranscriptionRequest};
+use dmind_gateway::notes::{note_input_hash, NoteDraftRequest, NOTE_DRAFT_TEMPLATE};
+use dmind_gateway::scribe::{ScribeError, TranscriptionRequest};
+use dmind_gateway::Operation;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -171,7 +175,8 @@ pub struct TranscribeRequest {
     /// Container type as reported by the recorder, e.g. `audio/webm;codecs=opus`.
     pub mime_type: String,
     pub duration_ms: u64,
-    /// "en" or "es".
+    /// BCP-47 tag; must be one of the configured `WELLOS_SCRIBE_LANGUAGES`.
+    /// Defaults to the first configured language.
     pub language: Option<String>,
 }
 
@@ -185,19 +190,50 @@ fn normalize_mime(raw: &str) -> Option<&'static str> {
     ALLOWED_MIME_TYPES.iter().copied().find(|m| *m == base)
 }
 
-fn validate_request(
-    body: &TranscribeRequest,
-) -> Result<(&'static str, &'static str, Vec<u8>), ApiError> {
-    let language = match body.language.as_deref() {
-        None | Some("en") => "en",
-        Some("es") => "es",
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "validation_failed",
-                "language must be 'en' or 'es'",
-            ))
+/// Resolve the consultation language against the configured BCP-47 list,
+/// returning the configured spelling of the tag.
+fn resolve_language(runtime: &RuntimeConfig, requested: Option<&str>) -> Result<String, ApiError> {
+    let tag = match requested.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(tag) => tag,
+        None => {
+            return runtime.scribe_languages.first().cloned().ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "ai_misconfigured",
+                    "no transcription language is configured (WELLOS_SCRIBE_LANGUAGES)",
+                )
+            })
         }
     };
+    runtime
+        .scribe_languages
+        .iter()
+        .find(|l| l.eq_ignore_ascii_case(tag))
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "validation_failed",
+                format!(
+                    "language must be one of the configured tags: {}",
+                    runtime.scribe_languages.join(", ")
+                ),
+            )
+        })
+}
+
+/// Primary BCP-47 subtag (`es-MX` -> `es`) used to pick user-facing wording.
+fn primary_subtag(tag: &str) -> String {
+    tag.split(['-', '_'])
+        .next()
+        .unwrap_or(tag)
+        .to_ascii_lowercase()
+}
+
+fn validate_request(
+    runtime: &RuntimeConfig,
+    body: &TranscribeRequest,
+) -> Result<(String, &'static str, Vec<u8>), ApiError> {
+    let language = resolve_language(runtime, body.language.as_deref())?;
     let mime = normalize_mime(&body.mime_type).ok_or_else(|| {
         ApiError::bad_request(
             "unsupported_media_type",
@@ -287,10 +323,76 @@ async fn record_generation_failure(
     .map_err(ApiError::internal)
 }
 
-/// Transcribe one in-memory recording and structure it into proposed note
-/// sections. The audio is handed to the configured provider and dropped; the
-/// persisted artifact contains only the structured output, bound to the note
-/// version current at insertion (read under the encounter lock).
+fn transcription_error(err: ScribeError) -> ApiError {
+    match err {
+        ScribeError::Disabled(reason) => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scribe_disabled",
+            format!("transcription is disabled by configuration: {reason}"),
+        ),
+        ScribeError::Unavailable(_) => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scribe_unavailable",
+            "transcription is unavailable right now; your recording is kept in this browser so you can retry",
+        ),
+        ScribeError::InvalidOutput(_) => ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "scribe_invalid_output",
+            "the transcription service returned unusable output; you can retry",
+        ),
+        ScribeError::Rejected(_) => ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "audio_rejected",
+            "the recording could not be processed; check the microphone and record again",
+        ),
+    }
+}
+
+/// Context the treating clinician is already authorized to see for this
+/// encounter and that the note-draft operation may cite: the diagnoses
+/// recorded on the encounter. Nothing outside the encounter is shared.
+/// Diagnoses are written under the encounter lock, so reading them under
+/// that lock yields the context current at that instant.
+async fn authorized_context_facts<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    tenant_id: Uuid,
+    encounter_id: Uuid,
+) -> Result<Vec<(String, String)>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT id, display, code FROM conditions
+         WHERE tenant_id = $1 AND encounter_id = $2
+         ORDER BY recorded_at, id LIMIT 50",
+    )
+    .bind(tenant_id)
+    .bind(encounter_id)
+    .fetch_all(executor)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let id: Uuid = r.get("id");
+            let display: String = r.get("display");
+            let code: String = r.get("code");
+            let statement = if code.trim().is_empty() {
+                format!("Recorded diagnosis: {display}")
+            } else {
+                format!("Recorded diagnosis: {display} ({code})")
+            };
+            (format!("condition:{id}"), statement)
+        })
+        .collect())
+}
+
+/// Transcribe one in-memory recording with the configured transcription
+/// provider, then structure the genuine transcript into proposed note
+/// sections through the governed model gateway. The audio is handed to the
+/// provider and dropped; the persisted artifact contains the transcript and
+/// the structured output, bound to the note version current at insertion
+/// (read under the encounter lock). The encounter context handed to the
+/// model is re-read under that same lock: if a diagnosis changed while the
+/// provider was running, the draft no longer reflects the encounter and is
+/// discarded rather than persisted. Nothing is ever fabricated: a provider
+/// failure at either stage is returned as a recoverable error.
 pub async fn transcribe(
     State(state): State<AppState>,
     ctx: AuthContext,
@@ -298,7 +400,7 @@ pub async fn transcribe(
     Json(body): Json<TranscribeRequest>,
 ) -> Result<Json<Value>, ApiError> {
     ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Scribe).await?;
-    let (language, mime, audio) = validate_request(&body)?;
+    let (language, mime, audio) = validate_request(&state.runtime, &body)?;
     let enc = load_encounter(&state, id).await?;
     let allowed = guard(
         &state,
@@ -312,6 +414,18 @@ pub async fn transcribe(
     if !has_recording_consent(&state.pool, enc.tenant_id, id, ctx.user_id).await? {
         return Err(consent_required());
     }
+    // Both capabilities must be usable before any audio leaves the process.
+    let scribe_status = state.scribe.status();
+    if !scribe_status.state.is_callable() {
+        return Err(aigov::capability_error("transcription", &scribe_status));
+    }
+    let model_status = state.gateway.status();
+    if !model_status.state.is_callable() {
+        return Err(aigov::capability_error("model", &model_status));
+    }
+    if scribe_status.external || model_status.external {
+        aigov::external_processing_allowed(&state, enc.tenant_id, enc.patient_id).await?;
+    }
 
     // Provenance for the recording without retaining it: a one-way hash.
     let audio_sha256 = hex::encode(Sha256::digest(&audio));
@@ -320,38 +434,88 @@ pub async fn transcribe(
         audio,
         mime_type: mime.to_string(),
         duration_ms,
-        language: language.to_string(),
+        language: language.clone(),
     };
     // No database lock is held while the (possibly external) provider runs.
     let transcription = match state.scribe.transcribe(&request).await {
         Ok(t) => t,
         Err(err) => {
             record_generation_failure(&state, &ctx, id, "transcription").await?;
-            return Err(match err {
-                ScribeError::Unavailable(_) => ApiError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "scribe_unavailable",
-                    "transcription is unavailable right now; your recording is kept in this browser so you can retry",
-                ),
-                ScribeError::InvalidOutput(_) => ApiError::new(
-                    StatusCode::BAD_GATEWAY,
-                    "scribe_invalid_output",
-                    "the transcription service returned unusable output; you can retry",
-                ),
-                ScribeError::Rejected(_) => ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "audio_rejected",
-                    "the recording could not be processed; check the microphone and record again",
-                ),
-            });
+            return Err(transcription_error(err));
         }
     };
     drop(request);
 
-    let (sections, flags) = extract_sections(&transcription.segments, language);
-    let mut limitations = dmind_gateway::scribe::limitations(language);
+    // Structure the transcript through the governed model gateway.
+    let context_facts = authorized_context_facts(&state.pool, enc.tenant_id, id).await?;
+    let mut input_refs: Vec<String> = vec![format!("recording:sha256:{audio_sha256}")];
+    input_refs.extend(context_facts.iter().map(|(r, _)| r.clone()));
+    let note_request = NoteDraftRequest {
+        template: NOTE_DRAFT_TEMPLATE.to_string(),
+        language: language.clone(),
+        transcript: transcription.segments.clone(),
+        context_facts: context_facts.clone(),
+    };
+    let input_hash = note_input_hash(&note_request);
+    let plan = aigov::plan(
+        &state,
+        enc.tenant_id,
+        enc.patient_id,
+        "scribe_draft",
+        Operation::NoteDraft,
+        &input_hash,
+        SCRIBE_DRAFT_SCHEMA,
+    )
+    .await?;
+    let (
+        sections,
+        flags,
+        extra_limitations,
+        extraction,
+        prompt_version,
+        usage,
+        reused_from,
+        execution_id,
+    ) = match plan {
+        aigov::ExecutionPlan::Reuse(prior) => {
+            let prior_draft: ScribeDraftV1 =
+                serde_json::from_value(prior.output).map_err(ApiError::internal)?;
+            (
+                prior_draft.sections,
+                prior_draft.flags,
+                Vec::new(),
+                prior_draft.extraction,
+                prior.prompt_version,
+                prior.usage.and_then(|u| serde_json::from_value(u).ok()),
+                Some(prior.id),
+                None,
+            )
+        }
+        aigov::ExecutionPlan::Execute { execution_id } => {
+            let resp = match state.gateway.draft_note(&note_request).await {
+                Ok(r) => r,
+                Err(err) => {
+                    record_generation_failure(&state, &ctx, id, "structure").await?;
+                    return Err(aigov::gateway_error(err));
+                }
+            };
+            (
+                resp.sections,
+                resp.flags,
+                resp.limitations,
+                resp.provider,
+                resp.prompt_version,
+                resp.usage,
+                None,
+                Some(execution_id),
+            )
+        }
+    };
+    let primary = primary_subtag(&language);
+    let mut limitations = dmind_gateway::scribe::limitations(&primary);
+    limitations.extend(extra_limitations);
     if sections.is_empty() {
-        limitations.push(if language == "es" {
+        limitations.push(if primary == "es" {
             "No se pudo asignar ninguna parte de la conversación a una sección de la nota."
                 .to_string()
         } else {
@@ -371,6 +535,16 @@ pub async fn transcribe(
         record_generation_failure(&state, &ctx, id, "consent_withdrawn").await?;
         return Err(consent_required());
     }
+    // The draft was structured against the encounter context read before the
+    // provider ran; if that context changed meanwhile the output is stale.
+    if authorized_context_facts(&mut *tx, enc.tenant_id, id).await? != context_facts {
+        drop(tx);
+        record_generation_failure(&state, &ctx, id, "context_changed").await?;
+        return Err(ApiError::conflict(
+            "context_changed",
+            "the encounter's diagnoses changed while the draft was being generated; record again",
+        ));
+    }
     allowed.record(&mut tx, &ctx, &state.cell).await?;
     let note_version: Option<i64> = sqlx::query_scalar(
         "SELECT version FROM encounter_notes WHERE tenant_id = $1 AND encounter_id = $2",
@@ -384,19 +558,18 @@ pub async fn transcribe(
         schema_version: SCRIBE_DRAFT_SCHEMA.to_string(),
         encounter_id: id,
         source_note_version: note_version,
-        language: language.to_string(),
+        language: language.clone(),
         transcript: transcription.segments,
         sections,
         flags,
         transcription: transcription.provider.clone(),
-        extraction: extraction_info(),
+        extraction,
         generated_at: Utc::now(),
         limitations: limitations.clone(),
     };
-    if let Err(reason) = draft.validate() {
+    if draft.validate().is_err() {
         drop(tx);
         tracing::warn!(stage = "structure", "scribe output failed validation");
-        let _ = reason;
         record_generation_failure(&state, &ctx, id, "structure").await?;
         return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
@@ -408,13 +581,14 @@ pub async fn transcribe(
     // One applicable scribe draft per encounter; the encounter lock
     // serializes concurrent recordings.
     supersede_applicable_scribe_drafts(&mut tx, enc.tenant_id, id).await?;
-    let citations: Vec<String> = vec![
+    let mut citations: Vec<String> = vec![
         format!("recording:sha256:{audio_sha256}"),
         match note_version {
             Some(v) => format!("encounter_note:{id}:v{v}"),
             None => format!("encounter_note:{id}:none"),
         },
     ];
+    citations.extend(input_refs.iter().skip(1).cloned());
     sqlx::query(
         "INSERT INTO ai_artifacts
          (id, tenant_id, patient_id, encounter_id, artifact_type, autonomy_level, status,
@@ -427,11 +601,11 @@ pub async fn transcribe(
     .bind(enc.patient_id)
     .bind(id)
     .bind(ArtifactStatus::AwaitingReview.as_str())
-    .bind(&draft.transcription.model)
-    .bind(&draft.transcription.model_version)
-    .bind(&draft.transcription.provider)
+    .bind(&draft.extraction.model)
+    .bind(&draft.extraction.model_version)
+    .bind(&draft.extraction.provider)
     .bind(SCRIBE_TEMPLATE)
-    .bind(&audio_sha256)
+    .bind(&input_hash)
     .bind(serde_json::to_value(&draft).map_err(ApiError::internal)?)
     .bind(SCRIBE_DRAFT_SCHEMA)
     .bind(serde_json::to_value(&citations).map_err(ApiError::internal)?)
@@ -440,6 +614,22 @@ pub async fn transcribe(
     .bind(draft.generated_at)
     .execute(&mut *tx)
     .await?;
+    aigov::annotate(
+        &mut tx,
+        artifact_id,
+        &aigov::Provenance {
+            provider: &draft.extraction,
+            prompt_version: &prompt_version,
+            input_refs: &input_refs,
+            usage: usage.as_ref(),
+            synthetic: state.runtime.synthetic_output(),
+            reused_from,
+        },
+    )
+    .await?;
+    if let Some(execution_id) = execution_id {
+        aigov::bind_execution(&mut tx, execution_id, artifact_id).await?;
+    }
     audit::emit(
         &mut *tx,
         &ctx,
@@ -450,6 +640,7 @@ pub async fn transcribe(
             "artifact_id": artifact_id,
             "duration_ms": duration_ms,
             "mime_type": mime,
+            "language": language,
             "segments": draft.transcript.len(),
             "sections": draft.sections.len(),
             "provider": draft.transcription.provider,
@@ -468,7 +659,10 @@ pub async fn transcribe(
             "encounter_id": id,
             "artifact_type": "scribe_draft",
             "note_version": note_version,
-            "input_hash": audio_sha256,
+            "input_hash": input_hash,
+            "provider": draft.extraction.provider,
+            "prompt_version": prompt_version,
+            "reused_from": reused_from,
         }),
         None,
     )
@@ -481,14 +675,16 @@ pub async fn transcribe(
         "status": ArtifactStatus::AwaitingReview.as_str(),
         "output": draft,
         "limitations": limitations,
-        "model": draft.transcription.model,
-        "model_version": draft.transcription.model_version,
-        "route": draft.transcription.provider,
+        "model": draft.extraction.model,
+        "model_version": draft.extraction.model_version,
+        "route": draft.extraction.provider,
+        "prompt_version": prompt_version,
         "generated_at": draft.generated_at,
         "review_decision": Value::Null,
         "review_detail": json!({ "applied": [] }),
         "note_version": note_version,
         "stale": false,
+        "synthetic": state.runtime.synthetic_output(),
     })))
 }
 

@@ -9,6 +9,7 @@
 //! deterministic safety floor is computed server-side, a proposal can never
 //! lower it, and a nurse or physician must accept, override or reject it.
 
+use crate::aigov;
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
@@ -21,13 +22,13 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use chrono::{DateTime, Datelike, Utc};
 use dmind_gateway::triage::TRIAGE_TEMPLATE;
-use dmind_gateway::{GatewayError, TriageRequest};
+use dmind_gateway::{GatewayError, Operation, TriageRequest};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{PgConnection, Row, Transaction};
 use uuid::Uuid;
-use wellos_domain::ai::ArtifactStatus;
+use wellos_domain::ai::{ArtifactStatus, ProviderInfo};
 use wellos_domain::triage::{
     is_concern, is_red_flag, is_service, safety_floor, ArrivalKind, Priority, TriageVitals,
     VisitStatus, VisitTransition, SAFETY_RULES_VERSION,
@@ -1653,6 +1654,7 @@ pub(crate) fn vital_fact(measurement: &str, value: Decimal, source: Uuid) -> (St
 }
 
 /// Facts for a snapshot recorded entirely in one vital-sign row.
+#[cfg(feature = "dev-fixtures")]
 pub(crate) fn single_row_vital_facts(source: Uuid, v: &TriageVitals) -> Vec<(String, String)> {
     [
         ("systolic_mmhg", v.systolic_mmhg),
@@ -1824,28 +1826,82 @@ pub async fn propose(
     )
     .await
     .map_err(ApiError::internal)?;
-    let resp = match state.gateway.propose_triage(&req).await {
-        Ok(r) => r,
-        Err(GatewayError::Unavailable(_)) => {
-            audit::emit(
-                &mut *tx,
-                &ctx,
-                "ai.provider.unavailable",
-                &state.cell,
-                json!({ "visit_id": id, "template": TRIAGE_TEMPLATE }),
+    // The facts are frozen by binding the artifact to `triage_version`; the
+    // lock is released so no row stays locked while a (possibly external)
+    // provider runs.
+    tx.commit().await?;
+
+    let input_refs: Vec<String> = req.facts.iter().map(|(r, _)| r.clone()).collect();
+    let hash = dmind_gateway::triage::triage_input_hash(&req);
+    let plan = aigov::plan(
+        &state,
+        v.tenant_id,
+        v.patient_id,
+        "triage_proposal",
+        Operation::TriageProposal,
+        &hash,
+        wellos_domain::triage::TRIAGE_PROPOSAL_SCHEMA,
+    )
+    .await?;
+    let (resp, reused_from, execution_id) = match plan {
+        aigov::ExecutionPlan::Reuse(prior) => {
+            let output: wellos_domain::triage::TriageProposalV1 = prior.output_as()?;
+            (
+                dmind_gateway::triage::TriageResponse {
+                    output,
+                    model: prior.model.clone(),
+                    model_version: prior.model_version.clone(),
+                    route: prior.route.clone(),
+                    prompt_version: prior.prompt_version.clone(),
+                    input_hash: hash.clone(),
+                    usage: prior.usage_as(),
+                },
+                Some(prior.id),
                 None,
             )
-            .await
-            .map_err(ApiError::internal)?;
-            tx.commit().await?;
-            return Err(ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "ai_unavailable",
-                "the triage assistant is unavailable; triage continues without it",
-            ));
         }
-        Err(other) => return Err(ApiError::internal(other)),
+        aigov::ExecutionPlan::Execute { execution_id } => {
+            match state.gateway.propose_triage(&req).await {
+                Ok(r) => (r, None, Some(execution_id)),
+                Err(err) => {
+                    audit::record(
+                        &state.pool,
+                        &ctx,
+                        "ai.generation.failed",
+                        Some("visit"),
+                        Some(id.to_string()),
+                        "deny",
+                        Some(match err {
+                            GatewayError::Unavailable(_) => "provider_unavailable",
+                            GatewayError::Disabled(_) => "provider_disabled",
+                            GatewayError::InvalidOutput(_) => "invalid_output",
+                            GatewayError::PolicyDenied(_) => "policy_denied",
+                        }),
+                    )
+                    .await
+                    .map_err(ApiError::internal)?;
+                    return Err(aigov::gateway_error(err));
+                }
+            }
+        }
     };
+
+    let mut tx = state.pool.begin().await?;
+    let v = lock_visit(&mut tx, id).await?;
+    require_triageable(&v)?;
+    let current_version: Option<i64> = sqlx::query_scalar(
+        "SELECT version FROM triage_assessments WHERE tenant_id = $1 AND visit_id = $2",
+    )
+    .bind(v.tenant_id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current_version != Some(triage_version) {
+        return Err(ApiError::conflict(
+            "triage_changed",
+            "the triage assessment changed while the proposal was generated; request it again",
+        ));
+    }
     // Defense in depth: the provider already clamps, the server clamps again
     // so no proposal can ever sit below the deterministic floor.
     let (floor, _) = safety_floor(v.arrival_kind, &req.red_flags, &req.vitals);
@@ -1878,6 +1934,27 @@ pub async fn propose(
     .bind(triage_version)
     .execute(&mut *tx)
     .await?;
+    let provider = ProviderInfo {
+        provider: resp.route.clone(),
+        model: resp.model.clone(),
+        model_version: resp.model_version.clone(),
+    };
+    aigov::annotate(
+        &mut tx,
+        artifact_id,
+        &aigov::Provenance {
+            provider: &provider,
+            prompt_version: &resp.prompt_version,
+            input_refs: &input_refs,
+            usage: resp.usage.as_ref(),
+            synthetic: state.runtime.synthetic_output(),
+            reused_from,
+        },
+    )
+    .await?;
+    if let Some(execution_id) = execution_id {
+        aigov::bind_execution(&mut tx, execution_id, artifact_id).await?;
+    }
     sqlx::query(
         "UPDATE triage_assessments SET ai_artifact_id = $3, ai_decision = NULL, updated_at = now()
          WHERE tenant_id = $1 AND visit_id = $2",
@@ -1897,6 +1974,7 @@ pub async fn propose(
             "visit_id": id,
             "triage_version": triage_version,
             "input_hash": resp.input_hash,
+            "reused_from": reused_from,
         }),
         None,
     )
@@ -1914,6 +1992,8 @@ pub async fn propose(
         "model_version": resp.model_version,
         "route": resp.route,
         "template": TRIAGE_TEMPLATE,
+        "prompt_version": resp.prompt_version,
+        "synthetic": state.runtime.synthetic_output(),
     })))
 }
 

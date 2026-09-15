@@ -276,13 +276,15 @@ describe("patient access board", () => {
         ),
       ],
     );
-    const triageTab = await screen.findByRole("tab", { name: "Triage" });
+    const triageTab = await screen.findByRole("tab", {
+      name: "Triage",
+      selected: true,
+    });
     expect(triageTab).toHaveAttribute("aria-selected", "true");
     await waitFor(() => expect(loads[0]).toBe("/api/v1/visits?view=triage"));
-    expect(screen.getByRole("link", { name: "Open triage" })).toHaveAttribute(
-      "href",
-      "/visits/v2/triage",
-    );
+    expect(
+      await screen.findByRole("link", { name: "Open triage" }),
+    ).toHaveAttribute("href", "/visits/v2/triage");
     await user.click(screen.getByRole("tab", { name: "Ready" }));
     await waitFor(() => expect(loads).toContain("/api/v1/visits?view=ready"));
     expect(screen.getByRole("tab", { name: "Ready" })).toHaveAttribute(
@@ -357,7 +359,9 @@ describe("patient access board", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Llegadas" })).toBeInTheDocument();
     expect(
-      screen.getByRole("listitem", { name: "Carlos Demopatient — Programada" }),
+      await screen.findByRole("listitem", {
+        name: "Carlos Demopatient — Programada",
+      }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Marcar llegada" }),

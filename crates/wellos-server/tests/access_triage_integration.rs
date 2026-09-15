@@ -25,7 +25,12 @@ async fn test_state() -> (AppState, Arc<dmind_gateway::fake::FakeProvider>) {
         .await
         .unwrap();
     if seeded.map(|(n,)| n).unwrap_or(0) == 0 {
-        wellos_server::seeddata::seed(&pool).await.unwrap();
+        wellos_server::seeddata::seed(
+            &pool,
+            &wellos_server::runtime::RuntimeConfig::test_fixtures(),
+        )
+        .await
+        .unwrap();
     }
     let gateway = Arc::new(dmind_gateway::fake::FakeProvider::new());
     (AppState::new(pool, gateway.clone()), gateway)
@@ -1381,7 +1386,15 @@ async fn proposal_review_is_explicit_bound_and_single_use() {
     let (st, err) = propose(&state, &visit).await;
     assert_eq!(st, StatusCode::CONFLICT, "{err}");
     assert_eq!(code(&err), "triage_not_started");
-    let (st, _) = save_triage(&state, &visit, json!({ "concerns": ["headache"] })).await;
+    // A per-run onset keeps the input hash unique, so an identical proposal
+    // from an earlier run on the same database is never reused here.
+    let onset = format!("since run {}", uuid::Uuid::now_v7().simple());
+    let (st, _) = save_triage(
+        &state,
+        &visit,
+        json!({ "concerns": ["headache"], "onset": onset }),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
 
     // Provider outage is surfaced and does not block triage.

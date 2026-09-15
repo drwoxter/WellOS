@@ -42,6 +42,21 @@ pub(crate) async fn insert_session(
     Ok((session_id, token, csrf, expires_at))
 }
 
+/// Which sign-in methods this deployment actually offers, so the sign-in
+/// page never renders a control without a working backend flow. The
+/// development method exists only in `dev-fixtures` builds with development
+/// authentication enabled (local environments only).
+pub async fn providers(State(state): State<AppState>) -> Json<Value> {
+    let development = cfg!(feature = "dev-fixtures")
+        && state.auth.dev_auth_enabled
+        && state.runtime.env.is_local();
+    Json(json!({
+        "environment": state.runtime.env.as_str(),
+        "oidc": state.auth.oidc.is_some(),
+        "development": development,
+    }))
+}
+
 /// Exchange a validated non-session credential (dev token or OIDC JWT) for a
 /// fresh opaque session. Sessions cannot mint further sessions, and machine
 /// principals never get browser sessions.

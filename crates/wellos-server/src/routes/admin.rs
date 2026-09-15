@@ -1,3 +1,4 @@
+use crate::aigov;
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
@@ -14,11 +15,17 @@ pub async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
+/// Readiness: the database is required; each AI capability is reported
+/// separately and honestly (ready, degraded, disabled by configuration or
+/// invalid configuration) and never affects overall readiness, because care
+/// continues without dMind.
 pub async fn ready(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let db_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
     Ok(Json(json!({
         "status": if db_ok { "ready" } else { "degraded" },
-        "dependencies": { "database": db_ok, "model_gateway": "async-optional" }
+        "environment": state.runtime.env.as_str(),
+        "dependencies": { "database": db_ok },
+        "ai_capabilities": aigov::capabilities(&state),
     })))
 }
 
@@ -41,7 +48,7 @@ pub async fn tenant_meta(
     .await?
     .record_on_pool(&state, &ctx)
     .await?;
-    let row = sqlx::query("SELECT name, brand, cell FROM tenants WHERE id = $1")
+    let row = sqlx::query("SELECT name, brand, cell, data_class FROM tenants WHERE id = $1")
         .bind(ctx.tenant_id)
         .fetch_one(&state.pool)
         .await?;
@@ -91,6 +98,11 @@ pub async fn tenant_meta(
             "roles": ctx.roles,
         },
         "facilities": facilities,
+        "environment": {
+            "name": state.runtime.env.as_str(),
+            "synthetic_data": row.get::<String,_>("data_class") == "synthetic",
+        },
+        "ai_capabilities": aigov::capabilities(&state),
     })))
 }
 

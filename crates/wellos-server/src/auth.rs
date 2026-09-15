@@ -4,8 +4,10 @@
 //!
 //! - `dev-<username>`: predictable development tokens for seeded synthetic
 //!   humans. Accepted only when explicitly enabled for local development
-//!   (`WELLOS_ENV=development` and `WELLOS_DEV_AUTH=true`); production
-//!   startup fails closed if they are enabled.
+//!   (`WELLOS_ENV=development` and `WELLOS_DEV_AUTH=true`), and only for
+//!   humans of `data_class = 'synthetic'` tenants whose identity is not linked
+//!   to a real identity-provider subject; production startup fails closed if
+//!   they are enabled.
 //! - `wsk_<secret>`: opaque high-entropy service credentials for machine
 //!   principals. Only a one-way SHA-256 hash is stored; credentials carry
 //!   explicit scopes, expiration, and revocation, and never authenticate
@@ -118,22 +120,33 @@ pub(crate) struct Principal {
     pub(crate) web_session_id: Option<Uuid>,
 }
 
-/// Development human tokens: local development only, humans only.
+/// Prefix of the OIDC subject the fixtures assign to synthetic humans.
+pub const SYNTHETIC_SUBJECT_PREFIX: &str = "synthetic|";
+
+/// Development human tokens: local development only, synthetic humans of
+/// synthetic tenants only. A user of a production-class tenant, a machine
+/// principal, or a human linked to a real identity-provider subject is never
+/// reachable this way, even in fixture mode.
 async fn dev_principal(state: &AppState, username: &str) -> Result<Principal, ApiError> {
     if !state.auth.dev_auth_enabled {
         return Err(ApiError::unauthorized());
     }
-    let row: Option<(Uuid, Uuid, String, String, bool)> = sqlx::query_as(
-        "SELECT id, tenant_id, username, display_name, is_service
-         FROM users WHERE username = $1",
+    type DevUserRow = (Uuid, Uuid, String, String, bool, String, Option<String>);
+    let row: Option<DevUserRow> = sqlx::query_as(
+        "SELECT u.id, u.tenant_id, u.username, u.display_name, u.is_service,
+                t.data_class, u.oidc_subject
+         FROM users u JOIN tenants t ON t.id = u.tenant_id
+         WHERE u.username = $1",
     )
     .bind(username)
     .fetch_optional(&state.pool)
     .await?;
-    let (user_id, tenant_id, username, display_name, is_service) =
+    let (user_id, tenant_id, username, display_name, is_service, data_class, oidc_subject) =
         row.ok_or_else(ApiError::unauthorized)?;
-    // Dev tokens never authenticate machine principals.
-    if is_service {
+    if is_service || data_class != "synthetic" {
+        return Err(ApiError::unauthorized());
+    }
+    if oidc_subject.is_some_and(|s| !s.starts_with(SYNTHETIC_SUBJECT_PREFIX)) {
         return Err(ApiError::unauthorized());
     }
     Ok(Principal {

@@ -6,8 +6,8 @@
 | --- | --- | --- |
 | `wellos-server` | Rust, Axum, Tokio, SQLx | HTTP API, policy, audit, outbox, FHIR facade, background escalation job endpoint |
 | `wellos-domain` | Rust (pure, no I/O) | Typed IDs, UCUM-aware quantities, deterministic versioned rules, result-loop state machine, AIArtifact lifecycle, event envelopes |
-| `dmind-gateway` | Rust | Provider-neutral `ModelGateway` trait; deterministic offline `FakeProvider` |
-| `apps/web` | Next.js 14, strict TypeScript | Clinician UI: sign-in, worklist, result detail, review/notify/close |
+| `dmind-gateway` | Rust | Provider-neutral `ModelGateway` and `TranscriptionProvider` traits; `disabled`, `openai_compatible` (real HTTP) and `dev-fixtures`-only `fake` implementations |
+| `apps/web` | Next.js 16 (React 19), strict TypeScript | Clinician UI: sign-in, worklist, result detail, review/notify/close |
 | PostgreSQL 16 | Docker | Authoritative transactional store, migrations, seed |
 
 ## Modular monolith layout

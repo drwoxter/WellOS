@@ -24,7 +24,12 @@ async fn test_state() -> AppState {
         .await
         .unwrap();
     if seeded.map(|(n,)| n).unwrap_or(0) == 0 {
-        wellos_server::seeddata::seed(&pool).await.unwrap();
+        wellos_server::seeddata::seed(
+            &pool,
+            &wellos_server::runtime::RuntimeConfig::test_fixtures(),
+        )
+        .await
+        .unwrap();
     }
     let gateway = Arc::new(dmind_gateway::fake::FakeProvider::new());
     AppState::new(pool, gateway)

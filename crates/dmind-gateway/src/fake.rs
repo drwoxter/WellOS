@@ -3,13 +3,27 @@
 //! Produces a stable, template-driven structured summary from the provided
 //! facts with no network access. Can be switched into an "unavailable" mode
 //! to exercise degradation paths.
+//!
+//! Compiled only with the `dev-fixtures` feature. The server additionally
+//! refuses to select it outside `WELLOS_ENV=development|test`, and no code
+//! path substitutes it for a failed real provider.
 
+use crate::notes::{self, NoteDraftRequest, NoteDraftResponse};
 use crate::risk::{self, RiskSummaryRequest, RiskSummaryResponse};
 use crate::triage::{self, TriageRequest, TriageResponse};
-use crate::{input_hash, GatewayError, GatewayResponse, ModelGateway, SummaryRequest};
+use crate::{
+    input_hash, CapabilityState, CapabilityStatus, GatewayError, GatewayResponse, ModelGateway,
+    Operation, SummaryRequest,
+};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
-use wellos_domain::ai::ResultSummaryV1;
+use wellos_domain::ai::{ProviderInfo, ResultSummaryV1};
+
+pub const FAKE_MODEL: &str = crate::FIXTURE_MODEL;
+pub const FAKE_MODEL_VERSION: &str = crate::FIXTURE_MODEL_VERSION;
+pub const FAKE_ROUTE: &str = crate::FIXTURE_ROUTE;
+/// Prompt version of the deterministic result-summary template.
+pub const RESULT_DETERMINISTIC_PROMPT_VERSION: &str = "result-summary-deterministic.v1";
 
 #[derive(Default)]
 pub struct FakeProvider {
@@ -28,6 +42,44 @@ impl FakeProvider {
 
 #[async_trait]
 impl ModelGateway for FakeProvider {
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            provider: FAKE_ROUTE.into(),
+            model: FAKE_MODEL.into(),
+            model_version: FAKE_MODEL_VERSION.into(),
+        }
+    }
+
+    fn status(&self) -> CapabilityStatus {
+        let unavailable = self.unavailable.load(Ordering::SeqCst);
+        CapabilityStatus {
+            state: if unavailable {
+                CapabilityState::Degraded
+            } else {
+                CapabilityState::Ready
+            },
+            provider: "fake".into(),
+            model: Some(FAKE_MODEL.into()),
+            reason: Some(if unavailable {
+                "synthetic development provider forced unavailable".into()
+            } else {
+                "synthetic deterministic development provider; output is not a clinical interpretation".into()
+            }),
+            external: false,
+            synthetic: true,
+        }
+    }
+
+    fn prompt_version(&self, op: Operation) -> String {
+        match op {
+            Operation::ResultSummary => RESULT_DETERMINISTIC_PROMPT_VERSION,
+            Operation::TriageProposal => triage::TRIAGE_DETERMINISTIC_PROMPT_VERSION,
+            Operation::RiskSummary => risk::RISK_DETERMINISTIC_PROMPT_VERSION,
+            Operation::NoteDraft => notes::NOTE_DRAFT_DETERMINISTIC_PROMPT_VERSION,
+        }
+        .into()
+    }
+
     async fn summarize_result(
         &self,
         req: &SummaryRequest,
@@ -71,10 +123,12 @@ impl ModelGateway for FakeProvider {
                 limitations: vec![limitation],
                 suggested_next_step_categories: steps,
             },
-            model: "dmind-fake".into(),
-            model_version: "0.1.0".into(),
-            route: "local-fake".into(),
+            model: FAKE_MODEL.into(),
+            model_version: FAKE_MODEL_VERSION.into(),
+            route: FAKE_ROUTE.into(),
+            prompt_version: RESULT_DETERMINISTIC_PROMPT_VERSION.into(),
             input_hash: input_hash(req),
+            usage: None,
         })
     }
 
@@ -97,6 +151,18 @@ impl ModelGateway for FakeProvider {
             ));
         }
         risk::summarize(req)
+    }
+
+    async fn draft_note(&self, req: &NoteDraftRequest) -> Result<NoteDraftResponse, GatewayError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(GatewayError::Unavailable(
+                "fake provider forced unavailable".into(),
+            ));
+        }
+        notes::deterministic_draft(req).map(|mut resp| {
+            resp.provider = self.info();
+            resp
+        })
     }
 }
 

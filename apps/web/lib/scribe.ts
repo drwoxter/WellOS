@@ -85,6 +85,7 @@ export type ScribeErrorKind =
   | "too_long"
   | "too_large"
   | "encounter_closed"
+  | "context_changed"
   | "rate_limited";
 
 export type ScribeState = {

@@ -11,7 +11,7 @@
                  ▼
         ┌─────────────────┐      ┌──────────────────────┐
         │  WellOS Server  │─────▶│  dMind Model Gateway │
-        │  (Axum, Rust)   │      │  (fake provider dev) │
+        │  (Axum, Rust)   │      │ disabled | openai_c. │
         └────────┬────────┘      └──────────────────────┘
                  │ SQLx
                  ▼
@@ -37,5 +37,6 @@
 
 Browser↔server (authn/z, tenant resolution), server↔database (parameterized
 SQL, tenant scoping in every query), server↔model gateway (consent + policy
-gate; no PHI leaves the process with the fake provider). See
+gate; egress only to an allowlisted HTTPS provider when explicitly
+configured, never with the `disabled` default or the development fixture). See
 `docs/security/data-flow-and-trust-boundaries.md`.

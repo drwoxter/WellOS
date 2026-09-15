@@ -9,7 +9,7 @@
 //! provider can neither lower nor hide a critical signal, and every
 //! suggestion carries `requires_confirmation: true`.
 
-use crate::{hash_json, GatewayError};
+use crate::{hash_json, GatewayError, Usage};
 use serde::{Deserialize, Serialize};
 use wellos_domain::ai::Confidence;
 use wellos_domain::risk::{
@@ -18,6 +18,8 @@ use wellos_domain::risk::{
 };
 
 pub const RISK_TEMPLATE: &str = "risk-summary@1.0.0";
+/// Prompt version of the deterministic offline summariser.
+pub const RISK_DETERMINISTIC_PROMPT_VERSION: &str = "risk-summary-deterministic.v1";
 
 /// Policy-filtered input: the deterministic assessment plus the
 /// (reference, statement) facts the summary may cite. No free-text notes.
@@ -35,7 +37,9 @@ pub struct RiskSummaryResponse {
     pub model: String,
     pub model_version: String,
     pub route: String,
+    pub prompt_version: String,
     pub input_hash: String,
+    pub usage: Option<Usage>,
 }
 
 pub fn risk_input_hash(req: &RiskSummaryRequest) -> String {
@@ -495,10 +499,12 @@ pub fn summarize(req: &RiskSummaryRequest) -> Result<RiskSummaryResponse, Gatewa
     let output = parse_summary(&raw, det)?;
     Ok(RiskSummaryResponse {
         output,
-        model: "dmind-fake-risk".into(),
-        model_version: "0.1.0".into(),
-        route: "local-fake".into(),
+        model: crate::FIXTURE_MODEL.into(),
+        model_version: crate::FIXTURE_MODEL_VERSION.into(),
+        route: crate::FIXTURE_ROUTE.into(),
+        prompt_version: RISK_DETERMINISTIC_PROMPT_VERSION.into(),
         input_hash: risk_input_hash(req),
+        usage: None,
     })
 }
 
@@ -595,7 +601,7 @@ mod tests {
         assert!(a.output.ai_generated);
         assert_eq!(a.output.schema_version, RISK_SUMMARY_SCHEMA);
         assert_eq!(a.output.domains.len(), 7);
-        assert_eq!(a.model, "dmind-fake-risk");
+        assert_eq!(a.model, crate::FIXTURE_MODEL);
         assert!(a
             .output
             .follow_up_suggestions

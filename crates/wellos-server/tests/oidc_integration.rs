@@ -57,7 +57,12 @@ async fn state_with(dev_auth: bool, jwks_json: Option<&str>) -> AppState {
         .await
         .unwrap();
     if seeded.0 == 0 {
-        wellos_server::seeddata::seed(&pool).await.unwrap();
+        wellos_server::seeddata::seed(
+            &pool,
+            &wellos_server::runtime::RuntimeConfig::test_fixtures(),
+        )
+        .await
+        .unwrap();
     }
     let gateway = Arc::new(dmind_gateway::fake::FakeProvider::new());
     let oidc = jwks_json.map(|raw| OidcConfig {

@@ -6,17 +6,17 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "lint": "next lint",
+    "lint": "eslint .",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write app lib test e2e",
-    "format:check": "prettier --check app lib test e2e"
+    "format": "prettier --write app lib test e2e eslint.config.mjs",
+    "format:check": "prettier --check app lib test e2e eslint.config.mjs"
   },
   "dependencies": {
-    "next": "^14.2.33",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "next": "16.3.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
@@ -25,15 +25,16 @@
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.6",
     "@types/node": "^20.17.9",
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.7.0",
-    "eslint": "^8",
-    "eslint-config-next": "^14.2.33",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.3.4",
     "jsdom": "^25.0.1",
     "prettier": "^3.8.0",
     "typescript": "5.9.3",
-    "vitest": "^2.1.9"
+    "vite": "^7.3.6",
+    "vitest": "^4.1.11"
   },
   "overrides": {
     "typescript": "5.9.3"

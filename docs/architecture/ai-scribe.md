@@ -1,10 +1,13 @@
 # Consultation recording and dMind AI scribe
 
-Status: development prototype, synthetic data only. This document describes
-how a consultation recording becomes a reviewable structured note draft, what
-is and is not persisted, how providers are configured, and how failures are
-recovered. It complements ADR-0007 (model gateway) and ADR-0008 (AIArtifact
-lifecycle).
+Status: production-intent pipeline with configurable real providers; the
+real adapters have been exercised against a controlled local HTTP server,
+not against a live vendor from this repository. No real patient data
+anywhere. This document describes how a consultation recording becomes a
+reviewable structured note draft, what is and is not persisted, how
+providers are configured, and how failures are recovered. It complements
+ADR-0007 (model gateway), ADR-0008 (AIArtifact lifecycle) and
+`ai-native-platform.md` (runtime boundary, governed execution).
 
 ## Flow
 
@@ -20,11 +23,16 @@ finish ──────────────────────▶ POS
      duration_ms, language }     validate MIME / size / duration / language
                                  authorize (facility scope, care relationship)
                                  require recorded consent
+                                 require callable transcription + model capability
+                                 external provider? → tenant policy + patient consent
                                  sha256(audio) ───────────────▶ TranscriptionProvider
-                                                                 fake (default) | openai_compatible
-                                 ◀──────────────────────────── transcript segments
-                                 extract sections + flags (deterministic)
-                                 validate ScribeDraftV1
+                                                                 disabled | fake (dev-fixtures) | openai_compatible
+                                 ◀──────────────────────────── genuine transcript segments
+                                 aigov::plan (reuse | quota-reserved execution)
+                                 transcript + authorized context ─▶ ModelGateway::draft_note
+                                                                 disabled | fake (dev-fixtures) | openai_compatible
+                                 ◀──────────────────────────── sections + flags citing transcript segments
+                                 validate ScribeDraftV1 + evidence references
                                  lock encounter, re-check consent, read note version
                                  supersede earlier awaiting drafts
                                  INSERT ai_artifacts (scribe_draft, A1, awaiting_review)
@@ -87,13 +95,32 @@ insert / append / dismiss ────▶ POST /encounters/:id/scribe/:artifact/
 
 ## Providers
 
-`dmind_gateway::scribe::TranscriptionProvider` is the only seam the server
-knows. Selection is by environment and fails closed:
+Two providers are involved: `dmind_gateway::scribe::TranscriptionProvider`
+turns audio into a transcript and `ModelGateway::draft_note` turns the
+transcript (plus only the authorized patient context facts, each with a
+stable reference) into proposed note sections. Both are selected by
+configuration and fail closed; neither ever falls back to a fixture:
 
 | `WELLOS_SCRIBE_PROVIDER` | Behaviour |
 | --- | --- |
-| `fake` (default) | Deterministic offline transcript scripted from a fixed EN/ES consultation; timecodes are proportional to `duration_ms`. Same input → same output. Used by CI, tests and the demo. Never touches the network. |
-| `openai_compatible` | Multipart POST to `WELLOS_SCRIBE_ENDPOINT` (full URL) with `WELLOS_SCRIBE_MODEL` and bearer `WELLOS_SCRIBE_API_KEY`; `verbose_json` response mapped to segments. Bounded by `WELLOS_SCRIBE_TIMEOUT_SECS` (default 60) and `WELLOS_SCRIBE_MAX_RETRIES` (0–5, default 2, fixed back-off) on 5xx/429/timeouts only. Missing endpoint/model/key aborts startup. Covered by a mocked in-process HTTP server; CI makes no external calls. |
+| `disabled` (default) | Recording is disabled in the UI with the real reason (`/ready` reports `transcription` as disabled by configuration); the rest of the consultation is unaffected. |
+| `fake` | `dev-fixtures` builds in `development`/`test` only; refused elsewhere. Deterministic offline transcript scripted from a fixed EN/ES consultation; timecodes are proportional to `duration_ms`. Same input → same output. Reported with `synthetic: true` and labelled as synthetic in the UI. Used by CI and tests. Never touches the network. |
+| `openai_compatible` | Multipart POST of the actual recording to `WELLOS_SCRIBE_ENDPOINT` (full URL) with `WELLOS_SCRIBE_MODEL` and bearer `WELLOS_SCRIBE_API_KEY`; `verbose_json` response mapped to segments. Requires `WELLOS_ALLOW_EXTERNAL_AI=true`. Bounded by `WELLOS_SCRIBE_TIMEOUT_SECS` (default 60) and `WELLOS_SCRIBE_MAX_RETRIES` (0–5, default 2, fixed back-off) on 5xx/429/timeouts only. Missing endpoint/model/key aborts startup. Covered by a controlled in-process HTTP server; CI makes no external calls. |
+
+The structured draft comes from the model gateway (`DMIND_MODEL_PROVIDER`,
+see `ai-native-platform.md`): with `openai_compatible` the transcript is
+sent to the configured model with a versioned prompt
+(`note-draft-openai.v1`) and the response must be schema-valid
+`scribe-draft.v1` JSON whose every evidence reference names a transcript
+segment or context fact that was actually supplied — otherwise the whole
+response is rejected as `502 ai_invalid_output` and nothing is stored. The
+`fake` gateway uses a deterministic keyword baseline
+(`note-draft-deterministic.v1`); that baseline is a test fixture and is
+not reachable from a production build.
+
+Languages are configurable BCP-47 tags (`WELLOS_SCRIBE_LANGUAGES`, default
+`en,es`), exposed to the UI as `transcription_languages`; a request in an
+unconfigured language is rejected before any audio leaves the process.
 
 Destination policy (`validate_scribe_endpoint`, evaluated once at startup, fail closed): outside development the endpoint must be `https://`, name a DNS host (IP literals, `localhost`/`*.localhost` and embedded `user:pw@` are refused) and that host must appear verbatim in `WELLOS_SCRIBE_ALLOWED_HOSTS` (comma-separated exact `host` or `host:port` entries; no wildcards or paths; a bare entry matches only the default port). In development a loopback `http://` mock is accepted and the allowlist is optional but still enforced when set. The HTTP client never follows redirects, so a compromised or misconfigured endpoint cannot bounce the recording and credential to another host; a 3xx is reported as a provider outage.
 
@@ -101,8 +128,10 @@ Provider errors are classified, never forwarded verbatim:
 
 | `ScribeError` | HTTP | Meaning |
 | --- | --- | --- |
+| capability not callable | `503 ai_disabled` / `503 scribe_disabled` | disabled or invalid configuration; the UI disables the record button up front with the same reason |
 | `Unavailable` | `503 scribe_unavailable` | transient; the browser keeps the recording and offers **Retry transcription** |
-| `InvalidOutput` | `502 scribe_invalid_output` | provider or structuring produced unusable output; retryable |
+| `InvalidOutput` | `502 scribe_invalid_output` | transcription provider produced unusable output; retryable |
+| model `Unavailable` / `InvalidOutput` | `503 ai_unavailable` / `502 ai_invalid_output` | structuring stage failed or returned schema-invalid or uncited output; retryable |
 | `Rejected` | `422 audio_rejected` | provider refused the audio; record again |
 
 Every failure is audited as `ai.generation.failed` with the stage
@@ -117,7 +146,7 @@ server-side before insertion and stored with `output_schema =
 ```
 ScribeDraftV1 {
   schema_version: "scribe-draft.v1",
-  encounter_id, source_note_version: Option<i64>, language: "en" | "es",
+  encounter_id, source_note_version: Option<i64>, language: BCP-47 tag,
   transcript: [ { index, start_ms, end_ms, speaker?, text, confidence } ],
   sections:   [ { section, text, confidence, review_needed, reasons[], segments[] } ],
   flags:      [ { kind: contradiction | uncertain, message, segments[], sections[] } ],
@@ -200,11 +229,14 @@ with timecode links into the transcript.
   complete or alter signed records; every insertion is an explicit clinician
   action against a draft note.
 - The fake provider ignores the audio content; speaker labels and confidence
-  values are synthetic in development and provider-supplied (not clinically
-  validated) with a real adapter.
-- Section extraction is deterministic keyword mapping, not a clinical
-  language model; it is designed to be predictable for review, not
-  exhaustive.
-- Single-shot transcription (no streaming), 20-minute / 6 MiB cap, EN/ES
-  only.
+  values are synthetic in development/test and provider-supplied (not
+  clinically validated) with a real adapter.
+- With a real model the structured draft is a proposal produced by the
+  configured vendor model; WellOS validates its shape and evidence, not its
+  clinical correctness. The deterministic keyword baseline exists only as a
+  test fixture.
+- The real adapters have not been validated against a live vendor from this
+  repository (see the smoke-test procedure in `ai-native-platform.md`).
+- Single-shot transcription (no streaming), 20-minute / 6 MiB cap; languages
+  limited to the configured `WELLOS_SCRIBE_LANGUAGES`.
 - No permanent audio storage, no re-listening after the request completes.

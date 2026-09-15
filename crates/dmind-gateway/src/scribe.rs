@@ -1,20 +1,25 @@
-//! Consultation scribe: provider-neutral speech-to-text plus a deterministic
-//! rule-based extraction step that maps transcript passages onto the eight
-//! structured note sections.
+//! Consultation scribe: provider-neutral speech-to-text plus the
+//! deterministic rule-based section mapper that serves as the offline test
+//! baseline for the structured-note operation.
 //!
 //! Boundaries:
 //! - Transcription providers receive audio and return timed text. Nothing
 //!   else (no chart data) is ever sent to a provider.
-//! - The default provider is the offline [`FakeTranscription`], which never
-//!   inspects audio content and produces a fixed synthetic consultation whose
-//!   timecodes are scaled to the recording duration.
-//! - The optional [`OpenAiCompatibleTranscription`] adapter is only
-//!   constructed when explicitly configured by the server; its credential
-//!   never leaves the server process and is never logged.
-//! - Extraction is rule-based and deterministic; it restates what was said
-//!   and never adds facts. Assessment-like statements and medication
-//!   mentions are always marked for review.
+//! - The real provider is [`OpenAiCompatibleTranscription`]; it is only
+//!   constructed when explicitly configured by the server, its credential
+//!   never leaves the server process and is never logged. With
+//!   `WELLOS_SCRIBE_PROVIDER=disabled` (the default) no transcription
+//!   happens and the UI reports the capability as disabled.
+//! - [`FakeTranscription`] exists only in `dev-fixtures`/test builds. It
+//!   never inspects audio content and returns a fixed, clearly synthetic
+//!   consultation scaled to the recording duration. The server refuses it
+//!   outside `development`/`test`.
+//! - Rule-based extraction ([`extract_sections`]) restates what was said and
+//!   never adds facts. In production the structured draft comes from the
+//!   model gateway's `draft_note` operation; the rule mapper backs the
+//!   fixture provider and the tests.
 
+#[cfg(any(feature = "dev-fixtures", test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -24,9 +29,15 @@ use wellos_domain::ai::{
     Confidence, ProviderInfo, ScribeFlag, ScribeFlagKind, ScribeSection, TranscriptSegment,
 };
 
+#[cfg(feature = "dev-fixtures")]
+use crate::CapabilityState;
+use crate::{CapabilityStatus, ProviderHealth};
+
 /// Errors are safe to surface: they carry no audio, transcript or credential.
 #[derive(Debug, thiserror::Error)]
 pub enum ScribeError {
+    #[error("transcription is disabled by configuration: {0}")]
+    Disabled(String),
     #[error("transcription provider unavailable: {0}")]
     Unavailable(String),
     #[error("transcription provider returned invalid output: {0}")]
@@ -41,7 +52,8 @@ pub struct TranscriptionRequest {
     pub audio: Vec<u8>,
     pub mime_type: String,
     pub duration_ms: u64,
-    /// BCP-47 primary language subtag, "en" or "es".
+    /// BCP-47 language tag of the consultation (validated by the server
+    /// against the configured allowlist).
     pub language: String,
 }
 
@@ -55,7 +67,54 @@ pub struct Transcription {
 #[async_trait]
 pub trait TranscriptionProvider: Send + Sync {
     fn info(&self) -> ProviderInfo;
+    /// Honest capability state for readiness reporting and the UI.
+    fn status(&self) -> CapabilityStatus;
     async fn transcribe(&self, req: &TranscriptionRequest) -> Result<Transcription, ScribeError>;
+}
+
+/// The provider installed when `WELLOS_SCRIBE_PROVIDER=disabled` (default)
+/// or when the configured provider could not be constructed. It never
+/// produces a transcript.
+pub struct DisabledTranscription {
+    status: CapabilityStatus,
+}
+
+impl DisabledTranscription {
+    pub fn disabled(reason: impl Into<String>) -> Self {
+        Self {
+            status: CapabilityStatus::disabled(reason),
+        }
+    }
+
+    pub fn invalid(provider: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            status: CapabilityStatus::invalid(provider, reason),
+        }
+    }
+}
+
+#[async_trait]
+impl TranscriptionProvider for DisabledTranscription {
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            provider: self.status.provider.clone(),
+            model: "none".into(),
+            model_version: "none".into(),
+        }
+    }
+
+    fn status(&self) -> CapabilityStatus {
+        self.status.clone()
+    }
+
+    async fn transcribe(&self, _req: &TranscriptionRequest) -> Result<Transcription, ScribeError> {
+        Err(ScribeError::Disabled(
+            self.status
+                .reason
+                .clone()
+                .unwrap_or_else(|| "transcription provider disabled".into()),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +125,7 @@ pub trait TranscriptionProvider: Send + Sync {
 pub const SPEAKER_CLINICIAN: &str = "clinician";
 pub const SPEAKER_PATIENT: &str = "patient";
 
+#[cfg(any(feature = "dev-fixtures", test))]
 struct Line {
     speaker: &'static str,
     en: &'static str,
@@ -78,6 +138,7 @@ struct Line {
 /// A fixed synthetic consultation (upper respiratory complaint) that
 /// exercises every note section and includes one internal contradiction and
 /// one unresolved passage so the review affordances are demonstrable.
+#[cfg(any(feature = "dev-fixtures", test))]
 const SCRIPT: &[Line] = &[
     Line {
         speaker: SPEAKER_CLINICIAN,
@@ -179,19 +240,22 @@ const SCRIPT: &[Line] = &[
     },
 ];
 
-/// Offline provider for development, tests and demos. Ignores audio content
+/// Offline fixture provider for development and tests. Ignores audio content
 /// (which is always synthetic in this repository) and returns the fixed
 /// script with timecodes scaled to `duration_ms`.
+#[cfg(any(feature = "dev-fixtures", test))]
 pub struct FakeTranscription {
     unavailable: AtomicBool,
 }
 
+#[cfg(any(feature = "dev-fixtures", test))]
 impl Default for FakeTranscription {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(feature = "dev-fixtures", test))]
 impl FakeTranscription {
     pub fn new() -> Self {
         Self {
@@ -205,6 +269,7 @@ impl FakeTranscription {
     }
 }
 
+#[cfg(any(feature = "dev-fixtures", test))]
 #[async_trait]
 impl TranscriptionProvider for FakeTranscription {
     fn info(&self) -> ProviderInfo {
@@ -212,6 +277,26 @@ impl TranscriptionProvider for FakeTranscription {
             provider: "dmind-fake".into(),
             model: "fake-transcribe".into(),
             model_version: "0.1.0".into(),
+        }
+    }
+
+    fn status(&self) -> CapabilityStatus {
+        let unavailable = self.unavailable.load(Ordering::SeqCst);
+        CapabilityStatus {
+            state: if unavailable {
+                CapabilityState::Degraded
+            } else {
+                CapabilityState::Ready
+            },
+            provider: "fake".into(),
+            model: Some("fake-transcribe".into()),
+            reason: Some(if unavailable {
+                "synthetic fixture provider forced unavailable".into()
+            } else {
+                "synthetic fixture transcript; not derived from the recording".into()
+            }),
+            external: false,
+            synthetic: true,
         }
     }
 
@@ -281,6 +366,7 @@ impl std::fmt::Debug for OpenAiCompatibleConfig {
 pub struct OpenAiCompatibleTranscription {
     cfg: OpenAiCompatibleConfig,
     client: reqwest::Client,
+    health: ProviderHealth,
 }
 
 #[derive(Deserialize)]
@@ -308,7 +394,11 @@ impl OpenAiCompatibleTranscription {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ScribeError::Unavailable(format!("http client: {e}")))?;
-        Ok(Self { cfg, client })
+        Ok(Self {
+            cfg,
+            client,
+            health: ProviderHealth::new(),
+        })
     }
 
     fn file_name(mime: &str) -> &'static str {
@@ -440,14 +530,35 @@ impl TranscriptionProvider for OpenAiCompatibleTranscription {
         }
     }
 
+    fn status(&self) -> CapabilityStatus {
+        let (state, reason) = self.health.state();
+        CapabilityStatus {
+            state,
+            provider: "openai-compatible".into(),
+            model: Some(self.cfg.model.clone()),
+            reason,
+            external: true,
+            synthetic: false,
+        }
+    }
+
     async fn transcribe(&self, req: &TranscriptionRequest) -> Result<Transcription, ScribeError> {
         let mut attempt = 0u32;
         loop {
             match self.attempt(req).await {
-                Ok(t) => return Ok(t),
-                Err(Retry::No(e)) => return Err(e),
+                Ok(t) => {
+                    self.health.record_success();
+                    return Ok(t);
+                }
+                Err(Retry::No(e)) => {
+                    if matches!(e, ScribeError::Unavailable(_)) {
+                        self.health.record_failure();
+                    }
+                    return Err(e);
+                }
                 Err(Retry::Yes(e)) => {
                     if attempt >= self.cfg.max_retries {
+                        self.health.record_failure();
                         return Err(e);
                     }
                     attempt += 1;

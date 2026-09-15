@@ -38,7 +38,8 @@ auditable place.
   an audited privacy-officer-only API); opaque hashed `wss_` browser
   sessions with absolute + inactivity timeouts, rotation, revocation and
   CSRF double-submit protection; and development tokens (`dev-<username>`)
-  only when `WELLOS_ENV=development` and `WELLOS_DEV_AUTH=true`.
+  only on `dev-fixtures` builds when `WELLOS_ENV` is `development` or
+  `test` and `WELLOS_DEV_AUTH=true`.
 - Service-credential administration (`service_credential.manage`/`.read`)
   is restricted to `privacy_officer` (read also `security_auditor`) under
   the `operations` purpose.

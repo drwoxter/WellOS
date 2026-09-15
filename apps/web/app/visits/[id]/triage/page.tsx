@@ -7,6 +7,8 @@ import { AppShell } from "../../../chrome";
 import { t } from "@/lib/i18n";
 import type { Lang, TKey } from "@/lib/i18n";
 import { ApiRequestError, apiFetch, useSession } from "@/lib/session";
+import { aiAvailability } from "@/lib/capabilities";
+import type { AiCapabilities } from "@/lib/capabilities";
 import {
   formatBloodPressure,
   formatDateTime,
@@ -247,6 +249,7 @@ function ProposalPanel({
   form,
   dirty,
   busy,
+  capabilities,
   onAsk,
   onReview,
 }: {
@@ -255,9 +258,11 @@ function ProposalPanel({
   form: Form;
   dirty: boolean;
   busy: string | null;
+  capabilities: AiCapabilities | undefined;
   onAsk: () => void;
   onReview: (decision: "accept" | "override" | "reject") => void;
 }) {
+  const model = aiAvailability(lang, capabilities, "model");
   const p = d.proposal;
   const out = p?.output ?? null;
   const awaiting = p?.status === "awaiting_review";
@@ -265,7 +270,11 @@ function ProposalPanel({
     awaiting && d.triage !== null && p?.triage_version !== d.triage.version;
   const canDecide = awaiting && !stale && d.capabilities.can_triage && !dirty;
   const canAsk =
-    d.capabilities.can_triage && d.triage !== null && !dirty && !busy;
+    d.capabilities.can_triage &&
+    d.triage !== null &&
+    !dirty &&
+    !busy &&
+    model.callable;
   const overrideReady =
     form.priority !== "" &&
     form.requested_service !== "" &&
@@ -293,6 +302,11 @@ function ProposalPanel({
           </span>
         ) : null}
       </p>
+      {model.notice ? (
+        <p className="muted" data-capability={model.state}>
+          {model.notice}
+        </p>
+      ) : null}
       {p && out ? (
         <div className="proposal" aria-live="polite">
           <div className="visit-meta">
@@ -1117,6 +1131,7 @@ function TriageWorkspace({ visitId }: { visitId: string }) {
             form={form}
             dirty={dirty}
             busy={busy}
+            capabilities={meta?.ai_capabilities}
             onAsk={() => void ask()}
             onReview={(decision) => void review(decision)}
           />

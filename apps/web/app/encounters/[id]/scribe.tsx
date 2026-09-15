@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { aiAvailability } from "@/lib/capabilities";
+import type { AiCapabilities } from "@/lib/capabilities";
 import { t } from "@/lib/i18n";
 import type { Lang, TKey } from "@/lib/i18n";
 import { ApiRequestError, apiFetch } from "@/lib/session";
@@ -51,6 +53,8 @@ function errorKey(kind: ScribeErrorKind): TKey {
       return "recordingTooLarge";
     case "encounter_closed":
       return "encounterClosedScribe";
+    case "context_changed":
+      return "scribeContextChanged";
     case "rate_limited":
       return "scribeRateLimited";
   }
@@ -72,6 +76,8 @@ function transcriptionFailure(err: unknown): {
         return { kind: "encounter_closed", retryable: false };
       case "consent_required":
         return { kind: "consent_failed", retryable: true };
+      case "context_changed":
+        return { kind: "context_changed", retryable: true };
       case "unsupported_media_type":
       case "validation_failed":
       case "audio_rejected":
@@ -88,6 +94,9 @@ export type RecordingDockProps = {
   consented: boolean;
   /** Recording is offered only while the note can still be documented. */
   enabled: boolean;
+  /** Server-reported AI availability; the scribe needs transcription and
+   *  the structured-note model, so `structured_note` gates the button. */
+  capabilities: AiCapabilities | undefined;
   recorderFactory?: RecorderFactory;
   onConsentRecorded: () => void;
   onDraft: (artifact: ScribeArtifact) => void;
@@ -103,10 +112,12 @@ export function RecordingDock({
   lang,
   consented,
   enabled,
+  capabilities,
   recorderFactory = createMediaStreamRecorder,
   onConsentRecorded,
   onDraft,
 }: RecordingDockProps) {
+  const scribe = aiAvailability(lang, capabilities, "structured_note");
   const [state, dispatch] = useReducer(
     scribeReducer,
     consented,
@@ -317,12 +328,23 @@ export function RecordingDock({
             type="button"
             className="primary record-button"
             onClick={start}
+            disabled={!scribe.callable}
+            aria-describedby={scribe.notice ? "scribe-capability" : undefined}
           >
             {state.phase === "ready"
               ? t(lang, "recordAgain")
               : t(lang, "recordConsultation")}
           </button>
         </div>
+      ) : null}
+      {(state.phase === "idle" || state.phase === "ready") && scribe.notice ? (
+        <p
+          id="scribe-capability"
+          className="muted"
+          data-capability={scribe.state}
+        >
+          {scribe.notice}
+        </p>
       ) : null}
 
       {state.phase === "consent_required" ? (

@@ -7,6 +7,13 @@ import { CockpitRisk } from "@/app/risk/cockpit-risk";
 import { RiskSummaryPanel } from "@/app/risk/risk-view";
 import { SessionProvider } from "@/lib/session";
 import {
+  AI_READY,
+  DISABLED,
+  DEGRADED,
+  capabilities,
+} from "./fixtures/capabilities";
+import { routeParams } from "./fixtures/params";
+import {
   canReadRisk,
   evidenceHref,
   levelGlyph,
@@ -48,6 +55,7 @@ function meta(roles: string[]) {
         can_act_clinically: roles.includes("physician"),
       },
     ],
+    ai_capabilities: AI_READY,
   };
 }
 
@@ -725,7 +733,7 @@ describe("Patient 360", () => {
     });
     render(
       <SessionProvider>
-        <Patient360Page params={{ id: "p1" }} />
+        <Patient360Page params={routeParams({ id: "p1" })} />
       </SessionProvider>,
     );
     return mocks;
@@ -881,6 +889,7 @@ describe("dMind risk summary panel", () => {
         lang="en"
         patientId="p1"
         risk={risk}
+        capabilities={AI_READY}
         onChanged={onChanged}
       />,
     );
@@ -1013,7 +1022,12 @@ describe("consultation cockpit risk", () => {
           : undefined,
     });
     const { rerender } = render(
-      <CockpitRisk lang="en" patientId="p1" refreshKey="0:0::in_progress" />,
+      <CockpitRisk
+        lang="en"
+        patientId="p1"
+        refreshKey="0:0::in_progress"
+        capabilities={AI_READY}
+      />,
     );
     expect(
       await screen.findByRole("heading", {
@@ -1032,7 +1046,12 @@ describe("consultation cockpit risk", () => {
 
     calculatedAt = "2026-09-14T08:05:00Z";
     rerender(
-      <CockpitRisk lang="en" patientId="p1" refreshKey="1:0::in_progress" />,
+      <CockpitRisk
+        lang="en"
+        patientId="p1"
+        refreshKey="1:0::in_progress"
+        capabilities={AI_READY}
+      />,
     );
     expect(
       await screen.findByText("Risk updated after the last confirmed change."),
@@ -1049,7 +1068,14 @@ describe("consultation cockpit risk", () => {
           ? jsonResponse({ error: { code: "forbidden", message: "no" } }, 403)
           : undefined,
     });
-    render(<CockpitRisk lang="en" patientId="p1" refreshKey="k" />);
+    render(
+      <CockpitRisk
+        lang="en"
+        patientId="p1"
+        refreshKey="k"
+        capabilities={AI_READY}
+      />,
+    );
     await waitFor(() =>
       expect(
         screen.queryByRole("heading", { name: "Patient 360 before you start" }),
@@ -1072,7 +1098,14 @@ describe("consultation cockpit risk", () => {
         return jsonResponse(section());
       },
     });
-    render(<CockpitRisk lang="en" patientId="p1" refreshKey="k" />);
+    render(
+      <CockpitRisk
+        lang="en"
+        patientId="p1"
+        refreshKey="k"
+        capabilities={AI_READY}
+      />,
+    );
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /Patient 360 is unavailable/,
     );
@@ -1092,7 +1125,12 @@ describe("consultation cockpit risk", () => {
     });
     render(
       <>
-        <CockpitRisk lang="en" patientId="p1" refreshKey="k" />
+        <CockpitRisk
+          lang="en"
+          patientId="p1"
+          refreshKey="k"
+          capabilities={AI_READY}
+        />
         <p>Consultation note stays here</p>
       </>,
     );

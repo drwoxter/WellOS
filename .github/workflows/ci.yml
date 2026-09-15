@@ -28,6 +28,12 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgres://wellos:wellos_dev@localhost:5432/wellos
+      # CI is an explicit test environment: synthetic fixtures only, no
+      # external AI provider is ever configured or called here.
+      WELLOS_ENV: test
+      WELLOS_ALLOW_SYNTHETIC_SEED: "true"
+      DMIND_MODEL_PROVIDER: fake
+      WELLOS_SCRIBE_PROVIDER: fake
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,14 +42,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
-      - name: Clippy
+      - name: Clippy (production feature set)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (dev-fixtures)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Production build has no fixtures compiled in
+        run: cargo build -p wellos-server --bins
       - name: Unit tests
         run: cargo test --workspace --lib
       - name: Migrations from empty database
         run: cargo run -p wellos-server --bin migrate
-      - name: Seed synthetic data
-        run: cargo run -p wellos-server --bin seed
+      - name: Seed synthetic data (dev-fixtures, test environment)
+        run: cargo run -p wellos-server --bin seed --features dev-fixtures
       - name: Integration tests
         run: cargo test --workspace --test '*'
 
@@ -88,6 +98,12 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Web dependency audit
+        working-directory: apps/web
+        run: npm audit --audit-level=high
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@v2
         env:

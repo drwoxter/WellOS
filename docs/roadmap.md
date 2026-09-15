@@ -77,8 +77,9 @@ browser storage); consultation recording dock (audited recording consent,
 microphone permission states, start/pause/resume/finish/discard, retry with
 in-memory audio retention, typed text preserved while requests are pending);
 provider-neutral speech-to-text behind the dMind gateway (deterministic
-offline fake by default, opt-in bounded OpenAI-compatible adapter with
-server-side credentials, mocked in tests); validated audio payloads (MIME,
+offline fake fixture for development/test, bounded OpenAI-compatible adapter
+with server-side credentials, mocked in tests; defaults hardened to
+`disabled` in Productization Gate v1); validated audio payloads (MIME,
 size, duration, language, dedicated rate-limit family) processed in memory
 only — raw audio is never persisted; a versioned structured output contract
 (`scribe-draft.v1`: timecoded transcript segments with speaker/confidence,
@@ -138,6 +139,36 @@ confirmation, worklist, audit, permissions/purposes, same-transaction
 recalculation), component, Playwright, keyboard, accessibility, 390px and
 Spanish coverage. Hazards H-18–H-22 recorded; not a validated risk score.
 
+Productization Gate v1 — real dMind runtime, real AI Scribe, secure
+synthetic fixtures: typed `WELLOS_ENV` (`development | test | staging |
+production`, missing/unknown refused); every fixture (fake providers,
+development tokens, development-user discovery, synthetic seed) compiled
+behind `dev-fixtures` **and** refused at runtime in staging/production;
+production-safe `.env.example` (dev auth off, providers `disabled`) with an
+explicit `.env.development.example`; server-controlled sign-in discovery
+(`GET /api/v1/auth/providers` + `GET /api/v1/auth/dev/users`) replacing
+hardcoded browser-bundle users; real `openai_compatible` model gateway with
+typed, prompt-versioned, schema- and evidence-validated operations for
+result/encounter summary, triage proposal, risk summary and structured
+consultation-note draft, behind `WELLOS_ALLOW_EXTERNAL_AI`, HTTPS + exact
+host allowlist, no redirects, timeouts, response-size caps, bounded retries,
+concurrency limits and secret-safe errors; governed execution (`aigov`) with
+artifact reuse on identical tenant/task/input-hash/model/prompt/schema,
+hourly per-tenant and per-task quotas (`ai_executions`), and full provenance
+(`provider`, `prompt_version`, `input_refs`, `usage`, `synthetic`,
+`reused_from`) on every AIArtifact; real AI Scribe path (actual audio →
+configured transcription → governed `draft_note` → evidence-linked
+`scribe-draft.v1`) with configurable BCP-47 languages and the keyword
+extractor demoted to a test fixture; honest per-capability status
+(`ready | degraded | disabled | invalid_configuration`, `synthetic`) on
+`/ready` and in tenant metadata, consumed by the UI to disable only the
+affected AI action; synthetic tenants marked `data_class='synthetic'` with
+`synthetic|` identities, seed refusing non-synthetic databases; CI running
+in the explicit `test` environment with no external model calls;
+deterministic rate-limit tests via an injected window clock. The real
+adapters are validated against a controlled local HTTP server only — no
+live vendor has been exercised from this repository.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
@@ -164,10 +195,12 @@ Spanish coverage. Hazards H-18–H-22 recorded; not a validated risk score.
    linting, dashboards for loop latency and overdue counts.
 9. **Object storage abstraction** (S3-compatible) for large artifacts, with
    per-tenant encryption context.
-10. **Real model provider adapter** behind the gateway with redaction,
-   evaluation harness, and shadow-mode comparison against the fake provider;
-   streaming/chunked transcription and speaker diarization quality
-   evaluation for the scribe once a real provider is enabled; clinical
+10. **Live-provider validation and evaluation**: smoke-test the existing
+   `openai_compatible` adapters against a vendor with synthetic patients
+   (procedure in `docs/architecture/ai-native-platform.md`), then add a
+   redaction layer, an evaluation harness and shadow-mode comparison against
+   the deterministic fixture; streaming/chunked transcription and speaker
+   diarization quality evaluation for the scribe; clinical
    sign-off and prospective evaluation of `risk-rules.v1` thresholds
    (alert burden, sensitivity) before any real use, and a versioned rule
    library process (`risk-rules.v2`, …).
@@ -178,6 +211,14 @@ Spanish coverage. Hazards H-18–H-22 recorded; not a validated risk score.
     scope for WellOS.
 12. **Backup/restore automation** and load smoke tests in CI against a
     disposable environment.
+
+13. **dMind Access** (planned, not started): typed gateway operations for
+    access-intent interpretation, clinical resource matching, appointment
+    ranking, seasonal capacity forecasting, cancellation recovery, attendance
+    support and transport coordination, on configurable versioned catalogs
+    for specialties, professions, services, locations and resource types —
+    no closed enums. No code, routes or UI exist for these yet.
+14. **Care Operations** (planned, not started).
 
 ## Later
 

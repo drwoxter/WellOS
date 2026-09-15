@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, use } from "react";
 import { AppShell } from "../../../chrome";
 import { t } from "@/lib/i18n";
 import type { Lang, TKey } from "@/lib/i18n";
@@ -736,6 +736,7 @@ function RiskExtras({
   lang: Lang;
   onChanged: () => Promise<unknown>;
 }) {
+  const { meta } = useSession();
   const risk = data.risk;
   if (!risk || !risk.current) return null;
   return (
@@ -752,6 +753,7 @@ function RiskExtras({
           lang={lang}
           patientId={data.patient.id}
           risk={risk}
+          capabilities={meta?.ai_capabilities}
           onChanged={onChanged}
         />
       </div>
@@ -848,10 +850,15 @@ function Patient360View({ id }: { id: string }) {
   );
 }
 
-export default function Patient360Page({ params }: { params: { id: string } }) {
+export default function Patient360Page({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = use(params);
   return (
     <AppShell>
-      <Patient360View id={params.id} />
+      <Patient360View id={id} />
     </AppShell>
   );
 }

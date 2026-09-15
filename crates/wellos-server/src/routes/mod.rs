@@ -4,6 +4,8 @@ pub mod brief;
 pub mod consent;
 pub mod creds;
 pub mod dashboard;
+#[cfg(feature = "dev-fixtures")]
+pub mod dev;
 pub mod encounter_docs;
 pub mod encounters;
 pub mod fhir;
@@ -42,8 +44,14 @@ pub fn router(state: AppState) -> Router {
                 .delete(session::delete),
         )
         .route("/api/v1/auth/session/rotate", post(session::rotate))
+        .route("/api/v1/auth/providers", get(session::providers))
         .route("/api/v1/auth/oidc/login", post(oidc_login::start))
-        .route("/api/v1/auth/oidc/callback", post(oidc_login::callback))
+        .route("/api/v1/auth/oidc/callback", post(oidc_login::callback));
+    // Synthetic sign-in discovery exists only in fixture builds; the handler
+    // additionally refuses unless development authentication is enabled.
+    #[cfg(feature = "dev-fixtures")]
+    let router = router.route("/api/v1/auth/dev/users", get(dev::users));
+    let router = router
         .route(
             "/api/v1/admin/service-credentials",
             post(creds::issue).get(creds::list),
@@ -202,8 +210,7 @@ pub fn router(state: AppState) -> Router {
             "content-security-policy",
             "default-src 'none'; frame-ancestors 'none'",
         ));
-    let env = std::env::var("WELLOS_ENV").unwrap_or_else(|_| "development".to_string());
-    let router = if env != "development" {
+    let router = if state.runtime.env.is_deployed() {
         router.layer(header_layer(
             "strict-transport-security",
             "max-age=63072000; includeSubDomains",

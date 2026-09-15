@@ -6,6 +6,7 @@
 //! linked to the original note. Every read and write passes through the
 //! central policy guard and is audited.
 
+use crate::aigov;
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
@@ -14,13 +15,13 @@ use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use dmind_gateway::SummaryRequest;
+use dmind_gateway::{Operation, SummaryRequest};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
-use wellos_domain::ai::ArtifactStatus;
+use wellos_domain::ai::{ArtifactStatus, ProviderInfo};
 
 pub(crate) struct EncounterCtx {
     pub(crate) tenant_id: Uuid,
@@ -1390,49 +1391,19 @@ pub struct AiDraftRequest {
     pub language: Option<String>,
 }
 
-/// Generate an assistive draft summary from facts already recorded in this
-/// encounter. The output is an AIArtifact awaiting explicit clinician review;
-/// it never modifies the note, places orders, or introduces new facts. This
-/// milestone routes only to the local deterministic provider — no external
-/// processing.
-pub async fn ai_draft(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(id): Path<Uuid>,
-    Json(body): Json<AiDraftRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let language = match body.language.as_deref() {
-        None | Some("en") => "en",
-        Some("es") => "es",
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "validation_failed",
-                "language must be 'en' or 'es'",
-            ))
-        }
-    };
-    let enc = load_encounter(&state, id).await?;
-    let allowed = guard(
-        &state,
-        &ctx,
-        actions::ENCOUNTER_DOCUMENT,
-        "ai_artifact",
-        Some(resource_ctx(&enc)),
-    )
-    .await?;
-    require_own_active(&enc, &ctx)?;
+struct EncounterFacts {
+    facts: Vec<(String, String)>,
+    missing: Vec<&'static str>,
+    note_version: Option<i64>,
+}
 
-    // Facts are collected only after the encounter row is locked: every
-    // documentation write (note save, vitals, diagnoses, sign, cancel) takes
-    // the same lock, so the snapshot read here — including the note version
-    // recorded in each citation — is exactly the input the persisted artifact
-    // was generated from. Only the local deterministic provider is used, so
-    // no external call happens while the lock is held.
-    let mut tx = state.pool.begin().await?;
-    let enc = lock_encounter(&mut tx, id).await?;
-    require_own_active(&enc, &ctx)?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
-
+/// Policy-filtered documentation facts for this encounter, read on the
+/// caller's (locked) transaction so they describe one consistent snapshot.
+async fn collect_encounter_facts(
+    tx: &mut sqlx::PgConnection,
+    enc: &EncounterCtx,
+    id: Uuid,
+) -> Result<EncounterFacts, ApiError> {
     let mut facts: Vec<(String, String)> = Vec::new();
     let mut missing: Vec<&str> = Vec::new();
     let note = sqlx::query(
@@ -1527,30 +1498,124 @@ pub async fn ai_draft(
             ),
         ));
     }
-    if facts.is_empty() {
+    Ok(EncounterFacts {
+        facts,
+        missing,
+        note_version,
+    })
+}
+
+/// Generate an assistive draft summary from facts already recorded in this
+/// encounter. The output is an AIArtifact awaiting explicit clinician review;
+/// it never modifies the note, places orders, or introduces new facts. This
+/// output is governed by `aigov` (capability, consent, reuse, quota).
+pub async fn ai_draft(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(body): Json<AiDraftRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let language = match body.language.as_deref() {
+        None | Some("en") => "en",
+        Some("es") => "es",
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "validation_failed",
+                "language must be 'en' or 'es'",
+            ))
+        }
+    };
+    let enc = load_encounter(&state, id).await?;
+    let allowed = guard(
+        &state,
+        &ctx,
+        actions::ENCOUNTER_DOCUMENT,
+        "ai_artifact",
+        Some(resource_ctx(&enc)),
+    )
+    .await?;
+    require_own_active(&enc, &ctx)?;
+
+    // Facts are collected under the encounter lock: every documentation write
+    // (note save, vitals, diagnoses, sign, cancel) takes the same lock, so the
+    // snapshot — including the note version recorded in each citation — is
+    // exactly the input the artifact is generated from. The lock is released
+    // before the (possibly external) provider runs; the persisting transaction
+    // re-collects the facts and refuses to store a draft whose input changed.
+    let mut tx = state.pool.begin().await?;
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let snapshot = collect_encounter_facts(&mut tx, &enc, id).await?;
+    if snapshot.facts.is_empty() {
         return Err(ApiError::conflict(
             "nothing_to_summarize",
             "record documentation or vital signs before requesting a draft",
         ));
     }
+    tx.commit().await?;
+    let note_version = snapshot.note_version;
+    let missing = snapshot.missing.clone();
 
     let req = SummaryRequest {
         template: "encounter-summary@1.0.0".into(),
-        facts,
+        facts: snapshot.facts.clone(),
         language: language.into(),
     };
-    let resp = state
-        .gateway
-        .summarize_result(&req)
-        .await
-        .map_err(|e| match e {
-            dmind_gateway::GatewayError::Unavailable(_) => ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "ai_unavailable",
-                "the documentation assistant is unavailable; care continues without it",
-            ),
-            other => ApiError::internal(other),
-        })?;
+    let input_refs: Vec<String> = req.facts.iter().map(|(r, _)| r.clone()).collect();
+    let hash = dmind_gateway::input_hash(&req);
+    let plan = aigov::plan(
+        &state,
+        enc.tenant_id,
+        enc.patient_id,
+        "encounter_summary",
+        Operation::ResultSummary,
+        &hash,
+        "result-summary.v1",
+    )
+    .await?;
+    let (resp, reused_from, execution_id) = match plan {
+        aigov::ExecutionPlan::Reuse(prior) => {
+            let output: wellos_domain::ai::ResultSummaryV1 = prior.output_as()?;
+            (
+                dmind_gateway::GatewayResponse {
+                    output,
+                    model: prior.model.clone(),
+                    model_version: prior.model_version.clone(),
+                    route: prior.route.clone(),
+                    prompt_version: prior.prompt_version.clone(),
+                    input_hash: hash.clone(),
+                    usage: prior.usage_as(),
+                },
+                Some(prior.id),
+                None,
+            )
+        }
+        aigov::ExecutionPlan::Execute { execution_id } => {
+            match state.gateway.summarize_result(&req).await {
+                Ok(r) => (r, None, Some(execution_id)),
+                Err(err) => {
+                    audit::record(
+                        &state.pool,
+                        &ctx,
+                        "ai.generation.failed",
+                        Some("encounter"),
+                        Some(id.to_string()),
+                        "deny",
+                        Some(match err {
+                            dmind_gateway::GatewayError::Unavailable(_) => "provider_unavailable",
+                            dmind_gateway::GatewayError::Disabled(_) => "provider_disabled",
+                            dmind_gateway::GatewayError::InvalidOutput(_) => "invalid_output",
+                            dmind_gateway::GatewayError::PolicyDenied(_) => "policy_denied",
+                        }),
+                    )
+                    .await
+                    .map_err(ApiError::internal)?;
+                    return Err(aigov::gateway_error(err));
+                }
+            }
+        }
+    };
 
     // Deterministically identified documentation gaps are limitations the
     // clinician sees alongside the provider's own limitations.
@@ -1562,19 +1627,22 @@ pub async fn ai_draft(
         ));
     }
 
-    // The artifact is bound to the note version its citations name; the lock
-    // makes a change impossible, and this re-read is the invariant check.
-    let current_note_version: Option<i64> = sqlx::query_scalar(
-        "SELECT version FROM encounter_notes WHERE tenant_id = $1 AND encounter_id = $2",
-    )
-    .bind(enc.tenant_id)
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if current_note_version != note_version {
+    // The artifact is bound to the exact facts its citations name: the
+    // encounter is re-locked and the facts re-collected; any change (note,
+    // vitals, diagnoses, status) refuses the draft instead of storing a stale one.
+    let mut tx = state.pool.begin().await?;
+    let enc = lock_encounter(&mut tx, id).await?;
+    require_own_active(&enc, &ctx)?;
+    let current = collect_encounter_facts(&mut tx, &enc, id).await?;
+    let current_hash = dmind_gateway::input_hash(&SummaryRequest {
+        template: req.template.clone(),
+        facts: current.facts,
+        language: language.into(),
+    });
+    if current_hash != hash || current.note_version != note_version {
         return Err(ApiError::conflict(
             "note_version_changed",
-            "the note changed while the draft was being generated; request a new draft",
+            "the encounter changed while the draft was being generated; request a new draft",
         ));
     }
 
@@ -1607,6 +1675,27 @@ pub async fn ai_draft(
     .bind(note_version)
     .execute(&mut *tx)
     .await?;
+    let provider = ProviderInfo {
+        provider: resp.route.clone(),
+        model: resp.model.clone(),
+        model_version: resp.model_version.clone(),
+    };
+    aigov::annotate(
+        &mut tx,
+        artifact_id,
+        &aigov::Provenance {
+            provider: &provider,
+            prompt_version: &resp.prompt_version,
+            input_refs: &input_refs,
+            usage: resp.usage.as_ref(),
+            synthetic: state.runtime.synthetic_output(),
+            reused_from,
+        },
+    )
+    .await?;
+    if let Some(execution_id) = execution_id {
+        aigov::bind_execution(&mut tx, execution_id, artifact_id).await?;
+    }
     audit::emit(
         &mut *tx,
         &ctx,
@@ -1617,6 +1706,7 @@ pub async fn ai_draft(
             "encounter_id": id,
             "note_version": note_version,
             "input_hash": resp.input_hash,
+            "reused_from": reused_from,
         }),
         None,
     )
@@ -1633,6 +1723,9 @@ pub async fn ai_draft(
         "note_version": note_version,
         "model": resp.model,
         "model_version": resp.model_version,
+        "route": resp.route,
+        "prompt_version": resp.prompt_version,
+        "synthetic": state.runtime.synthetic_output(),
     })))
 }
 

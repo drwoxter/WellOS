@@ -3,6 +3,12 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import TriagePage from "@/app/visits/[id]/triage/page";
 import { SessionProvider } from "@/lib/session";
+import {
+  AI_READY,
+  DISABLED,
+  DEGRADED,
+  capabilities,
+} from "./fixtures/capabilities";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -31,6 +37,7 @@ function meta(roles: string[]) {
         can_act_clinically: roles.includes("physician"),
       },
     ],
+    ai_capabilities: AI_READY,
   };
 }
 
@@ -371,6 +378,29 @@ describe("triage workspace", () => {
     );
     await waitFor(() => expect(loads()).toBe(2));
     expect(screen.getByLabelText("Onset")).toHaveValue("Since yesterday");
+  });
+
+  it("disables only the dMind action with the real reason when the model provider is disabled", async () => {
+    const { posts } = setup(detail(), {
+      handler: (url) =>
+        url === "/api/v1/meta/tenant"
+          ? jsonResponse({
+              ...meta(["nurse"]),
+              ai_capabilities: capabilities({ model: DISABLED }),
+            })
+          : undefined,
+    });
+    const panel = await screen.findByRole("region", {
+      name: "dMind triage suggestion",
+    });
+    const ask = within(panel).getByRole("button", { name: "Ask dMind" });
+    expect(ask).toBeDisabled();
+    expect(
+      within(panel).getByText(/disabled by configuration for this deployment/),
+    ).toBeInTheDocument();
+    // The deterministic triage itself stays fully usable.
+    expect(screen.getByLabelText("Onset")).toBeEnabled();
+    expect(posts.filter((p) => p.url.endsWith("/proposal"))).toHaveLength(0);
   });
 
   it("reviews a dMind proposal only by explicit decision and adopts it into the form", async () => {

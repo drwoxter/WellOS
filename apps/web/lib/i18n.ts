@@ -74,10 +74,23 @@ const dict = {
     roleNurse: "Nurse",
     roleRegistration: "Registration staff",
     rolePrivacy: "Privacy officer",
-    demoGarcia: "Dr. Gabriel García — orders tests, reviews and closes results",
-    demoNurse: "Nurse Ana Kim — triages arrivals and monitors results",
-    demoRegistration: "Reg. Rosa Rivera — registers patients and arrivals",
-    demoPrivacy: "Priv. Petra Wolf — audit and consent oversight",
+    roleLaboratory: "Laboratory professional",
+    rolePharmacist: "Pharmacist",
+    roleClinicalAdmin: "Clinical administrator",
+    roleSecurityAuditor: "Security auditor",
+    roleResearch: "Research user",
+    roleBreakGlass: "Emergency access",
+    devLoginSynthetic: "Synthetic tenant",
+    signInMethodsUnavailable:
+      "Sign-in is temporarily unavailable because the server could not be reached. Try again shortly.",
+    noSignInMethod:
+      "No sign-in method is configured for this deployment. Contact your administrator.",
+    oidcNotConfiguredDev:
+      "No identity provider is configured in this development environment; use a synthetic development identity below.",
+    devLoginUnavailable:
+      "The development sign-in list could not be loaded from the server.",
+    devLoginEmpty:
+      "No synthetic users are seeded yet. Run the synthetic seed in development mode.",
     signInAs: "Sign in as",
     // Dashboard
     dashboard: "Home",
@@ -344,6 +357,15 @@ const dict = {
       "Generates an assistive draft from facts already recorded in this consultation. It never diagnoses, prescribes, orders, or changes the record.",
     aiGenerateDraft: "Generate draft summary",
     aiAssistiveDraft: "Assistive draft — requires your review",
+    aiSyntheticProvider:
+      "Synthetic fixture provider: output is deterministic test data, not a clinical model.",
+    aiCapabilityDegraded:
+      "The AI provider reported recent failures; requests may fail and can be retried.",
+    aiCapabilityDisabled:
+      "This AI capability is disabled by configuration for this deployment. The rest of the workflow is unaffected.",
+    aiCapabilityInvalid:
+      "This AI capability is unavailable because its configuration is invalid. Contact your administrator.",
+    aiCapabilityUnknown: "Checking AI capability availability…",
     aiFactsUsed: "Encounter facts used",
     aiAcceptDraft: "Accept and copy into assessment",
     aiRejectDraft: "Reject draft",
@@ -395,6 +417,8 @@ const dict = {
     recordingTooLarge: "The recording is too large to transcribe.",
     scribeRateLimited:
       "Too many transcriptions in a short time. Wait a moment and retry.",
+    scribeContextChanged:
+      "The diagnoses changed while the draft was being prepared, so it was discarded. Retry to draft against the current diagnoses.",
     encounterClosedScribe:
       "This consultation is closed; the draft can no longer be applied.",
     elapsed: "Elapsed",
@@ -990,15 +1014,27 @@ const dict = {
     devLoginHelp:
       "Solo en modo de desarrollo. Elija un usuario sintético de demostración; no hay credenciales ni datos de pacientes reales.",
     devLoginBadge: "Solo desarrollo",
-    roleClinician: "Médica",
-    roleNurse: "Enfermera",
+    roleClinician: "Médico/a",
+    roleNurse: "Enfermería",
     roleRegistration: "Personal de admisión",
     rolePrivacy: "Oficial de privacidad",
-    demoGarcia:
-      "Dr. Gabriel García — solicita pruebas, revisa y cierra resultados",
-    demoNurse: "Enf. Ana Kim — realiza el triaje y supervisa resultados",
-    demoRegistration: "Adm. Rosa Rivera — registra pacientes y llegadas",
-    demoPrivacy: "Priv. Petra Wolf — auditoría y consentimientos",
+    roleLaboratory: "Profesional de laboratorio",
+    rolePharmacist: "Farmacia",
+    roleClinicalAdmin: "Administración clínica",
+    roleSecurityAuditor: "Auditoría de seguridad",
+    roleResearch: "Investigación",
+    roleBreakGlass: "Acceso de emergencia",
+    devLoginSynthetic: "Inquilino sintético",
+    signInMethodsUnavailable:
+      "El inicio de sesión no está disponible temporalmente porque no se pudo contactar con el servidor. Inténtelo de nuevo en breve.",
+    noSignInMethod:
+      "No hay ningún método de inicio de sesión configurado en este despliegue. Contacte con su administrador.",
+    oidcNotConfiguredDev:
+      "No hay un proveedor de identidad configurado en este entorno de desarrollo; use una identidad sintética de desarrollo más abajo.",
+    devLoginUnavailable:
+      "No se pudo cargar la lista de acceso de desarrollo desde el servidor.",
+    devLoginEmpty:
+      "Aún no hay usuarios sintéticos. Ejecute la carga sintética en modo desarrollo.",
     signInAs: "Entrar como",
     // Dashboard
     dashboard: "Inicio",
@@ -1269,6 +1305,15 @@ const dict = {
       "Genera un borrador asistencial a partir de datos ya registrados en esta consulta. Nunca diagnostica, prescribe, ordena ni modifica el registro.",
     aiGenerateDraft: "Generar borrador de resumen",
     aiAssistiveDraft: "Borrador asistencial — requiere su revisión",
+    aiSyntheticProvider:
+      "Proveedor sintético de pruebas: la salida es determinista y no procede de un modelo clínico.",
+    aiCapabilityDegraded:
+      "El proveedor de IA ha notificado fallos recientes; las solicitudes pueden fallar y reintentarse.",
+    aiCapabilityDisabled:
+      "Esta capacidad de IA está desactivada por configuración en este despliegue. El resto del flujo no se ve afectado.",
+    aiCapabilityInvalid:
+      "Esta capacidad de IA no está disponible porque su configuración no es válida. Contacte con su administrador.",
+    aiCapabilityUnknown: "Comprobando la disponibilidad de la capacidad de IA…",
     aiFactsUsed: "Datos de la consulta utilizados",
     aiAcceptDraft: "Aceptar y copiar en la valoración",
     aiRejectDraft: "Rechazar borrador",
@@ -1322,6 +1367,8 @@ const dict = {
     recordingTooLarge: "La grabación es demasiado grande para transcribir.",
     scribeRateLimited:
       "Demasiadas transcripciones en poco tiempo. Espere un momento y reintente.",
+    scribeContextChanged:
+      "Los diagnósticos cambiaron mientras se preparaba el borrador, por lo que se descartó. Reintente para redactar con los diagnósticos actuales.",
     encounterClosedScribe:
       "Esta consulta está cerrada; el borrador ya no puede aplicarse.",
     elapsed: "Transcurrido",

@@ -83,8 +83,9 @@ but never drive a rule.
 
 ## dMind triage assistant: human-review boundary
 
-`POST /visits/:id/triage/proposal` asks the dMind gateway (deterministic
-offline fake provider by default and in CI) for a `triage-proposal.v1`
+`POST /visits/:id/triage/proposal` asks the configured dMind gateway
+(`DMIND_MODEL_PROVIDER`; the deterministic fixture in CI and tests) for a
+`triage-proposal.v1`
 artifact: proposed priority and destination service, important facts, missing
 information, contradictions, handoff summary, rationale, confidence,
 limitations and cited source fields. Boundaries:

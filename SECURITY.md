@@ -40,9 +40,14 @@ receive an acknowledgement within 5 business days.
   fail closed with 401. MFA is never inferred from email, role or any
   client-provided header.
 - **Development tokens** (`dev-<username>`) authenticate seeded synthetic
-  users only when `WELLOS_ENV=development` **and** `WELLOS_DEV_AUTH=true`.
-  Startup fails closed if dev auth is enabled in any other environment, and
-  fails closed if neither dev auth nor an identity provider is configured.
+  users only (humans of a `data_class = 'synthetic'` tenant with no real
+  identity-provider subject; production-class users fail with 401 even in
+  fixture mode) on a build compiled with `--features dev-fixtures`, when
+  `WELLOS_ENV` is `development` or `test` **and** `WELLOS_DEV_AUTH=true`
+  (default `false`). Startup fails closed if dev auth is enabled in
+  `staging`/`production` or on a build without the feature, if `WELLOS_ENV`
+  is missing or unknown, and if neither dev auth nor an identity provider is
+  configured. No `NEXT_PUBLIC_*` variable influences authentication.
 - **Service credentials:** machines authenticate with random 256-bit
   `wsk_...` secrets. Only a SHA-256 hash is stored, with principal, scopes
   (e.g. `result.ingest`), creation, expiration, revocation and last-used
@@ -178,9 +183,12 @@ receive an acknowledgement within 5 business days.
   reach browser JavaScript, cookies, URLs, logs, or audit payloads. Logout
   revokes the local session first; a discovery-validated
   `end_session_endpoint` is offered as optional provider logout.
-- The token-entry form renders only in explicit local development
-  (`NEXT_PUBLIC_WELLOS_DEV_AUTH=true`; the backend additionally requires
-  `WELLOS_ENV=development` and `WELLOS_DEV_AUTH=true`).
+- Development sign-in is server-controlled: the sign-in page renders
+  synthetic development identities only when `GET /api/v1/auth/providers`
+  reports them, which requires a `dev-fixtures` build with
+  `WELLOS_ENV=development|test` and `WELLOS_DEV_AUTH=true`. The browser
+  bundle contains no usernames and no client-side flag can enable it;
+  staging/production builds have no such route.
 - CORS uses an explicit allowlist (`WELLOS_ALLOWED_ORIGINS`); startup fails
   outside development if it is not configured. `DATABASE_URL` is likewise
   required outside development (the localhost fallback is dev-only).
@@ -189,9 +197,39 @@ receive an acknowledgement within 5 business days.
   (`default-src 'none'; frame-ancestors 'none'`, appropriate for a JSON
   API), and HSTS outside development.
 
+## Runtime environments and fixtures
+
+- `WELLOS_ENV` is typed (`development | test | staging | production`) and
+  validated once at startup; a missing or unknown value refuses to start
+  rather than defaulting to development behaviour.
+- Everything that exists only for development and tests is compiled behind
+  the Cargo feature `dev-fixtures` **and** checked again at runtime: fake
+  model/transcription providers, development tokens, the development-user
+  discovery endpoint and the synthetic seed binary. A production build
+  (`cargo build --release -p wellos-server`, no feature) contains none of
+  them; a `dev-fixtures` build still refuses them in `staging`/`production`.
+- Synthetic seeding additionally requires the explicit opt-in
+  `WELLOS_ALLOW_SYNTHETIC_SEED=true`, only writes into a tenant marked
+  `data_class='synthetic'` (it refuses to touch any other tenant) and
+  identifies its human users with `synthetic|<username>` OIDC subjects. The
+  seed contains no real patient information.
+- AI providers default to `disabled`. External providers
+  (`openai_compatible`) require `WELLOS_ALLOW_EXTERNAL_AI=true`, an exact
+  hostname allowlist and HTTPS outside development; they never follow
+  redirects, are bounded by timeouts, response-size caps, retry limits,
+  concurrency limits and hourly per-tenant/per-task quotas, and API keys
+  never appear in errors or logs. There is no fallback from a failing real
+  provider to fixture output, and `/ready` reports each AI capability
+  honestly (`ready`, `degraded`, `disabled`, `invalid_configuration`,
+  with `synthetic: true` for fixtures). See
+  `docs/architecture/ai-native-platform.md`.
+
 ## Logging
 
 - Logs and outbox events carry identifiers, not clinical payloads.
+- Prompts, transcripts, model responses and audio are never logged, at any
+  level; the integration suite captures `TRACE` output to assert this for
+  the scribe path.
 - Tokens, authorization headers and secret material are never logged; the
   seed tool prints a development credential once, locally only.
 
