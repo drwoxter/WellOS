@@ -736,7 +736,7 @@ pub async fn detail(
     let artifacts = sqlx::query(
         "SELECT id, observation_id, artifact_type, autonomy_level, status, model, model_version, route,
                 template, input_hash, output, citations, limitations, review_decision,
-                review_note, reviewed_at, generated_at
+                review_note, reviewed_at, generated_at, synthetic
          FROM ai_artifacts WHERE tenant_id=$1 AND service_request_id=$2 ORDER BY created_at",
     )
     .bind(sr.tenant_id)
@@ -759,6 +759,7 @@ pub async fn detail(
             "output": r.get::<Option<Value>,_>("output"),
             "citations": r.get::<Value,_>("citations"),
             "limitations": r.get::<Value,_>("limitations"),
+            "synthetic": r.get::<bool,_>("synthetic"),
             "review_decision": r.get::<Option<String>,_>("review_decision"),
             "review_note": r.get::<Option<String>,_>("review_note"),
             "reviewed_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("reviewed_at"),

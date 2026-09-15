@@ -15,7 +15,7 @@ use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
 use chrono::{DateTime, DurationRound, Utc};
-use dmind_gateway::{GatewayError, Operation, SummaryRequest};
+use dmind_gateway::{GatewayError, SummaryRequest};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -508,12 +508,14 @@ async fn generate_summary(
     // Governance first: capability, external-processing consent, artifact
     // reuse and quota. A refusal leaves the draft visibly unavailable rather
     // than fabricating a summary.
+    let scope = aigov::ReuseScope::ResultSummary {
+        observation_id: obs_id,
+    };
     let plan = match aigov::plan(
         state,
         tenant_id,
         patient_id,
-        "result_summary",
-        Operation::ResultSummary,
+        scope,
         &hash,
         "result-summary.v1",
     )
@@ -525,6 +527,7 @@ async fn generate_summary(
             return Ok(());
         }
     };
+    let synthetic = plan.model_synthetic();
     let (outcome, reused_from, execution_id) = match plan {
         aigov::ExecutionPlan::Reuse(prior) => {
             let output: wellos_domain::ai::ResultSummaryV1 = prior.output_as()?;
@@ -539,7 +542,7 @@ async fn generate_summary(
             };
             (Ok(resp), Some(prior.id), None)
         }
-        aigov::ExecutionPlan::Execute { execution_id } => (
+        aigov::ExecutionPlan::Execute { execution_id, .. } => (
             state.gateway.summarize_result(&req).await,
             None,
             Some(execution_id),
@@ -580,11 +583,12 @@ async fn generate_summary(
                     &mut tx,
                     artifact_id,
                     &aigov::Provenance {
+                        scope,
                         provider: &provider,
                         prompt_version: &resp.prompt_version,
                         input_refs: &input_refs,
                         usage: resp.usage.as_ref(),
-                        synthetic: state.runtime.synthetic_output(),
+                        synthetic,
                         reused_from,
                     },
                 )
@@ -597,7 +601,11 @@ async fn generate_summary(
                     ctx,
                     "ai.artifact.generated",
                     &state.cell,
-                    json!({ "artifact_id": artifact_id, "reused_from": reused_from }),
+                    json!({
+                        "artifact_id": artifact_id,
+                        "reused_from": reused_from,
+                        "synthetic": synthetic,
+                    }),
                     None,
                 )
                 .await

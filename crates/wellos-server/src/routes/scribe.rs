@@ -32,7 +32,6 @@ use base64::Engine;
 use chrono::Utc;
 use dmind_gateway::notes::{note_input_hash, NoteDraftRequest, NOTE_DRAFT_TEMPLATE};
 use dmind_gateway::scribe::{ScribeError, TranscriptionRequest};
-use dmind_gateway::Operation;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -457,16 +456,19 @@ pub async fn transcribe(
         context_facts: context_facts.clone(),
     };
     let input_hash = note_input_hash(&note_request);
+    let scope = aigov::ReuseScope::ScribeDraft { encounter_id: id };
     let plan = aigov::plan(
         &state,
         enc.tenant_id,
         enc.patient_id,
-        "scribe_draft",
-        Operation::NoteDraft,
+        scope,
         &input_hash,
         SCRIBE_DRAFT_SCHEMA,
     )
     .await?;
+    // The draft is synthetic if either provider on its path is: the
+    // transcription that just ran, or the model (or reused model output).
+    let synthetic = scribe_status.synthetic || plan.model_synthetic();
     let (
         sections,
         flags,
@@ -491,7 +493,7 @@ pub async fn transcribe(
                 None,
             )
         }
-        aigov::ExecutionPlan::Execute { execution_id } => {
+        aigov::ExecutionPlan::Execute { execution_id, .. } => {
             let resp = match state.gateway.draft_note(&note_request).await {
                 Ok(r) => r,
                 Err(err) => {
@@ -618,11 +620,12 @@ pub async fn transcribe(
         &mut tx,
         artifact_id,
         &aigov::Provenance {
+            scope,
             provider: &draft.extraction,
             prompt_version: &prompt_version,
             input_refs: &input_refs,
             usage: usage.as_ref(),
-            synthetic: state.runtime.synthetic_output(),
+            synthetic,
             reused_from,
         },
     )
@@ -663,6 +666,7 @@ pub async fn transcribe(
             "provider": draft.extraction.provider,
             "prompt_version": prompt_version,
             "reused_from": reused_from,
+            "synthetic": synthetic,
         }),
         None,
     )
@@ -684,7 +688,7 @@ pub async fn transcribe(
         "review_detail": json!({ "applied": [] }),
         "note_version": note_version,
         "stale": false,
-        "synthetic": state.runtime.synthetic_output(),
+        "synthetic": synthetic,
     })))
 }
 

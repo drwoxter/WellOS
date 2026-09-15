@@ -1,13 +1,16 @@
 //! Governed model execution shared by every dMind route.
 //!
 //! Before a route calls the model gateway it asks for an [`ExecutionPlan`]:
-//! either an identical valid prior artifact exists (same tenant, task, input
-//! hash, model, prompt version and output schema) and its output is reused
-//! without spending provider credit, or a quota-checked execution is
-//! reserved. Every successful generation is then annotated with the full
-//! provenance ([`Provenance`]) the AIArtifact contract requires. Nothing in
-//! this module ever fabricates or substitutes output: a disabled or
-//! unavailable provider surfaces as a typed error the caller maps honestly.
+//! either an identical valid prior artifact exists for the very same
+//! clinical scope (tenant, patient, task, bound clinical resource, input
+//! hash, provider, model, model version, prompt version and output schema)
+//! and its output is reused without spending provider credit, or a
+//! quota-checked execution is reserved. Every successful generation is then
+//! annotated with the full provenance ([`Provenance`]) the AIArtifact
+//! contract requires, including whether any synthetic provider took part.
+//! Nothing in this module ever fabricates or substitutes output: a disabled
+//! or unavailable provider surfaces as a typed error the caller maps
+//! honestly.
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -48,24 +51,99 @@ impl ReusableArtifact {
 
 #[derive(Debug)]
 pub enum ExecutionPlan {
-    /// Reuse `artifact`; the provider is not called.
+    /// Reuse `artifact`; the provider is not called. Its stored `synthetic`
+    /// flag travels with the output.
     Reuse(Box<ReusableArtifact>),
-    /// A quota slot was reserved; call the provider now.
-    Execute { execution_id: Uuid },
+    /// A quota slot was reserved; call the provider now. `synthetic` is the
+    /// model provider's own declaration for this execution.
+    Execute { execution_id: Uuid, synthetic: bool },
+}
+
+impl ExecutionPlan {
+    /// Whether model output produced under this plan is synthetic: a reused
+    /// artifact keeps its recorded flag, a new execution takes the provider's.
+    pub fn model_synthetic(&self) -> bool {
+        match self {
+            ExecutionPlan::Reuse(prior) => prior.synthetic,
+            ExecutionPlan::Execute { synthetic, .. } => *synthetic,
+        }
+    }
+}
+
+/// The exact clinical resource a dMind task is bound to. Every task declares
+/// its scope here, so an artifact can only ever be reused for the same
+/// patient *and* the same encounter, visit, observation or risk assessment
+/// it was generated for. The variant fixes the `artifact_type`, the gateway
+/// [`Operation`] and the `ai_artifacts` column that holds the resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReuseScope {
+    ResultSummary { observation_id: Uuid },
+    EncounterSummary { encounter_id: Uuid },
+    ScribeDraft { encounter_id: Uuid },
+    TriageProposal { visit_id: Uuid },
+    RiskSummary { risk_assessment_id: Uuid },
+}
+
+impl ReuseScope {
+    pub fn artifact_type(self) -> &'static str {
+        match self {
+            ReuseScope::ResultSummary { .. } => "result_summary",
+            ReuseScope::EncounterSummary { .. } => "encounter_summary",
+            ReuseScope::ScribeDraft { .. } => "scribe_draft",
+            ReuseScope::TriageProposal { .. } => "triage_proposal",
+            ReuseScope::RiskSummary { .. } => "risk_summary",
+        }
+    }
+
+    pub fn operation(self) -> Operation {
+        match self {
+            ReuseScope::ResultSummary { .. } | ReuseScope::EncounterSummary { .. } => {
+                Operation::ResultSummary
+            }
+            ReuseScope::ScribeDraft { .. } => Operation::NoteDraft,
+            ReuseScope::TriageProposal { .. } => Operation::TriageProposal,
+            ReuseScope::RiskSummary { .. } => Operation::RiskSummary,
+        }
+    }
+
+    /// The `ai_artifacts` column binding the artifact to its resource. A
+    /// closed set of identifiers, safe to splice into SQL.
+    pub fn resource_column(self) -> &'static str {
+        match self {
+            ReuseScope::ResultSummary { .. } => "observation_id",
+            ReuseScope::EncounterSummary { .. } | ReuseScope::ScribeDraft { .. } => "encounter_id",
+            ReuseScope::TriageProposal { .. } => "visit_id",
+            ReuseScope::RiskSummary { .. } => "risk_assessment_id",
+        }
+    }
+
+    pub fn resource_id(self) -> Uuid {
+        match self {
+            ReuseScope::ResultSummary { observation_id } => observation_id,
+            ReuseScope::EncounterSummary { encounter_id }
+            | ReuseScope::ScribeDraft { encounter_id } => encounter_id,
+            ReuseScope::TriageProposal { visit_id } => visit_id,
+            ReuseScope::RiskSummary { risk_assessment_id } => risk_assessment_id,
+        }
+    }
 }
 
 /// Provenance written on every generated artifact.
 #[derive(Debug, Clone)]
 pub struct Provenance<'a> {
+    pub scope: ReuseScope,
     pub provider: &'a ProviderInfo,
     pub prompt_version: &'a str,
     pub input_refs: &'a [String],
     pub usage: Option<&'a Usage>,
+    /// True when any provider on the execution path (model, or transcription
+    /// feeding it) is synthetic, or when a synthetic artifact was reused.
     pub synthetic: bool,
     pub reused_from: Option<Uuid>,
 }
 
-/// Decide how to satisfy a model request for `artifact_type` on `tenant_id`.
+/// Decide how to satisfy a model request for `scope` on `patient_id` of
+/// `tenant_id`.
 ///
 /// Runs in its own short transaction so the quota reservation is durable
 /// before any network call, and holds a per-tenant advisory lock so
@@ -74,8 +152,7 @@ pub async fn plan(
     state: &AppState,
     tenant_id: Uuid,
     patient_id: Uuid,
-    artifact_type: &str,
-    op: Operation,
+    scope: ReuseScope,
     input_hash: &str,
     output_schema: &str,
 ) -> Result<ExecutionPlan, ApiError> {
@@ -87,7 +164,8 @@ pub async fn plan(
         external_processing_allowed(state, tenant_id, patient_id).await?;
     }
     let info = state.gateway.info();
-    let prompt_version = state.gateway.prompt_version(op);
+    let prompt_version = state.gateway.prompt_version(scope.operation());
+    let artifact_type = scope.artifact_type();
 
     let mut tx = state.pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('ai_quota'), hashtext($1))")
@@ -97,12 +175,15 @@ pub async fn plan(
 
     if let Some(reusable) = find_reusable(
         &mut tx,
-        tenant_id,
-        artifact_type,
-        input_hash,
-        &info.model,
-        &prompt_version,
-        output_schema,
+        &ReuseKey {
+            tenant_id,
+            patient_id,
+            scope,
+            input_hash,
+            provider: &info,
+            prompt_version: &prompt_version,
+            output_schema,
+        },
     )
     .await?
     {
@@ -176,7 +257,10 @@ pub async fn plan(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(ExecutionPlan::Execute { execution_id })
+    Ok(ExecutionPlan::Execute {
+        execution_id,
+        synthetic: status.synthetic,
+    })
 }
 
 /// Patient data may only leave the cell when the deployment permits it and
@@ -259,35 +343,51 @@ fn output_stands(status: &str) -> bool {
     status != ArtifactStatus::Rejected.as_str() && status != ArtifactStatus::Withdrawn.as_str()
 }
 
+/// Everything that must be identical for a prior artifact to stand in for a
+/// new request. Any difference — another patient, another encounter or
+/// visit, another provider or model version — is a different request.
+struct ReuseKey<'a> {
+    tenant_id: Uuid,
+    patient_id: Uuid,
+    scope: ReuseScope,
+    input_hash: &'a str,
+    provider: &'a ProviderInfo,
+    prompt_version: &'a str,
+    output_schema: &'a str,
+}
+
 async fn find_reusable(
     conn: &mut PgConnection,
-    tenant_id: Uuid,
-    artifact_type: &str,
-    input_hash: &str,
-    model: &str,
-    prompt_version: &str,
-    output_schema: &str,
+    key: &ReuseKey<'_>,
 ) -> Result<Option<ReusableArtifact>, ApiError> {
-    let row = sqlx::query(
+    let sql = format!(
         "SELECT id, status, output, citations, limitations, model, model_version, route,
                 prompt_version, usage, synthetic
          FROM ai_artifacts
-         WHERE tenant_id = $1 AND artifact_type = $2 AND input_hash = $3
-           AND model = $4 AND prompt_version = $5 AND output_schema = $6
+         WHERE tenant_id = $1 AND patient_id = $2 AND artifact_type = $3 AND {resource} = $4
+           AND input_hash = $5
+           AND provider = $6 AND model = $7 AND model_version = $8
+           AND prompt_version = $9 AND output_schema = $10
            AND output IS NOT NULL
-           AND status = ANY($7)
+           AND status = ANY($11)
          ORDER BY generated_at DESC NULLS LAST, id DESC
          LIMIT 1",
-    )
-    .bind(tenant_id)
-    .bind(artifact_type)
-    .bind(input_hash)
-    .bind(model)
-    .bind(prompt_version)
-    .bind(output_schema)
-    .bind(&decided_statuses()[..])
-    .fetch_optional(&mut *conn)
-    .await?;
+        resource = key.scope.resource_column()
+    );
+    let row = sqlx::query(&sql)
+        .bind(key.tenant_id)
+        .bind(key.patient_id)
+        .bind(key.scope.artifact_type())
+        .bind(key.scope.resource_id())
+        .bind(key.input_hash)
+        .bind(&key.provider.provider)
+        .bind(&key.provider.model)
+        .bind(&key.provider.model_version)
+        .bind(key.prompt_version)
+        .bind(key.output_schema)
+        .bind(&decided_statuses()[..])
+        .fetch_optional(&mut *conn)
+        .await?;
     let r = match row {
         Some(r) if output_stands(r.get::<String, _>("status").as_str()) => r,
         _ => return Ok(None),
@@ -324,32 +424,52 @@ pub async fn bind_execution(
 
 /// Write the provenance columns of an artifact inside the caller's
 /// transaction (the route already wrote the typed output and citations).
+///
+/// The update only applies when the artifact row is bound to the declared
+/// scope and, if output is reused, the prior artifact shares the artifact's
+/// tenant, patient, task and clinical resource; otherwise nothing is written
+/// and the caller's transaction fails. The database additionally enforces
+/// tenant and patient agreement for `reused_from`.
 pub async fn annotate(
     conn: &mut PgConnection,
     artifact_id: Uuid,
     provenance: &Provenance<'_>,
 ) -> Result<(), ApiError> {
-    sqlx::query(
-        "UPDATE ai_artifacts
+    let resource = provenance.scope.resource_column();
+    let sql = format!(
+        "UPDATE ai_artifacts a
          SET provider = $2, prompt_version = $3, input_refs = $4, usage = $5,
              synthetic = $6, reused_from = $7
-         WHERE id = $1",
-    )
-    .bind(artifact_id)
-    .bind(&provenance.provider.provider)
-    .bind(provenance.prompt_version)
-    .bind(serde_json::to_value(provenance.input_refs).map_err(ApiError::internal)?)
-    .bind(
-        provenance
-            .usage
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(ApiError::internal)?,
-    )
-    .bind(provenance.synthetic)
-    .bind(provenance.reused_from)
-    .execute(&mut *conn)
-    .await?;
+         WHERE a.id = $1 AND a.artifact_type = $8 AND a.{resource} = $9
+           AND ($7::uuid IS NULL OR EXISTS (
+                 SELECT 1 FROM ai_artifacts p
+                 WHERE p.id = $7 AND p.tenant_id = a.tenant_id AND p.patient_id = a.patient_id
+                   AND p.artifact_type = a.artifact_type AND p.{resource} = a.{resource}))"
+    );
+    let updated = sqlx::query(&sql)
+        .bind(artifact_id)
+        .bind(&provenance.provider.provider)
+        .bind(provenance.prompt_version)
+        .bind(serde_json::to_value(provenance.input_refs).map_err(ApiError::internal)?)
+        .bind(
+            provenance
+                .usage
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(ApiError::internal)?,
+        )
+        .bind(provenance.synthetic)
+        .bind(provenance.reused_from)
+        .bind(provenance.scope.artifact_type())
+        .bind(provenance.scope.resource_id())
+        .execute(&mut *conn)
+        .await?;
+    if updated.rows_affected() != 1 {
+        return Err(ApiError::internal(format!(
+            "artifact {artifact_id} provenance refused: scope {:?} or reuse link {:?} does not match the artifact",
+            provenance.scope, provenance.reused_from
+        )));
+    }
     Ok(())
 }
 

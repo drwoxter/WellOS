@@ -100,14 +100,22 @@ provider is called:
 1. capability callable; external processing permitted by tenant policy and
    the patient's `ai_external_processing` consent when the provider is
    external;
-2. **reuse**: the newest decided artifact with the same tenant, task, input
-   hash, model, prompt version and output-schema version controls the
-   decision. If it is `awaiting_review`, `approved` or `superseded` it is
-   returned instead (recorded via `reused_from`; no provider call, no quota
-   consumption); if it is `rejected` or `withdrawn` nothing is reused and a
-   fresh execution runs — an older approved copy never outranks a newer
-   professional rejection. `draft`, `invalidated` and `unavailable` rows
-   never qualify;
+2. **reuse**: every caller declares a typed `ReuseScope` (the task plus the
+   clinical resource the output is bound to: `result_summary` →
+   `observation_id`, `encounter_summary` and `scribe_draft` →
+   `encounter_id`, `triage_proposal` → `visit_id`, `risk_summary` →
+   `risk_assessment_id`); `aigov::plan` cannot be called without one. The
+   newest decided artifact with the same tenant, **patient**, task,
+   **resource**, input hash, **provider**, model, **model version**, prompt
+   version and output-schema version controls the decision. If it is
+   `awaiting_review`, `approved` or `superseded` it is returned instead
+   (recorded via `reused_from`; no provider call, no quota consumption); if
+   it is `rejected` or `withdrawn` nothing is reused and a fresh execution
+   runs — an older approved copy never outranks a newer professional
+   rejection. `draft`, `invalidated` and `unavailable` rows never qualify.
+   Output is therefore never shared across patients or across two
+   observations, encounters, visits or risk assessments of the same patient,
+   even when the model input is byte-identical;
 3. **quotas**: hourly per-tenant (`DMIND_QUOTA_TENANT_PER_HOUR`) and
    per-task (`DMIND_QUOTA_TASK_PER_HOUR`) execution counts are checked under
    an advisory lock and a row is reserved in `ai_executions`, so concurrent
@@ -120,6 +128,31 @@ scope, task type, authorized input references (`input_refs`), input hash,
 provider, model, prompt version, output-schema version, timestamps and
 status, citations, limitations, token usage when the provider reports it,
 `synthetic`, review status and the reviewer/disposition once reviewed.
+`synthetic` is derived from the actual execution path, never from the
+process-wide provider configuration: a new model execution takes the model
+capability's `synthetic` flag, a reused artifact keeps the prior row's flag,
+and a Scribe draft is `transcription.synthetic || model.synthetic` (for a
+reused extraction, the *current* transcription provider's flag OR the prior
+artifact's flag). The same computed value is persisted in
+`ai_artifacts.synthetic`, returned by the route, recorded in the
+`ai.artifact.generated` audit event and drives the UI's synthetic-provider
+notice, so output that a fixture provider took part in can never appear as
+real.
+
+`reused_from` is protected in depth: the database only accepts a link to an
+artifact of the same tenant and patient (composite foreign key over
+`(id, tenant_id, patient_id)`, migration `0014`), and `aigov::annotate`
+additionally verifies inside the persistence transaction that both rows
+share the task and the bound clinical resource before the link is written.
+Migration `0014` also severed pre-existing links that crossed patients
+(invalidating undecided outputs; recorded decisions are preserved), widened
+the deduplication index to the full reuse key and marked artifacts whose
+stored provenance or Scribe JSON proves the fixture provider took part as
+`synthetic=true` without touching real-provider rows. Rollback of the
+structural parts is a forward migration that restores the previous foreign
+key and index (documented at the top of the migration file); the data
+corrections are not reverted.
+
 Output stays a proposal until an authorized professional accepts it;
 acceptance, rejection and edits are audited. Automated CI configures the
 fixture providers explicitly and never contacts an external model.

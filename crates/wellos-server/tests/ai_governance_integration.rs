@@ -6,7 +6,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use dmind_gateway::{DisabledGateway, Operation};
+use dmind_gateway::DisabledGateway;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -277,44 +277,46 @@ async fn task_quota_is_enforced_per_hour_with_retry_after() {
         AuthConfig::development(),
         runtime,
     );
-    let (patient, tenant) = patient_by_identifier(&state, "SYN-0103").await;
-    // A task type unique to this test so no other suite's executions count.
-    let task = format!("quota-test-{}", Uuid::now_v7().simple());
+    // An isolated synthetic tenant so no other suite's executions count.
+    let tenant = isolated_tenant(&state.pool, "Quota fixture").await;
+    let patient = Uuid::now_v7();
+    let task = "risk_summary";
+    let scope = aigov::ReuseScope::RiskSummary {
+        risk_assessment_id: Uuid::now_v7(),
+    };
 
-    let plan = aigov::plan(
-        &state,
-        tenant,
-        patient,
-        &task,
-        Operation::RiskSummary,
-        "hash-1",
-        "risk-summary.v1",
-    )
-    .await
-    .unwrap();
+    let plan = aigov::plan(&state, tenant, patient, scope, "hash-1", "risk-summary.v1")
+        .await
+        .unwrap();
     assert!(matches!(plan, aigov::ExecutionPlan::Execute { .. }));
-    assert_eq!(executions(&state, tenant, &task).await, 1);
+    assert_eq!(executions(&state, tenant, task).await, 1);
 
-    let err = aigov::plan(
-        &state,
-        tenant,
-        patient,
-        &task,
-        Operation::RiskSummary,
-        "hash-2",
-        "risk-summary.v1",
-    )
-    .await
-    .expect_err("second distinct request exceeds the task quota");
+    let err = aigov::plan(&state, tenant, patient, scope, "hash-2", "risk-summary.v1")
+        .await
+        .expect_err("second distinct request exceeds the task quota");
     assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(err.code, "ai_quota_exceeded");
     let retry = err.retry_after.expect("Retry-After is set");
     assert!(retry > 0 && retry <= 3600, "{retry}");
     assert_eq!(
-        executions(&state, tenant, &task).await,
+        executions(&state, tenant, task).await,
         1,
         "a refused request reserves nothing"
     );
+}
+
+async fn isolated_tenant(pool: &sqlx::PgPool, name: &str) -> Uuid {
+    let tenant = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO tenants (id, cell, name, data_class)
+         VALUES ($1, 'cell-test', $2, 'synthetic')",
+    )
+    .bind(tenant)
+    .bind(name)
+    .execute(pool)
+    .await
+    .unwrap();
+    tenant
 }
 
 /// `Retry-After` follows the window that actually blocks the request: an
@@ -336,28 +338,18 @@ async fn quota_retry_after_follows_the_blocking_window() {
         runtime,
     );
     // An isolated synthetic tenant so no other suite's executions count.
-    let tenant = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO tenants (id, cell, name, data_class)
-         VALUES ($1, 'cell-test', 'Quota window fixture', 'synthetic')",
-    )
-    .bind(tenant)
-    .execute(&state.pool)
-    .await
-    .unwrap();
+    let tenant = isolated_tenant(&state.pool, "Quota window fixture").await;
     let patient = Uuid::now_v7();
-    let task = format!("quota-window-{}", Uuid::now_v7().simple());
-    let other = format!("{task}-other");
+    // Task B is the risk summary; task A ("other") the triage proposal.
+    let task_scope = aigov::ReuseScope::RiskSummary {
+        risk_assessment_id: Uuid::now_v7(),
+    };
+    let other_scope = aigov::ReuseScope::TriageProposal {
+        visit_id: Uuid::now_v7(),
+    };
+    let other = other_scope.artifact_type();
     let plan_task = |hash: &'static str| {
-        aigov::plan(
-            &state,
-            tenant,
-            patient,
-            &task,
-            Operation::RiskSummary,
-            hash,
-            "risk-summary.v1",
-        )
+        aigov::plan(&state, tenant, patient, task_scope, hash, "risk-summary.v1")
     };
 
     // Task A ran 59 minutes ago ...
@@ -367,7 +359,7 @@ async fn quota_retry_after_follows_the_blocking_window() {
     )
     .bind(Uuid::now_v7())
     .bind(tenant)
-    .bind(&other)
+    .bind(other)
     .execute(&state.pool)
     .await
     .unwrap();
@@ -403,8 +395,7 @@ async fn quota_retry_after_follows_the_blocking_window() {
         &both,
         tenant,
         patient,
-        &task,
-        Operation::RiskSummary,
+        task_scope,
         "hash-3",
         "risk-summary.v1",
     )
@@ -427,10 +418,9 @@ async fn quota_retry_after_follows_the_blocking_window() {
         &both,
         tenant,
         patient,
-        &other,
-        Operation::RiskSummary,
+        other_scope,
         "hash-4",
-        "risk-summary.v1",
+        wellos_domain::triage::TRIAGE_PROPOSAL_SCHEMA,
     )
     .await
     .expect_err("tenant quota exhausted");
