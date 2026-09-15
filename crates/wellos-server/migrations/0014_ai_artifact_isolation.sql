@@ -2,12 +2,14 @@
 --
 -- 1. An artifact's output may only be reused for the same tenant, patient,
 --    task and clinical resource it was generated for. Existing reuse links
---    that crossed patients are severed (the link is dropped, the output is
---    untouched; the `ai.artifact.generated` audit event keeps the original
---    `reused_from` value) and, if the output was never professionally
---    decided on, the artifact is invalidated so it is not presented as a
---    current proposal. Approved/rejected artifacts keep the recorded
---    professional decision.
+--    that crossed tenants, patients, tasks or clinical resources (another
+--    encounter, observation, visit or risk assessment of the same patient)
+--    are severed (the link is dropped, the output is untouched; the
+--    `ai.artifact.generated` audit event keeps the original `reused_from`
+--    value) and, if the output was never professionally decided on, the
+--    artifact is invalidated so it is neither presented as a current
+--    proposal nor eligible to seed further reuse. Approved/rejected
+--    artifacts keep the recorded professional decision.
 -- 2. `reused_from` is guaranteed by the database to point at an artifact of
 --    the same tenant and patient: the reference is a composite foreign key
 --    over (id, tenant_id, patient_id). Resource-scope agreement is enforced
@@ -32,12 +34,30 @@
 -- The severed links, invalidations and synthetic flags are corrections of
 -- incorrect data and are intentionally not reverted.
 
--- 1. Sever reuse links that crossed patient (or tenant) boundaries.
-WITH crossed AS (
-    SELECT a.id, a.status
+-- 1. Sever reuse links that crossed tenant, patient, task or clinical
+--    resource boundaries. The resource is the column the artifact type is
+--    bound to (see `aigov::ReuseScope`). Artifacts that reused a crossed
+--    artifact (even within the correct scope) carry the same foreign output
+--    and are treated the same way, transitively.
+WITH RECURSIVE crossed AS (
+    SELECT a.id
     FROM ai_artifacts a
     JOIN ai_artifacts p ON p.id = a.reused_from
-    WHERE p.tenant_id <> a.tenant_id OR p.patient_id <> a.patient_id
+    WHERE p.tenant_id <> a.tenant_id
+       OR p.patient_id <> a.patient_id
+       OR p.artifact_type <> a.artifact_type
+       OR CASE a.artifact_type
+            WHEN 'result_summary'    THEN p.observation_id     IS DISTINCT FROM a.observation_id
+            WHEN 'encounter_summary' THEN p.encounter_id       IS DISTINCT FROM a.encounter_id
+            WHEN 'scribe_draft'      THEN p.encounter_id       IS DISTINCT FROM a.encounter_id
+            WHEN 'triage_proposal'   THEN p.visit_id           IS DISTINCT FROM a.visit_id
+            WHEN 'risk_summary'      THEN p.risk_assessment_id IS DISTINCT FROM a.risk_assessment_id
+            ELSE false
+          END
+    UNION
+    SELECT a.id
+    FROM ai_artifacts a
+    JOIN crossed c ON c.id = a.reused_from
 )
 UPDATE ai_artifacts a
 SET reused_from = NULL,

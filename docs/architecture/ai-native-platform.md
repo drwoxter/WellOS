@@ -144,8 +144,10 @@ artifact of the same tenant and patient (composite foreign key over
 `(id, tenant_id, patient_id)`, migration `0014`), and `aigov::annotate`
 additionally verifies inside the persistence transaction that both rows
 share the task and the bound clinical resource before the link is written.
-Migration `0014` also severed pre-existing links that crossed patients
-(invalidating undecided outputs; recorded decisions are preserved), widened
+Migration `0014` also severed pre-existing links that crossed tenants,
+patients, tasks or clinical resources — and, transitively, links to such
+artifacts, since they carry the same foreign output — (invalidating
+undecided outputs; recorded decisions are preserved), widened
 the deduplication index to the full reuse key and marked artifacts whose
 stored provenance or Scribe JSON proves the fixture provider took part as
 `synthetic=true` without touching real-provider rows. Rollback of the

@@ -835,6 +835,118 @@ async fn cross_patient_reused_from_is_rejected_by_database_and_guard() {
     );
 }
 
+/// The data-repair statement of migration 0014, exactly as shipped.
+fn upgrade_repair_statement() -> &'static str {
+    let sql = include_str!("../migrations/0014_ai_artifact_isolation.sql");
+    let start = sql.find("WITH RECURSIVE crossed").expect("repair CTE");
+    let end = sql[start..].find(';').expect("statement end");
+    &sql[start..start + end]
+}
+
+/// Inserts an artifact row the way the pre-hotfix code left it: no
+/// transactional guard, an arbitrary `reused_from`.
+async fn legacy_artifact(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    t: Tenant,
+    patient: Uuid,
+    scope: ReuseScope,
+    status: &str,
+    reused_from: Option<Uuid>,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    let sql = format!(
+        "INSERT INTO ai_artifacts
+         (id, tenant_id, patient_id, {resource}, artifact_type, autonomy_level, status,
+          model, model_version, route, template, input_hash, output, output_schema,
+          generated_at, reused_from)
+         VALUES ($1, $2, $3, $4, $5, 'A2', $6, 'dmind-fake', 'v1', 'local-fake',
+                 'isolation-test@1', 'legacy-hash', '{{\"summary\":\"legacy output\"}}', $7,
+                 now(), $8)",
+        resource = scope.resource_column()
+    );
+    sqlx::query(&sql)
+        .bind(id)
+        .bind(t.id)
+        .bind(patient)
+        .bind(scope.resource_id())
+        .bind(scope.artifact_type())
+        .bind(status)
+        .bind(SCHEMA)
+        .bind(reused_from)
+        .execute(&mut **tx)
+        .await
+        .unwrap();
+    id
+}
+
+/// Upgrade repair, for every artifact type: a pre-hotfix link between two
+/// clinical resources of the same patient is severed and its undecided
+/// target invalidated; an artifact that (correctly scoped) reused such a
+/// tainted artifact is repaired the same way, keeping a recorded decision;
+/// a legitimate same-resource link is left untouched. Runs the shipped
+/// statement inside a rolled-back transaction against fixture rows.
+#[tokio::test]
+async fn upgrade_repair_severs_cross_resource_and_chained_links_for_every_type() {
+    let state = fake_state().await;
+    let t = seeded_tenant(&state.pool).await;
+    let mut tx = state.pool.begin().await.unwrap();
+    // The composite foreign key does not constrain same-patient links, so
+    // these rows can only exist from before the migration.
+    let mut fixtures = Vec::new();
+    for kind in KINDS {
+        let patient = new_patient(&state.pool, t).await;
+        let first = new_scope(&state.pool, t, patient, kind).await;
+        let second = new_scope(&state.pool, t, patient, kind).await;
+        let root = legacy_artifact(&mut tx, t, patient, first, "awaiting_review", None).await;
+        let crossed =
+            legacy_artifact(&mut tx, t, patient, second, "awaiting_review", Some(root)).await;
+        let chained = legacy_artifact(&mut tx, t, patient, second, "approved", Some(crossed)).await;
+        let legit =
+            legacy_artifact(&mut tx, t, patient, first, "awaiting_review", Some(root)).await;
+        fixtures.push((kind, root, crossed, chained, legit));
+    }
+
+    sqlx::query(upgrade_repair_statement())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    async fn row(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: Uuid,
+    ) -> (String, Option<Uuid>, Value) {
+        sqlx::query_as("SELECT status, reused_from, output FROM ai_artifacts WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .unwrap()
+    }
+    let legacy_output = json!({ "summary": "legacy output" });
+    for (kind, root, crossed, chained, legit) in fixtures {
+        assert_eq!(
+            row(&mut tx, root).await,
+            ("awaiting_review".into(), None, legacy_output.clone()),
+            "{kind:?}: the root artifact is untouched"
+        );
+        assert_eq!(
+            row(&mut tx, crossed).await,
+            ("invalidated".into(), None, legacy_output.clone()),
+            "{kind:?}: cross-resource link severed, undecided target invalidated"
+        );
+        assert_eq!(
+            row(&mut tx, chained).await,
+            ("approved".into(), None, legacy_output.clone()),
+            "{kind:?}: link to a tainted artifact severed, decision preserved"
+        );
+        assert_eq!(
+            row(&mut tx, legit).await,
+            ("awaiting_review".into(), Some(root), legacy_output.clone()),
+            "{kind:?}: legitimate same-resource link kept"
+        );
+    }
+    tx.rollback().await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Synthetic provenance (scribe: transcription × model, and reuse)
 // ---------------------------------------------------------------------------
