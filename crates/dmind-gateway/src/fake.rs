@@ -8,6 +8,10 @@
 //! refuses to select it outside `WELLOS_ENV=development|test`, and no code
 //! path substitutes it for a failed real provider.
 
+use crate::access::{
+    self, AccessIntentRequest, AccessResponse, CapacityExplanationRequest, RankingRequest,
+    RecoveryRankingRequest,
+};
 use crate::notes::{self, NoteDraftRequest, NoteDraftResponse};
 use crate::risk::{self, RiskSummaryRequest, RiskSummaryResponse};
 use crate::triage::{self, TriageRequest, TriageResponse};
@@ -17,6 +21,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
+use wellos_domain::access_ai::{
+    AccessIntentV1, AppointmentRankingV1, CancellationRecoveryV1, CapacityExplanationV1,
+};
 use wellos_domain::ai::{ProviderInfo, ResultSummaryV1};
 
 pub const FAKE_MODEL: &str = crate::FIXTURE_MODEL;
@@ -37,6 +44,15 @@ impl FakeProvider {
 
     pub fn set_unavailable(&self, unavailable: bool) {
         self.unavailable.store(unavailable, Ordering::SeqCst);
+    }
+
+    fn ensure_available(&self) -> Result<(), GatewayError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(GatewayError::Unavailable(
+                "fake provider forced unavailable".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -76,6 +92,16 @@ impl ModelGateway for FakeProvider {
             Operation::TriageProposal => triage::TRIAGE_DETERMINISTIC_PROMPT_VERSION,
             Operation::RiskSummary => risk::RISK_DETERMINISTIC_PROMPT_VERSION,
             Operation::NoteDraft => notes::NOTE_DRAFT_DETERMINISTIC_PROMPT_VERSION,
+            Operation::AccessIntent => access::ACCESS_INTENT_DETERMINISTIC_PROMPT_VERSION,
+            Operation::AppointmentRanking => {
+                access::APPOINTMENT_RANKING_DETERMINISTIC_PROMPT_VERSION
+            }
+            Operation::CancellationRecovery => {
+                access::CANCELLATION_RECOVERY_DETERMINISTIC_PROMPT_VERSION
+            }
+            Operation::CapacityExplanation => {
+                access::CAPACITY_EXPLANATION_DETERMINISTIC_PROMPT_VERSION
+            }
         }
         .into()
     }
@@ -163,6 +189,38 @@ impl ModelGateway for FakeProvider {
             resp.provider = self.info();
             resp
         })
+    }
+
+    async fn interpret_access_intent(
+        &self,
+        req: &AccessIntentRequest,
+    ) -> Result<AccessResponse<AccessIntentV1>, GatewayError> {
+        self.ensure_available()?;
+        access::deterministic_intent(req, self.info())
+    }
+
+    async fn rank_appointments(
+        &self,
+        req: &RankingRequest,
+    ) -> Result<AccessResponse<AppointmentRankingV1>, GatewayError> {
+        self.ensure_available()?;
+        access::deterministic_ranking(req, self.info())
+    }
+
+    async fn rank_cancellation_recovery(
+        &self,
+        req: &RecoveryRankingRequest,
+    ) -> Result<AccessResponse<CancellationRecoveryV1>, GatewayError> {
+        self.ensure_available()?;
+        access::deterministic_recovery(req, self.info())
+    }
+
+    async fn explain_capacity(
+        &self,
+        req: &CapacityExplanationRequest,
+    ) -> Result<AccessResponse<CapacityExplanationV1>, GatewayError> {
+        self.ensure_available()?;
+        access::deterministic_capacity(req, self.info())
     }
 }
 

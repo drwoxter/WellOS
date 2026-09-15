@@ -127,6 +127,92 @@ pub struct AiQuotas {
     pub task_per_hour: i64,
 }
 
+/// Production SMTP delivery (`WELLOS_SMTP_*`). Disabled unless
+/// `WELLOS_SMTP_ENABLED=true`; every field is then mandatory and TLS is
+/// never optional outside development/test.
+#[derive(Clone)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub from: String,
+    /// `starttls` (submission on 587) or `implicit` (SMTPS on 465). Locally
+    /// `none` is accepted for a loopback test server.
+    pub tls: SmtpTls,
+    pub timeout: Duration,
+}
+
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("from", &self.from)
+            .field("tls", &self.tls)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmtpTls {
+    StartTls,
+    Implicit,
+    None,
+}
+
+/// Signed webhook delivery for a future mobile push service
+/// (`WELLOS_PUSH_WEBHOOK_*`). Disabled unless explicitly enabled; the
+/// destination follows the same allowlist policy as AI endpoints and every
+/// request carries an HMAC-SHA256 signature over timestamp and body.
+#[derive(Clone)]
+pub struct WebhookConfig {
+    pub url: String,
+    pub secret: String,
+    pub timeout: Duration,
+}
+
+impl std::fmt::Debug for WebhookConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookConfig")
+            .field("url", &self.url)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NotificationConfig {
+    pub smtp: Option<SmtpConfig>,
+    pub webhook: Option<WebhookConfig>,
+    /// Development/test only: external channels are recorded as `dev_sink`
+    /// deliveries instead of leaving the process.
+    pub dev_sink: bool,
+    /// Delivery attempts before a notification is dead-lettered.
+    pub max_attempts: i32,
+    /// First retry delay; doubles per attempt up to `max_backoff`.
+    pub base_backoff: Duration,
+    pub max_backoff: Duration,
+    /// How many due deliveries one worker claims per pass.
+    pub batch_size: i64,
+}
+
+impl NotificationConfig {
+    pub fn external_delivery_available(&self) -> bool {
+        self.smtp.is_some() || self.webhook.is_some() || self.dev_sink
+    }
+}
+
+/// Location/transport retention (`WELLOS_LOCATION_*`). Retained addresses
+/// and live coordinates require the keyring; without it the capability
+/// fails closed (503) instead of storing plaintext.
+#[derive(Debug, Clone)]
+pub struct LocationConfig {
+    pub keyring: Option<crate::crypto::Keyring>,
+    /// Lifetime of a shared live position before it is purged.
+    pub live_location_ttl: Duration,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub env: RuntimeEnv,
@@ -146,6 +232,8 @@ pub struct RuntimeConfig {
     /// Accepted BCP-47 language tags for consultation recordings.
     pub scribe_languages: Vec<String>,
     pub ai_quotas: AiQuotas,
+    pub notifications: NotificationConfig,
+    pub location: LocationConfig,
 }
 
 impl RuntimeConfig {
@@ -195,6 +283,8 @@ impl RuntimeConfig {
             tenant_per_hour: parse_positive_i64("DMIND_QUOTA_TENANT_PER_HOUR", 600)?,
             task_per_hour: parse_positive_i64("DMIND_QUOTA_TASK_PER_HOUR", 200)?,
         };
+        let notifications = notification_config_from_env(env)?;
+        let location = location_config_from_env(env)?;
         Ok(Self {
             env,
             cell,
@@ -204,6 +294,8 @@ impl RuntimeConfig {
             allow_external_ai,
             scribe_languages,
             ai_quotas,
+            notifications,
+            location,
         })
     }
 
@@ -222,6 +314,19 @@ impl RuntimeConfig {
                 tenant_per_hour: 100_000,
                 task_per_hour: 100_000,
             },
+            notifications: NotificationConfig {
+                smtp: None,
+                webhook: None,
+                dev_sink: true,
+                max_attempts: 3,
+                base_backoff: Duration::from_secs(1),
+                max_backoff: Duration::from_secs(60),
+                batch_size: 50,
+            },
+            location: LocationConfig {
+                keyring: Some(crate::crypto::Keyring::synthetic("test-fixtures")),
+                live_location_ttl: Duration::from_secs(15 * 60),
+            },
         }
     }
 
@@ -236,6 +341,127 @@ impl RuntimeConfig {
             .iter()
             .any(|l| l.eq_ignore_ascii_case(tag))
     }
+}
+
+fn notification_config_from_env(env: RuntimeEnv) -> anyhow::Result<NotificationConfig> {
+    let smtp = if parse_bool("WELLOS_SMTP_ENABLED")?.unwrap_or(false) {
+        let host = required("WELLOS_SMTP_HOST")?;
+        let port = parse_positive_i64("WELLOS_SMTP_PORT", 587)?;
+        if port > u16::MAX as i64 {
+            anyhow::bail!("WELLOS_SMTP_PORT must be a valid TCP port");
+        }
+        let tls = match std::env::var("WELLOS_SMTP_TLS")
+            .unwrap_or_else(|_| "starttls".into())
+            .trim()
+        {
+            "starttls" => SmtpTls::StartTls,
+            "implicit" => SmtpTls::Implicit,
+            "none" if env.is_local() => SmtpTls::None,
+            "none" => anyhow::bail!(
+                "WELLOS_SMTP_TLS=none is refused with WELLOS_ENV={env}: mail transport must be encrypted"
+            ),
+            other => anyhow::bail!(
+                "WELLOS_SMTP_TLS must be 'starttls' or 'implicit' (got '{other}')"
+            ),
+        };
+        let host_lower = host.to_ascii_lowercase();
+        let loopback = host_lower == "localhost" || host_lower.starts_with("127.");
+        if loopback && env.is_deployed() {
+            anyhow::bail!("WELLOS_SMTP_HOST must not be a loopback host with WELLOS_ENV={env}");
+        }
+        let from = required("WELLOS_SMTP_FROM")?;
+        if !from.contains('@') {
+            anyhow::bail!("WELLOS_SMTP_FROM must be an email address");
+        }
+        Some(SmtpConfig {
+            host,
+            port: port as u16,
+            username: required("WELLOS_SMTP_USERNAME")?,
+            password: required_secret("WELLOS_SMTP_PASSWORD")?,
+            from,
+            tls,
+            timeout: Duration::from_secs(parse_positive_i64("WELLOS_SMTP_TIMEOUT_SECS", 20)? as u64),
+        })
+    } else {
+        None
+    };
+    let webhook = if parse_bool("WELLOS_PUSH_WEBHOOK_ENABLED")?.unwrap_or(false) {
+        let url = required("WELLOS_PUSH_WEBHOOK_URL")?;
+        let allowed_hosts = std::env::var("WELLOS_PUSH_WEBHOOK_ALLOWED_HOSTS").ok();
+        validate_external_endpoint(
+            "WELLOS_PUSH_WEBHOOK_URL",
+            "WELLOS_PUSH_WEBHOOK_ALLOWED_HOSTS",
+            &url,
+            allowed_hosts.as_deref(),
+            env.is_local(),
+        )?;
+        let secret = required_secret("WELLOS_PUSH_WEBHOOK_SECRET")?;
+        if secret.len() < 32 {
+            anyhow::bail!("WELLOS_PUSH_WEBHOOK_SECRET must be at least 32 characters");
+        }
+        Some(WebhookConfig {
+            url,
+            secret,
+            timeout: Duration::from_secs(
+                parse_positive_i64("WELLOS_PUSH_WEBHOOK_TIMEOUT_SECS", 10)? as u64,
+            ),
+        })
+    } else {
+        None
+    };
+    let dev_sink = parse_bool("WELLOS_NOTIFICATION_DEV_SINK")?.unwrap_or(false);
+    if dev_sink {
+        fixtures_allowed(env, "WELLOS_NOTIFICATION_DEV_SINK=true")?;
+    }
+    let max_attempts = parse_positive_i64("WELLOS_NOTIFICATION_MAX_ATTEMPTS", 5)?;
+    if max_attempts > 20 {
+        anyhow::bail!("WELLOS_NOTIFICATION_MAX_ATTEMPTS must be at most 20");
+    }
+    let base_backoff = parse_positive_i64("WELLOS_NOTIFICATION_BACKOFF_SECS", 30)?;
+    let max_backoff = parse_positive_i64("WELLOS_NOTIFICATION_MAX_BACKOFF_SECS", 3600)?;
+    if max_backoff < base_backoff {
+        anyhow::bail!(
+            "WELLOS_NOTIFICATION_MAX_BACKOFF_SECS must not be smaller than WELLOS_NOTIFICATION_BACKOFF_SECS"
+        );
+    }
+    let batch_size = parse_positive_i64("WELLOS_NOTIFICATION_BATCH_SIZE", 50)?;
+    if batch_size > 1_000 {
+        anyhow::bail!("WELLOS_NOTIFICATION_BATCH_SIZE must be at most 1000");
+    }
+    Ok(NotificationConfig {
+        smtp,
+        webhook,
+        dev_sink,
+        max_attempts: max_attempts as i32,
+        base_backoff: Duration::from_secs(base_backoff as u64),
+        max_backoff: Duration::from_secs(max_backoff as u64),
+        batch_size,
+    })
+}
+
+fn location_config_from_env(env: RuntimeEnv) -> anyhow::Result<LocationConfig> {
+    let keys = std::env::var("WELLOS_LOCATION_ENCRYPTION_KEYS").ok();
+    let active = std::env::var("WELLOS_LOCATION_ENCRYPTION_ACTIVE_KEY").ok();
+    let keyring = match (keys, active) {
+        (None, None) => None,
+        (Some(keys), Some(active)) => Some(crate::crypto::Keyring::parse(&keys, &active)?),
+        _ => anyhow::bail!(
+            "WELLOS_LOCATION_ENCRYPTION_KEYS and WELLOS_LOCATION_ENCRYPTION_ACTIVE_KEY must be set together"
+        ),
+    };
+    if keyring.is_none() && env.is_deployed() {
+        tracing::warn!(
+            "no location encryption keyring configured: transport/location retention is unavailable (fail closed)"
+        );
+    }
+    let ttl = parse_positive_i64("WELLOS_LIVE_LOCATION_TTL_SECS", 15 * 60)?;
+    if ttl > 4 * 3600 {
+        anyhow::bail!("WELLOS_LIVE_LOCATION_TTL_SECS must be at most 14400 (4 hours)");
+    }
+    Ok(LocationConfig {
+        keyring,
+        live_location_ttl: Duration::from_secs(ttl as u64),
+    })
 }
 
 /// Fixtures need all three: a local environment, a `dev-fixtures` build and

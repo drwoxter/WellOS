@@ -23,12 +23,20 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
+use wellos_domain::access_ai::{
+    AccessIntentV1, AppointmentRankingV1, CancellationRecoveryV1, CapacityExplanationV1,
+    CAPACITY_RECOMMENDATION_CATEGORIES,
+};
 use wellos_domain::ai::{
     Confidence, ProviderInfo, ResultSummaryV1, ScribeFlag, ScribeFlagKind, ScribeSection,
 };
 use wellos_domain::risk::RISK_SUMMARY_SCHEMA;
 use wellos_domain::triage::{safety_floor, Priority, TriageProposalV1, TRIAGE_PROPOSAL_SCHEMA};
 
+use crate::access::{
+    parse_capacity, parse_intent, parse_ranking, parse_recovery, AccessIntentRequest,
+    AccessResponse, CapacityExplanationRequest, RankingRequest, RecoveryRankingRequest,
+};
 use crate::notes::{
     validate_note_draft, NoteDraftRequest, NoteDraftResponse, CLINICIAN_JUDGEMENT_SECTIONS,
     NOTE_DRAFT_TEMPLATE,
@@ -45,6 +53,10 @@ pub const RESULT_PROMPT_VERSION: &str = "result-summary-openai.v1";
 pub const TRIAGE_PROMPT_VERSION: &str = "triage-proposal-openai.v1";
 pub const RISK_PROMPT_VERSION: &str = "risk-summary-openai.v1";
 pub const NOTE_PROMPT_VERSION: &str = "note-draft-openai.v1";
+pub const ACCESS_INTENT_PROMPT_VERSION: &str = "access-intent-openai.v1";
+pub const APPOINTMENT_RANKING_PROMPT_VERSION: &str = "appointment-ranking-openai.v1";
+pub const CANCELLATION_RECOVERY_PROMPT_VERSION: &str = "cancellation-recovery-openai.v1";
+pub const CAPACITY_EXPLANATION_PROMPT_VERSION: &str = "capacity-explanation-openai.v1";
 
 /// How long after the last failure the capability keeps reporting
 /// `degraded` when no call has succeeded since.
@@ -470,6 +482,10 @@ impl ModelGateway for OpenAiCompatibleModel {
             Operation::TriageProposal => TRIAGE_PROMPT_VERSION,
             Operation::RiskSummary => RISK_PROMPT_VERSION,
             Operation::NoteDraft => NOTE_PROMPT_VERSION,
+            Operation::AccessIntent => ACCESS_INTENT_PROMPT_VERSION,
+            Operation::AppointmentRanking => APPOINTMENT_RANKING_PROMPT_VERSION,
+            Operation::CancellationRecovery => CANCELLATION_RECOVERY_PROMPT_VERSION,
+            Operation::CapacityExplanation => CAPACITY_EXPLANATION_PROMPT_VERSION,
         }
         .into()
     }
@@ -605,6 +621,154 @@ impl ModelGateway for OpenAiCompatibleModel {
         });
         let (raw, usage) = self.complete(&system, &user).await?;
         self.validated(self.validate_note(req, raw, usage))
+    }
+
+    async fn interpret_access_intent(
+        &self,
+        req: &AccessIntentRequest,
+    ) -> Result<AccessResponse<AccessIntentV1>, GatewayError> {
+        req.check()?;
+        let system = format!(
+            "{COMMON_RULES} Task: convert a patient's or staff member's appointment request into \
+             structured scheduling constraints. Use only the catalog codes supplied; when nothing \
+             matches, leave the field null or empty and ask for the information in \
+             missing_information. Never diagnose, never rate urgency: set clinical_triage_suggested \
+             only when the text describes symptoms a clinician should see before scheduling, with \
+             the reason in triage_reasons. {} Output schema: {{\"service_code\": string|null, \
+             \"specialty_code\": string|null, \"modality_codes\": string[], \"facility_codes\": string[], \
+             \"accessibility_codes\": string[], \"preferred_windows\": [{{\"weekday\": 1..7 (Monday=1), \
+             \"start\": \"HH:MM:SS\", \"end\": \"HH:MM:SS\"}}], \"earliest_date\": \"YYYY-MM-DD\"|null, \
+             \"latest_date\": \"YYYY-MM-DD\"|null, \"language\": BCP-47 string|null, \
+             \"continuity_requested\": boolean, \"transport_requested\": boolean, \
+             \"missing_information\": string[] (questions for the patient), \
+             \"clinical_triage_suggested\": boolean, \"triage_reasons\": string[], \
+             \"cited_sources\": string[] (\"request:text\" and \"catalog:<kind>:<code>\" references only), \
+             \"confidence\": \"low\"|\"medium\"|\"high\", \"limitations\": string[]}}.",
+            language_instruction(&req.language)
+        );
+        let user = json!({
+            "template": req.template,
+            "language": req.language,
+            "text": req.free_text,
+            "catalog": {
+                "service": req.services,
+                "specialty": req.specialties,
+                "modality": req.modalities,
+                "accessibility": req.accessibility,
+                "facility": req.facilities,
+            },
+        });
+        let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(parse_intent(&raw, req).map(|output| AccessResponse {
+            output,
+            provider: self.info(),
+            prompt_version: ACCESS_INTENT_PROMPT_VERSION.into(),
+            input_hash: crate::hash_json(req),
+            usage,
+        }))
+    }
+
+    async fn rank_appointments(
+        &self,
+        req: &RankingRequest,
+    ) -> Result<AccessResponse<AppointmentRankingV1>, GatewayError> {
+        req.check()?;
+        let system = format!(
+            "{COMMON_RULES} Task: order the supplied appointment candidates for the patient and \
+             explain each in one or two plain sentences. Every candidate was already validated by \
+             deterministic rules: include each exactly once, never add, drop or change one, never \
+             mention a time, place or professional not listed. Each explanation must cite its own \
+             candidate_id and may cite supplied fact references. {} Output schema: \
+             {{\"ranked\": [{{\"candidate_id\": string, \"rank\": integer 1..n, \"explanation\": string, \
+             \"cited_sources\": string[]}}], \"overall_note\": string|null, \"cited_sources\": string[], \
+             \"confidence\": \"low\"|\"medium\"|\"high\", \"limitations\": string[]}}.",
+            language_instruction(&req.language)
+        );
+        let user = json!({
+            "template": req.template,
+            "language": req.language,
+            "facts": facts_json(&req.facts),
+            "candidates": req.candidates,
+        });
+        let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(parse_ranking(&raw, req).map(|output| AccessResponse {
+            output,
+            provider: self.info(),
+            prompt_version: APPOINTMENT_RANKING_PROMPT_VERSION.into(),
+            input_hash: crate::hash_json(req),
+            usage,
+        }))
+    }
+
+    async fn rank_cancellation_recovery(
+        &self,
+        req: &RecoveryRankingRequest,
+    ) -> Result<AccessResponse<CancellationRecoveryV1>, GatewayError> {
+        req.check()?;
+        let system = format!(
+            "{COMMON_RULES} Task: propose the order in which eligible waitlist entries are offered a \
+             freed appointment slot. The entries are already ordered by deterministic urgency and \
+             waiting time; you may only swap entries of equal urgency whose waiting times differ by \
+             less than {} hours, and must include every entry exactly once. Never add an entry. \
+             Explanations cite \"entry:<id>\" or supplied fact references. {} Output schema: \
+             {{\"ordered_entry_ids\": string[] (UUIDs), \"explanations\": [{{\"entry_id\": string, \
+             \"explanation\": string, \"cited_sources\": string[]}}], \"cited_sources\": string[], \
+             \"confidence\": \"low\"|\"medium\"|\"high\", \"limitations\": string[]}}.",
+            req.max_wait_demotion_hours,
+            language_instruction(&req.language)
+        );
+        let user = json!({
+            "template": req.template,
+            "language": req.language,
+            "facts": facts_json(&req.facts),
+            "entries": req.entries,
+        });
+        let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(parse_recovery(&raw, req).map(|output| AccessResponse {
+            output,
+            provider: self.info(),
+            prompt_version: CANCELLATION_RECOVERY_PROMPT_VERSION.into(),
+            input_hash: crate::hash_json(req),
+            usage,
+        }))
+    }
+
+    async fn explain_capacity(
+        &self,
+        req: &CapacityExplanationRequest,
+    ) -> Result<AccessResponse<CapacityExplanationV1>, GatewayError> {
+        req.check()?;
+        let system = format!(
+            "{COMMON_RULES} Task: explain a deterministic capacity forecast to an operations manager. \
+             The numbers are authoritative: repeat them, never recompute or contradict them, and \
+             name only dates present in the forecast. Recommendations are suggestions for a human \
+             decision, restricted to the categories {}. {} Output schema: {{\"summary\": string, \
+             \"pressure_points\": [{{\"date\": \"YYYY-MM-DD\", \"explanation\": string, \"cited_sources\": \
+             string[] (\"forecast:day:<date>\" / \"forecast:factor:<code>\")}}], \"recommendations\": \
+             [{{\"category\": string, \"text\": string}}], \"cited_sources\": string[], \
+             \"confidence\": \"low\"|\"medium\"|\"high\", \"limitations\": string[]}}.",
+            CAPACITY_RECOMMENDATION_CATEGORIES
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+            language_instruction(&req.language)
+        );
+        let user = json!({
+            "template": req.template,
+            "language": req.language,
+            "scope": req.scope_label,
+            "forecast": req.forecast,
+            "references": req.fact_refs(),
+        });
+        let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(parse_capacity(&raw, req).map(|output| AccessResponse {
+            output,
+            provider: self.info(),
+            prompt_version: CAPACITY_EXPLANATION_PROMPT_VERSION.into(),
+            input_hash: crate::hash_json(req),
+            usage,
+        }))
     }
 }
 

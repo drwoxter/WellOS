@@ -77,11 +77,38 @@ impl ExecutionPlan {
 /// [`Operation`] and the `ai_artifacts` column that holds the resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReuseScope {
-    ResultSummary { observation_id: Uuid },
-    EncounterSummary { encounter_id: Uuid },
-    ScribeDraft { encounter_id: Uuid },
-    TriageProposal { visit_id: Uuid },
-    RiskSummary { risk_assessment_id: Uuid },
+    ResultSummary {
+        observation_id: Uuid,
+    },
+    EncounterSummary {
+        encounter_id: Uuid,
+    },
+    ScribeDraft {
+        encounter_id: Uuid,
+    },
+    TriageProposal {
+        visit_id: Uuid,
+    },
+    RiskSummary {
+        risk_assessment_id: Uuid,
+    },
+    /// access-intent.v1 bound to one access request.
+    AccessIntent {
+        access_request_id: Uuid,
+    },
+    /// appointment-ranking.v1 bound to one deterministic matcher run.
+    AppointmentRanking {
+        matcher_run_id: Uuid,
+    },
+    /// cancellation-recovery.v1 bound to one cancellation event.
+    CancellationRecovery {
+        cancellation_event_id: Uuid,
+    },
+    /// capacity-explanation.v1 bound to one persisted forecast; the only
+    /// scope without a patient.
+    CapacityExplanation {
+        capacity_forecast_id: Uuid,
+    },
 }
 
 impl ReuseScope {
@@ -92,6 +119,10 @@ impl ReuseScope {
             ReuseScope::ScribeDraft { .. } => "scribe_draft",
             ReuseScope::TriageProposal { .. } => "triage_proposal",
             ReuseScope::RiskSummary { .. } => "risk_summary",
+            ReuseScope::AccessIntent { .. } => "access_intent",
+            ReuseScope::AppointmentRanking { .. } => "appointment_ranking",
+            ReuseScope::CancellationRecovery { .. } => "cancellation_recovery",
+            ReuseScope::CapacityExplanation { .. } => "capacity_explanation",
         }
     }
 
@@ -103,7 +134,18 @@ impl ReuseScope {
             ReuseScope::ScribeDraft { .. } => Operation::NoteDraft,
             ReuseScope::TriageProposal { .. } => Operation::TriageProposal,
             ReuseScope::RiskSummary { .. } => Operation::RiskSummary,
+            ReuseScope::AccessIntent { .. } => Operation::AccessIntent,
+            ReuseScope::AppointmentRanking { .. } => Operation::AppointmentRanking,
+            ReuseScope::CancellationRecovery { .. } => Operation::CancellationRecovery,
+            ReuseScope::CapacityExplanation { .. } => Operation::CapacityExplanation,
         }
+    }
+
+    /// Whether artifacts of this scope carry patient data. Patient-less
+    /// scopes skip the per-patient external-processing consent (there is no
+    /// patient whose data leaves the cell) but not the deployment switch.
+    pub fn requires_patient(self) -> bool {
+        !matches!(self, ReuseScope::CapacityExplanation { .. })
     }
 
     /// The `ai_artifacts` column binding the artifact to its resource. A
@@ -114,6 +156,10 @@ impl ReuseScope {
             ReuseScope::EncounterSummary { .. } | ReuseScope::ScribeDraft { .. } => "encounter_id",
             ReuseScope::TriageProposal { .. } => "visit_id",
             ReuseScope::RiskSummary { .. } => "risk_assessment_id",
+            ReuseScope::AccessIntent { .. } => "access_request_id",
+            ReuseScope::AppointmentRanking { .. } => "matcher_run_id",
+            ReuseScope::CancellationRecovery { .. } => "cancellation_event_id",
+            ReuseScope::CapacityExplanation { .. } => "capacity_forecast_id",
         }
     }
 
@@ -124,6 +170,14 @@ impl ReuseScope {
             | ReuseScope::ScribeDraft { encounter_id } => encounter_id,
             ReuseScope::TriageProposal { visit_id } => visit_id,
             ReuseScope::RiskSummary { risk_assessment_id } => risk_assessment_id,
+            ReuseScope::AccessIntent { access_request_id } => access_request_id,
+            ReuseScope::AppointmentRanking { matcher_run_id } => matcher_run_id,
+            ReuseScope::CancellationRecovery {
+                cancellation_event_id,
+            } => cancellation_event_id,
+            ReuseScope::CapacityExplanation {
+                capacity_forecast_id,
+            } => capacity_forecast_id,
         }
     }
 }
@@ -156,12 +210,42 @@ pub async fn plan(
     input_hash: &str,
     output_schema: &str,
 ) -> Result<ExecutionPlan, ApiError> {
+    plan_scoped(
+        state,
+        tenant_id,
+        Some(patient_id),
+        scope,
+        input_hash,
+        output_schema,
+    )
+    .await
+}
+
+/// [`plan`] for scopes that may carry no patient (operational artifacts).
+/// A patient-bound scope without a patient is a programming error and is
+/// refused rather than widened.
+pub async fn plan_scoped(
+    state: &AppState,
+    tenant_id: Uuid,
+    patient_id: Option<Uuid>,
+    scope: ReuseScope,
+    input_hash: &str,
+    output_schema: &str,
+) -> Result<ExecutionPlan, ApiError> {
+    if scope.requires_patient() && patient_id.is_none() {
+        return Err(ApiError::internal(format!(
+            "scope {scope:?} requires a patient binding"
+        )));
+    }
     let status = state.gateway.status();
     if !status.state.is_callable() {
         return Err(capability_error("model", &status));
     }
     if status.external {
-        external_processing_allowed(state, tenant_id, patient_id).await?;
+        match patient_id {
+            Some(p) => external_processing_allowed(state, tenant_id, p).await?,
+            None => external_deployment_allowed(state)?,
+        }
     }
     let info = state.gateway.info();
     let prompt_version = state.gateway.prompt_version(scope.operation());
@@ -272,13 +356,7 @@ pub async fn external_processing_allowed(
     tenant_id: Uuid,
     patient_id: Uuid,
 ) -> Result<(), ApiError> {
-    if !state.allow_external_ai {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "ai_external_disallowed",
-            "this deployment does not permit external AI processing of patient data",
-        ));
-    }
+    external_deployment_allowed(state)?;
     let consent: Option<(String,)> = sqlx::query_as(
         "SELECT status FROM consents
          WHERE tenant_id = $1 AND patient_id = $2 AND purpose = 'ai_external_processing'
@@ -293,6 +371,17 @@ pub async fn external_processing_allowed(
             StatusCode::CONFLICT,
             "ai_external_consent_required",
             "the patient has no active consent for external AI processing; the AI action is unavailable for this patient",
+        ));
+    }
+    Ok(())
+}
+
+fn external_deployment_allowed(state: &AppState) -> Result<(), ApiError> {
+    if !state.allow_external_ai {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ai_external_disallowed",
+            "this deployment does not permit external AI processing of patient data",
         ));
     }
     Ok(())
@@ -348,7 +437,7 @@ fn output_stands(status: &str) -> bool {
 /// visit, another provider or model version — is a different request.
 struct ReuseKey<'a> {
     tenant_id: Uuid,
-    patient_id: Uuid,
+    patient_id: Option<Uuid>,
     scope: ReuseScope,
     input_hash: &'a str,
     provider: &'a ProviderInfo,
@@ -364,7 +453,7 @@ async fn find_reusable(
         "SELECT id, status, output, citations, limitations, model, model_version, route,
                 prompt_version, usage, synthetic
          FROM ai_artifacts
-         WHERE tenant_id = $1 AND patient_id = $2 AND artifact_type = $3 AND {resource} = $4
+         WHERE tenant_id = $1 AND patient_id IS NOT DISTINCT FROM $2 AND artifact_type = $3 AND {resource} = $4
            AND input_hash = $5
            AND provider = $6 AND model = $7 AND model_version = $8
            AND prompt_version = $9 AND output_schema = $10
@@ -443,7 +532,8 @@ pub async fn annotate(
          WHERE a.id = $1 AND a.artifact_type = $8 AND a.{resource} = $9
            AND ($7::uuid IS NULL OR EXISTS (
                  SELECT 1 FROM ai_artifacts p
-                 WHERE p.id = $7 AND p.tenant_id = a.tenant_id AND p.patient_id = a.patient_id
+                 WHERE p.id = $7 AND p.tenant_id = a.tenant_id
+                   AND p.patient_id IS NOT DISTINCT FROM a.patient_id
                    AND p.artifact_type = a.artifact_type AND p.{resource} = a.{resource}))"
     );
     let updated = sqlx::query(&sql)

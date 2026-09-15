@@ -30,6 +30,10 @@ rand = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
 base64 = { workspace = true }
+chrono-tz = { workspace = true }
+aes-gcm = { workspace = true }
+hmac = { workspace = true }
+lettre = { workspace = true }
 
 [features]
 # Deterministic offline fixtures: fake model/transcription providers, the

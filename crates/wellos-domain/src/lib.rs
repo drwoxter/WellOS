@@ -5,9 +5,15 @@
 //! result evaluation, unit normalization, state machines) lives here so it can
 //! never depend on model output.
 
+pub mod access;
+pub mod access_ai;
 pub mod ai;
+pub mod capacity;
 pub mod events;
+pub mod ics;
 pub mod ids;
+pub mod matcher;
+pub mod recovery;
 pub mod result_loop;
 pub mod risk;
 pub mod rules;

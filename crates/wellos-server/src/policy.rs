@@ -85,6 +85,38 @@ pub mod actions {
     /// Read the minimal consent-gated risk projection prepared for future
     /// insurer collaboration. Never a coverage, pricing or denial decision.
     pub const RISK_PROJECTION_READ: &str = "risk.projection_read";
+    /// Read open catalogs (services, specialties, professions, modalities,
+    /// resource types, accessibility, locations, transport resources).
+    pub const CATALOG_READ: &str = "catalog.read";
+    /// Create, version, deactivate catalog entries and their facility
+    /// availability. Never grants any clinical permission.
+    pub const CATALOG_MANAGE: &str = "catalog.manage";
+    /// Schedulable resources, availability rules, exceptions, service
+    /// requirements, tenant scheduling policy, facility hours/location and
+    /// the tenant operational calendar.
+    pub const RESOURCE_MANAGE: &str = "resource.manage";
+    /// Staff read of scheduling surfaces: access requests, matcher runs,
+    /// offers, holds, appointments, resource lanes, cancellation events.
+    pub const SCHEDULING_READ: &str = "scheduling.read";
+    /// Staff scheduling administration: submit requests on behalf of a
+    /// patient, run the matcher, hold, confirm, reschedule, cancel, mark
+    /// fulfilled/no-show, override with a reason.
+    pub const SCHEDULING_MANAGE: &str = "scheduling.manage";
+    /// Patient/representative self-service through `/api/v1/me/...`; the
+    /// patient is derived from an active access grant, never from input.
+    pub const PATIENT_SELF_SERVICE: &str = "patient.self_service";
+    /// Verify, list and revoke patient access grants (staff).
+    pub const PATIENT_GRANT_MANAGE: &str = "patient_grant.manage";
+    /// Inspect waitlists and cancellation recovery, override the offer
+    /// order with a reason, pause or remove entries on a patient's behalf.
+    pub const WAITLIST_MANAGE: &str = "waitlist.manage";
+    /// Transport requests, vehicle assignment, status, live location
+    /// (logistics only: never the clinical chart).
+    pub const TRANSPORT_COORDINATE: &str = "transport.coordinate";
+    /// Compute and read capacity forecasts and their explanations.
+    pub const CAPACITY_REVIEW: &str = "capacity.review";
+    /// Read and mark one's own in-app notifications.
+    pub const NOTIFICATION_READ: &str = "notification.read";
 
     pub const ALL: &[&str] = &[
         PATIENT_REGISTER,
@@ -116,6 +148,17 @@ pub mod actions {
         RISK_MANAGE,
         RISK_REVIEW,
         RISK_PROJECTION_READ,
+        CATALOG_READ,
+        CATALOG_MANAGE,
+        RESOURCE_MANAGE,
+        SCHEDULING_READ,
+        SCHEDULING_MANAGE,
+        PATIENT_SELF_SERVICE,
+        PATIENT_GRANT_MANAGE,
+        WAITLIST_MANAGE,
+        TRANSPORT_COORDINATE,
+        CAPACITY_REVIEW,
+        NOTIFICATION_READ,
     ];
 
     /// Whether `s` names a known action (used to validate service scopes).
@@ -151,6 +194,21 @@ pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
         // The insurer projection is an operational data-sharing surface:
         // never a treatment context, never emergency access.
         RISK_PROJECTION_READ => &[Purpose::Operations],
+        // Scheduling is care access: treatment or operations context. The
+        // patient's own self-service never happens under an emergency or
+        // quality purpose.
+        SCHEDULING_READ | SCHEDULING_MANAGE | PATIENT_SELF_SERVICE | PATIENT_GRANT_MANAGE
+        | WAITLIST_MANAGE | TRANSPORT_COORDINATE | NOTIFICATION_READ => {
+            &[Purpose::Treatment, Purpose::Operations]
+        }
+        CATALOG_MANAGE | RESOURCE_MANAGE => &[Purpose::Operations],
+        CAPACITY_REVIEW => &[Purpose::Operations, Purpose::Quality],
+        CATALOG_READ => &[
+            Purpose::Treatment,
+            Purpose::Operations,
+            Purpose::Quality,
+            Purpose::Emergency,
+        ],
         RESULT_INGEST => &[Purpose::Treatment, Purpose::Operations],
         AUDIT_READ => &[Purpose::Operations, Purpose::Quality],
         CONSENT_WRITE => &[Purpose::Treatment, Purpose::Operations],
@@ -188,6 +246,8 @@ pub mod roles {
     /// Grants no actions by itself: marks users allowed to invoke
     /// break-glass emergency read access.
     pub const BREAK_GLASS_AUTHORIZED: &str = "break_glass_authorized";
+    /// Transport personnel and dispatch: logistics only, no chart access.
+    pub const TRANSPORT_COORDINATOR: &str = "transport_coordinator";
     pub const ALL: &[&str] = &[
         REGISTRATION,
         PHYSICIAN,
@@ -203,6 +263,7 @@ pub mod roles {
         LAB_INTERFACE,
         INSURER_INTEGRATION,
         BREAK_GLASS_AUTHORIZED,
+        TRANSPORT_COORDINATOR,
     ];
 }
 
@@ -220,6 +281,14 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             VISIT_READ,
             ALERT_ACKNOWLEDGE,
             TENANT_META_READ,
+            CATALOG_READ,
+            SCHEDULING_READ,
+            SCHEDULING_MANAGE,
+            PATIENT_GRANT_MANAGE,
+            WAITLIST_MANAGE,
+            TRANSPORT_COORDINATE,
+            CAPACITY_REVIEW,
+            NOTIFICATION_READ,
         ],
         PHYSICIAN => &[
             PATIENT_SEARCH,
@@ -241,6 +310,9 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             RISK_MANAGE,
             RISK_REVIEW,
             TENANT_META_READ,
+            CATALOG_READ,
+            SCHEDULING_READ,
+            NOTIFICATION_READ,
         ],
         // Nurses have no PATIENT_NOTIFY grant: result notification requires
         // the encounter-based care relationship, and encounters name a single
@@ -259,8 +331,13 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             RISK_MANAGE,
             RISK_REVIEW,
             TENANT_META_READ,
+            CATALOG_READ,
+            SCHEDULING_READ,
+            SCHEDULING_MANAGE,
+            WAITLIST_MANAGE,
+            NOTIFICATION_READ,
         ],
-        LAB => &[RESULT_INGEST, WORKLIST_READ, TENANT_META_READ],
+        LAB => &[RESULT_INGEST, WORKLIST_READ, TENANT_META_READ, CATALOG_READ],
         // Pharmacists read risk (medication/allergy safety domain) but the
         // review actions stay with the responsible clinical professional.
         PHARMACIST => &[
@@ -269,6 +346,8 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             WORKLIST_READ,
             RISK_READ,
             TENANT_META_READ,
+            CATALOG_READ,
+            NOTIFICATION_READ,
         ],
         CLINICAL_ADMIN => &[
             PATIENT_SEARCH,
@@ -282,6 +361,16 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             RISK_PROJECTION_READ,
             JOBS_RUN,
             TENANT_META_READ,
+            CATALOG_READ,
+            CATALOG_MANAGE,
+            RESOURCE_MANAGE,
+            SCHEDULING_READ,
+            SCHEDULING_MANAGE,
+            PATIENT_GRANT_MANAGE,
+            WAITLIST_MANAGE,
+            TRANSPORT_COORDINATE,
+            CAPACITY_REVIEW,
+            NOTIFICATION_READ,
         ],
         PRIVACY_OFFICER => &[
             AUDIT_READ,
@@ -290,16 +379,32 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             SERVICE_CREDENTIAL_MANAGE,
             SERVICE_CREDENTIAL_READ,
             TENANT_META_READ,
+            CATALOG_READ,
+            PATIENT_GRANT_MANAGE,
         ],
         SECURITY_AUDITOR => &[
             AUDIT_READ,
             BREAK_GLASS_REVIEW,
             SERVICE_CREDENTIAL_READ,
             TENANT_META_READ,
+            CATALOG_READ,
         ],
         // Research users have no direct-care access by design.
         RESEARCH => &[],
-        PATIENT_REP => &[],
+        // Patients and representatives act only through grant-scoped
+        // self-service: no chart, no worklists, no staff scheduling.
+        PATIENT_REP => &[
+            PATIENT_SELF_SERVICE,
+            CATALOG_READ,
+            NOTIFICATION_READ,
+            TENANT_META_READ,
+        ],
+        TRANSPORT_COORDINATOR => &[
+            TRANSPORT_COORDINATE,
+            CATALOG_READ,
+            NOTIFICATION_READ,
+            TENANT_META_READ,
+        ],
         // dMind generates suggestions only; it never writes clinical results.
         DMIND_SERVICE => &[],
         LAB_INTERFACE => &[RESULT_INGEST],
@@ -326,6 +431,7 @@ pub fn null_facility_is_tenant_wide(role: &str) -> bool {
             | roles::LAB_INTERFACE
             | roles::INSURER_INTEGRATION
             | roles::BREAK_GLASS_AUTHORIZED
+            | roles::PATIENT_REP
     )
 }
 
@@ -764,6 +870,56 @@ mod tests {
         assert!(!purpose_allows(Purpose::Operations, actions::TRIAGE_WRITE));
         assert!(purpose_allows(Purpose::Operations, actions::VISIT_MANAGE));
         assert!(!purpose_allows(Purpose::Emergency, actions::VISIT_MANAGE));
+    }
+
+    #[test]
+    fn scheduling_grants_are_functional_and_least_privilege() {
+        assert!(role_allows(roles::REGISTRATION, actions::SCHEDULING_MANAGE));
+        assert!(role_allows(roles::NURSE, actions::SCHEDULING_MANAGE));
+        assert!(role_allows(roles::PHYSICIAN, actions::SCHEDULING_READ));
+        assert!(!role_allows(roles::PHYSICIAN, actions::SCHEDULING_MANAGE));
+        assert!(!role_allows(roles::REGISTRATION, actions::CATALOG_MANAGE));
+        assert!(!role_allows(roles::REGISTRATION, actions::RESOURCE_MANAGE));
+        assert!(role_allows(roles::CLINICAL_ADMIN, actions::CATALOG_MANAGE));
+        assert!(role_allows(roles::CLINICAL_ADMIN, actions::RESOURCE_MANAGE));
+        // Patients: self-service only, nothing staff-facing.
+        assert!(role_allows(
+            roles::PATIENT_REP,
+            actions::PATIENT_SELF_SERVICE
+        ));
+        for a in [
+            actions::PATIENT_READ,
+            actions::PATIENT_SEARCH,
+            actions::SCHEDULING_READ,
+            actions::SCHEDULING_MANAGE,
+            actions::WAITLIST_MANAGE,
+            actions::VISIT_READ,
+            actions::WORKLIST_READ,
+        ] {
+            assert!(!role_allows(roles::PATIENT_REP, a), "{a}");
+        }
+        // Transport: logistics only.
+        assert!(role_allows(
+            roles::TRANSPORT_COORDINATOR,
+            actions::TRANSPORT_COORDINATE
+        ));
+        for a in [
+            actions::PATIENT_READ,
+            actions::SCHEDULING_READ,
+            actions::SCHEDULING_MANAGE,
+            actions::RISK_READ,
+        ] {
+            assert!(!role_allows(roles::TRANSPORT_COORDINATOR, a), "{a}");
+        }
+        // Staff never act through the patient path.
+        for r in [roles::REGISTRATION, roles::CLINICAL_ADMIN, roles::NURSE] {
+            assert!(!role_allows(r, actions::PATIENT_SELF_SERVICE), "{r}");
+        }
+        assert!(!purpose_allows(
+            Purpose::Emergency,
+            actions::PATIENT_SELF_SERVICE
+        ));
+        assert!(!purpose_allows(Purpose::Treatment, actions::CATALOG_MANAGE));
     }
 
     #[test]
