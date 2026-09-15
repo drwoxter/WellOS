@@ -15,7 +15,7 @@ use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use dmind_gateway::{Operation, SummaryRequest};
+use dmind_gateway::SummaryRequest;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -421,7 +421,7 @@ pub async fn workspace(
     // display flag rather than the integrity boundary.
     let current_note_version = note.as_ref().map(|n| n.get::<i64, _>("version"));
     let ai_draft = sqlx::query(
-        "SELECT id, status, output, limitations, citations, model, model_version,
+        "SELECT id, status, output, limitations, citations, model, model_version, synthetic,
                 generated_at, review_decision, note_version
          FROM ai_artifacts
          WHERE tenant_id = $1 AND encounter_id = $2 AND artifact_type = 'encounter_summary'
@@ -441,6 +441,7 @@ pub async fn workspace(
             "citations": r.get::<Value,_>("citations"),
             "model": r.get::<Option<String>,_>("model"),
             "model_version": r.get::<Option<String>,_>("model_version"),
+            "synthetic": r.get::<bool,_>("synthetic"),
             "generated_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("generated_at"),
             "review_decision": r.get::<Option<String>,_>("review_decision"),
             "note_version": note_version,
@@ -454,7 +455,7 @@ pub async fn workspace(
     // section applications; any other note write leaves it stale and the
     // review route refuses to apply it (`artifact_stale`).
     let scribe_draft = sqlx::query(
-        "SELECT id, status, output, limitations, model, model_version, route,
+        "SELECT id, status, output, limitations, model, model_version, route, synthetic,
                 generated_at, review_decision, review_detail, note_version
          FROM ai_artifacts
          WHERE tenant_id = $1 AND encounter_id = $2 AND artifact_type = 'scribe_draft'
@@ -477,6 +478,7 @@ pub async fn workspace(
             "model": r.get::<Option<String>,_>("model"),
             "model_version": r.get::<Option<String>,_>("model_version"),
             "route": r.get::<Option<String>,_>("route"),
+            "synthetic": r.get::<bool,_>("synthetic"),
             "generated_at": r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("generated_at"),
             "review_decision": r.get::<Option<String>,_>("review_decision"),
             "review_detail": review_detail,
@@ -1564,16 +1566,17 @@ pub async fn ai_draft(
     };
     let input_refs: Vec<String> = req.facts.iter().map(|(r, _)| r.clone()).collect();
     let hash = dmind_gateway::input_hash(&req);
+    let scope = aigov::ReuseScope::EncounterSummary { encounter_id: id };
     let plan = aigov::plan(
         &state,
         enc.tenant_id,
         enc.patient_id,
-        "encounter_summary",
-        Operation::ResultSummary,
+        scope,
         &hash,
         "result-summary.v1",
     )
     .await?;
+    let synthetic = plan.model_synthetic();
     let (resp, reused_from, execution_id) = match plan {
         aigov::ExecutionPlan::Reuse(prior) => {
             let output: wellos_domain::ai::ResultSummaryV1 = prior.output_as()?;
@@ -1591,7 +1594,7 @@ pub async fn ai_draft(
                 None,
             )
         }
-        aigov::ExecutionPlan::Execute { execution_id } => {
+        aigov::ExecutionPlan::Execute { execution_id, .. } => {
             match state.gateway.summarize_result(&req).await {
                 Ok(r) => (r, None, Some(execution_id)),
                 Err(err) => {
@@ -1684,11 +1687,12 @@ pub async fn ai_draft(
         &mut tx,
         artifact_id,
         &aigov::Provenance {
+            scope,
             provider: &provider,
             prompt_version: &resp.prompt_version,
             input_refs: &input_refs,
             usage: resp.usage.as_ref(),
-            synthetic: state.runtime.synthetic_output(),
+            synthetic,
             reused_from,
         },
     )
@@ -1707,6 +1711,7 @@ pub async fn ai_draft(
             "note_version": note_version,
             "input_hash": resp.input_hash,
             "reused_from": reused_from,
+            "synthetic": synthetic,
         }),
         None,
     )
@@ -1725,7 +1730,7 @@ pub async fn ai_draft(
         "model_version": resp.model_version,
         "route": resp.route,
         "prompt_version": resp.prompt_version,
-        "synthetic": state.runtime.synthetic_output(),
+        "synthetic": synthetic,
     })))
 }
 

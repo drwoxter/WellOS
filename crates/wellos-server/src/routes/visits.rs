@@ -22,7 +22,7 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use chrono::{DateTime, Datelike, Utc};
 use dmind_gateway::triage::TRIAGE_TEMPLATE;
-use dmind_gateway::{GatewayError, Operation, TriageRequest};
+use dmind_gateway::{GatewayError, TriageRequest};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1324,7 +1324,7 @@ pub async fn detail(
     let proposal = sqlx::query(
         "SELECT id, status, model, model_version, route, template, input_hash, output,
                 limitations, citations, triage_version, review_decision, review_detail,
-                reviewed_at, generated_at
+                reviewed_at, generated_at, synthetic
          FROM ai_artifacts WHERE tenant_id = $1 AND visit_id = $2 AND artifact_type = 'triage_proposal'
          ORDER BY generated_at DESC, id DESC LIMIT 1",
     )
@@ -1344,6 +1344,7 @@ pub async fn detail(
             "output": r.get::<Option<Value>,_>("output"),
             "limitations": r.get::<Value,_>("limitations"),
             "citations": r.get::<Value,_>("citations"),
+            "synthetic": r.get::<bool,_>("synthetic"),
             "triage_version": r.get::<Option<i64>,_>("triage_version"),
             "review_decision": r.get::<Option<String>,_>("review_decision"),
             "review_detail": r.get::<Value,_>("review_detail"),
@@ -1833,16 +1834,17 @@ pub async fn propose(
 
     let input_refs: Vec<String> = req.facts.iter().map(|(r, _)| r.clone()).collect();
     let hash = dmind_gateway::triage::triage_input_hash(&req);
+    let scope = aigov::ReuseScope::TriageProposal { visit_id: id };
     let plan = aigov::plan(
         &state,
         v.tenant_id,
         v.patient_id,
-        "triage_proposal",
-        Operation::TriageProposal,
+        scope,
         &hash,
         wellos_domain::triage::TRIAGE_PROPOSAL_SCHEMA,
     )
     .await?;
+    let synthetic = plan.model_synthetic();
     let (resp, reused_from, execution_id) = match plan {
         aigov::ExecutionPlan::Reuse(prior) => {
             let output: wellos_domain::triage::TriageProposalV1 = prior.output_as()?;
@@ -1860,7 +1862,7 @@ pub async fn propose(
                 None,
             )
         }
-        aigov::ExecutionPlan::Execute { execution_id } => {
+        aigov::ExecutionPlan::Execute { execution_id, .. } => {
             match state.gateway.propose_triage(&req).await {
                 Ok(r) => (r, None, Some(execution_id)),
                 Err(err) => {
@@ -1943,11 +1945,12 @@ pub async fn propose(
         &mut tx,
         artifact_id,
         &aigov::Provenance {
+            scope,
             provider: &provider,
             prompt_version: &resp.prompt_version,
             input_refs: &input_refs,
             usage: resp.usage.as_ref(),
-            synthetic: state.runtime.synthetic_output(),
+            synthetic,
             reused_from,
         },
     )
@@ -1975,6 +1978,7 @@ pub async fn propose(
             "triage_version": triage_version,
             "input_hash": resp.input_hash,
             "reused_from": reused_from,
+            "synthetic": synthetic,
         }),
         None,
     )
@@ -1993,7 +1997,7 @@ pub async fn propose(
         "route": resp.route,
         "template": TRIAGE_TEMPLATE,
         "prompt_version": resp.prompt_version,
-        "synthetic": state.runtime.synthetic_output(),
+        "synthetic": synthetic,
     })))
 }
 

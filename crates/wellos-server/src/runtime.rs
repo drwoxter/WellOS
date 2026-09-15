@@ -231,12 +231,6 @@ impl RuntimeConfig {
         self.env.is_local() && self.allow_synthetic_seed && DEV_FIXTURES_ENABLED
     }
 
-    /// True when model output in this process comes from the deterministic
-    /// fixture provider and must be persisted and displayed as synthetic.
-    pub fn synthetic_output(&self) -> bool {
-        self.model_provider == ProviderKind::Fake
-    }
-
     pub fn language_allowed(&self, tag: &str) -> bool {
         self.scribe_languages
             .iter()

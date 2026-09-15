@@ -24,7 +24,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use dmind_gateway::risk::{RiskSummaryRequest, RISK_TEMPLATE};
-use dmind_gateway::{GatewayError, Operation};
+use dmind_gateway::GatewayError;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -796,7 +796,7 @@ async fn load_history(
 }
 
 const SUMMARY_ARTIFACT_COLUMNS: &str = "a.id, a.status, a.output, a.model, a.model_version, a.route, a.template,
-            a.prompt_version, a.risk_assessment_id, a.generated_at, a.reviewed_at, a.review_decision, a.review_note,
+            a.prompt_version, a.synthetic, a.risk_assessment_id, a.generated_at, a.reviewed_at, a.review_decision, a.review_note,
             a.review_detail, u.display_name AS reviewer,
             (SELECT count(*) FROM follow_up_tasks t WHERE t.ai_artifact_id = a.id) AS confirmed_tasks";
 
@@ -864,6 +864,7 @@ fn summary_json(r: &sqlx::postgres::PgRow, current_assessment_id: Uuid) -> Value
             "prompt_version": r
                 .get::<Option<String>, _>("prompt_version")
                 .unwrap_or_else(|| RISK_SUMMARY_PROMPT_VERSION.to_string()),
+            "synthetic": r.get::<bool,_>("synthetic"),
             "generated_at": r.get::<Option<DateTime<Utc>>,_>("generated_at"),
             "reviewed_at": r.get::<Option<DateTime<Utc>>,_>("reviewed_at"),
             "review_decision": r.get::<Option<String>,_>("review_decision"),
@@ -1739,16 +1740,11 @@ pub async fn propose_summary(
 
     let input_refs: Vec<String> = req.facts.iter().map(|(r, _)| r.clone()).collect();
     let hash = dmind_gateway::risk::risk_input_hash(&req);
-    let plan = aigov::plan(
-        &state,
-        p.tenant_id,
-        id,
-        ARTIFACT_TYPE,
-        Operation::RiskSummary,
-        &hash,
-        RISK_SUMMARY_SCHEMA,
-    )
-    .await?;
+    let scope = aigov::ReuseScope::RiskSummary {
+        risk_assessment_id: current.id,
+    };
+    let plan = aigov::plan(&state, p.tenant_id, id, scope, &hash, RISK_SUMMARY_SCHEMA).await?;
+    let synthetic = plan.model_synthetic();
     let (resp, reused_from, execution_id) = match plan {
         aigov::ExecutionPlan::Reuse(prior) => {
             let output: wellos_domain::risk::RiskSummaryV1 = prior.output_as()?;
@@ -1766,7 +1762,7 @@ pub async fn propose_summary(
                 None,
             )
         }
-        aigov::ExecutionPlan::Execute { execution_id } => {
+        aigov::ExecutionPlan::Execute { execution_id, .. } => {
             match state.gateway.summarize_risk(&req).await {
                 Ok(r) => (r, None, Some(execution_id)),
                 Err(err) => {
@@ -1858,11 +1854,12 @@ pub async fn propose_summary(
         &mut tx,
         artifact_id,
         &aigov::Provenance {
+            scope,
             provider: &provider,
             prompt_version: &resp.prompt_version,
             input_refs: &input_refs,
             usage: resp.usage.as_ref(),
-            synthetic: state.runtime.synthetic_output(),
+            synthetic,
             reused_from,
         },
     )
@@ -1884,6 +1881,7 @@ pub async fn propose_summary(
             "model": resp.model,
             "input_hash": resp.input_hash,
             "reused_from": reused_from,
+            "synthetic": synthetic,
             "raised_to_floor": output.raised_to_floor,
         }),
         None,
