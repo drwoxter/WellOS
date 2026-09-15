@@ -947,6 +947,112 @@ async fn upgrade_repair_severs_cross_resource_and_chained_links_for_every_type()
     tx.rollback().await.unwrap();
 }
 
+/// The synthetic-provenance repair statement of migration 0014, as shipped.
+fn upgrade_synthetic_repair_statement() -> &'static str {
+    let sql = include_str!("../migrations/0014_ai_artifact_isolation.sql");
+    let start = sql
+        .find("UPDATE ai_artifacts\nSET synthetic = true")
+        .expect("synthetic repair");
+    let end = sql[start..].find(';').expect("statement end");
+    &sql[start..start + end]
+}
+
+/// Upgrade repair of `synthetic`: only an adapter-controlled fixture
+/// provider identity (columns or Scribe JSON) is evidence. A real provider
+/// whose operator happened to name the model `dmind-fake` /
+/// `fake-transcribe` is never reclassified.
+#[tokio::test]
+async fn upgrade_synthetic_repair_uses_provider_identity_not_model_names() {
+    let state = fake_state().await;
+    let t = seeded_tenant(&state.pool).await;
+    let patient = new_patient(&state.pool, t).await;
+    let scope = new_scope(&state.pool, t, patient, Kind::Scribe).await;
+    let mut tx = state.pool.begin().await.unwrap();
+
+    // (provider, route, model, output, expected synthetic after repair)
+    let real_out = json!({
+        "transcription": { "provider": "openai-compatible", "model": "whisper-1" },
+        "extraction": { "provider": "openai-compatible", "model": "gpt-x" },
+    });
+    let fake_transcription_out = json!({
+        "transcription": { "provider": "dmind-fake", "model": "fake-transcribe" },
+        "extraction": { "provider": "openai-compatible", "model": "gpt-x" },
+    });
+    let misnamed_real_out = json!({
+        "transcription": { "provider": "openai-compatible", "model": "fake-transcribe" },
+        "extraction": { "provider": "openai-compatible", "model": "dmind-fake" },
+    });
+    let cases = [
+        (
+            "openai-compatible",
+            "openai-compatible",
+            "gpt-x",
+            &real_out,
+            false,
+        ),
+        (
+            "openai-compatible",
+            "openai-compatible",
+            "dmind-fake",
+            &misnamed_real_out,
+            false,
+        ),
+        (
+            "openai-compatible",
+            "openai-compatible",
+            "gpt-x",
+            &fake_transcription_out,
+            true,
+        ),
+        ("local-fake", "local-fake", "dmind-fake", &real_out, true),
+        ("openai-compatible", "local-fake", "gpt-x", &real_out, true),
+    ];
+    let mut ids = Vec::new();
+    for (provider, route, model, output, _) in cases {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO ai_artifacts
+             (id, tenant_id, patient_id, encounter_id, artifact_type, autonomy_level, status,
+              provider, route, model, model_version, template, input_hash, output,
+              output_schema, generated_at, synthetic)
+             VALUES ($1, $2, $3, $4, 'scribe_draft', 'A2', 'awaiting_review', $5, $6, $7, 'v1',
+                     'isolation-test@1', 'legacy-hash', $8, $9, now(), false)",
+        )
+        .bind(id)
+        .bind(t.id)
+        .bind(patient)
+        .bind(scope.resource_id())
+        .bind(provider)
+        .bind(route)
+        .bind(model)
+        .bind(output)
+        .bind(SCHEMA)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+
+    sqlx::query(upgrade_synthetic_repair_statement())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    for (id, (provider, route, model, _, expected)) in ids.into_iter().zip(cases) {
+        let synthetic: bool =
+            sqlx::query_scalar("SELECT synthetic FROM ai_artifacts WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        assert_eq!(
+            synthetic, expected,
+            "provider={provider} route={route} model={model}"
+        );
+    }
+    tx.rollback().await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Synthetic provenance (scribe: transcription × model, and reuse)
 // ---------------------------------------------------------------------------

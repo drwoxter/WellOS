@@ -86,18 +86,18 @@ CREATE INDEX ai_artifacts_dedup
     WHERE input_hash IS NOT NULL AND output IS NOT NULL;
 
 -- 4. Repair synthetic provenance where the fixture provider provably took
---    part: model provenance columns, or the Scribe draft's embedded
---    transcription / extraction provider records.
+--    part. Only adapter-controlled provider identities count as proof:
+--    `local-fake` (fixture model gateway) and `dmind-fake` (fixture
+--    transcription), in the provenance columns or in the Scribe draft's
+--    embedded transcription / extraction provider records. Model names are
+--    operator-configurable for real providers and are deliberately not used.
 UPDATE ai_artifacts
 SET synthetic = true
 WHERE synthetic = false
   AND (
         provider IN ('local-fake', 'dmind-fake')
      OR route IN ('local-fake', 'dmind-fake')
-     OR model IN ('dmind-fake', 'fake-transcribe')
      OR (artifact_type = 'scribe_draft' AND (
             output->'transcription'->>'provider' IN ('local-fake', 'dmind-fake')
-         OR output->'transcription'->>'model' IN ('dmind-fake', 'fake-transcribe')
-         OR output->'extraction'->>'provider' IN ('local-fake', 'dmind-fake')
-         OR output->'extraction'->>'model' = 'dmind-fake'))
+         OR output->'extraction'->>'provider' IN ('local-fake', 'dmind-fake')))
   );

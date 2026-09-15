@@ -149,8 +149,9 @@ patients, tasks or clinical resources — and, transitively, links to such
 artifacts, since they carry the same foreign output — (invalidating
 undecided outputs; recorded decisions are preserved), widened
 the deduplication index to the full reuse key and marked artifacts whose
-stored provenance or Scribe JSON proves the fixture provider took part as
-`synthetic=true` without touching real-provider rows. Rollback of the
+stored provenance or Scribe JSON names a fixture *provider identity*
+(`local-fake` / `dmind-fake`; operator-configurable model names are not
+evidence) as `synthetic=true` without touching real-provider rows. Rollback of the
 structural parts is a forward migration that restores the previous foreign
 key and index (documented at the top of the migration file); the data
 corrections are not reverted.
