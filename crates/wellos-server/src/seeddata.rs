@@ -413,9 +413,12 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
         .await?;
     }
 
+    let dr_garcia = dr_garcia_id.expect("dr.garcia seeded");
+    crate::scheduling::install_baseline_catalog(&mut tx, tenant_a, dr_garcia).await?;
+    crate::scheduling::install_baseline_catalog(&mut tx, tenant_b, dr_b).await?;
+
     // Demo clinical states: enough synthetic loops to show the workspace in
     // every workflow stage without hand-driving the lab adapter first.
-    let dr_garcia = dr_garcia_id.expect("dr.garcia seeded");
     let demo = seed_demo_states(&mut tx, tenant_a, facility_a, patient_a, dr_garcia).await?;
 
     // Service queues exist for every facility so arrivals always route

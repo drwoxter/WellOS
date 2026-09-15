@@ -1,3 +1,4 @@
+pub mod access_admin;
 pub mod admin;
 pub mod ai;
 pub mod brief;
@@ -27,7 +28,7 @@ use crate::state::AppState;
 use axum::extract::DefaultBodyLimit;
 use axum::http::header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::Method;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -195,6 +196,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/jobs/escalate-overdue",
             post(admin::escalate_overdue),
         )
+        .merge(access_admin_routes())
         .route("/fhir/r4/Patient/:id", get(fhir::patient))
         .route("/fhir/r4/Observation/:id", get(fhir::observation))
         .route("/fhir/r4/ServiceRequest/:id", get(fhir::service_request))
@@ -219,6 +221,73 @@ pub fn router(state: AppState) -> Router {
         router
     };
     router.with_state(state)
+}
+
+/// Scheduling administration: catalogs, policy, facility hours, resources,
+/// availability, exceptions, service requirements, operational calendar.
+fn access_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/catalog",
+            get(access_admin::list_catalog).post(access_admin::create_catalog),
+        )
+        .route(
+            "/api/v1/catalog/:id",
+            get(access_admin::catalog_detail).post(access_admin::update_catalog),
+        )
+        .route(
+            "/api/v1/catalog/:id/deactivate",
+            post(access_admin::deactivate_catalog),
+        )
+        .route(
+            "/api/v1/catalog/:id/history",
+            get(access_admin::catalog_history),
+        )
+        .route(
+            "/api/v1/scheduling/policy",
+            get(access_admin::get_policy).post(access_admin::update_policy),
+        )
+        .route(
+            "/api/v1/scheduling/facilities",
+            get(access_admin::list_facility_scheduling),
+        )
+        .route(
+            "/api/v1/scheduling/facilities/:id",
+            get(access_admin::get_facility_scheduling)
+                .post(access_admin::update_facility_scheduling),
+        )
+        .route(
+            "/api/v1/scheduling/resources",
+            get(access_admin::list_resources).post(access_admin::create_resource),
+        )
+        .route(
+            "/api/v1/scheduling/resources/:id",
+            get(access_admin::resource_detail).post(access_admin::update_resource),
+        )
+        .route(
+            "/api/v1/scheduling/resources/:id/availability",
+            post(access_admin::replace_availability),
+        )
+        .route(
+            "/api/v1/scheduling/resources/:id/exceptions",
+            post(access_admin::create_exception),
+        )
+        .route(
+            "/api/v1/scheduling/resources/:id/exceptions/:exception_id",
+            delete(access_admin::delete_exception),
+        )
+        .route(
+            "/api/v1/scheduling/services/:code/requirements",
+            get(access_admin::get_requirements).post(access_admin::replace_requirements),
+        )
+        .route(
+            "/api/v1/scheduling/calendar",
+            get(access_admin::list_calendar).post(access_admin::create_calendar_event),
+        )
+        .route(
+            "/api/v1/scheduling/calendar/:id/deactivate",
+            post(access_admin::deactivate_calendar_event),
+        )
 }
 
 fn header_layer(name: &'static str, value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {

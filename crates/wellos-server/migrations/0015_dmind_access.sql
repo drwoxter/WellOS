@@ -801,7 +801,54 @@ CREATE INDEX ai_artifacts_cancellation ON ai_artifacts (tenant_id, cancellation_
 CREATE INDEX ai_artifacts_capacity ON ai_artifacts (tenant_id, capacity_forecast_id) WHERE capacity_forecast_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
--- 13. Migrate existing scheduled visits into authoritative appointments
+-- 13. Baseline catalog for existing tenants
+-- ---------------------------------------------------------------------------
+
+-- The closed service list validated by the visit API before this migration
+-- becomes ordinary catalog data, plus the modalities and resource types the
+-- scheduler needs to book anything at all. Everything else (specialties,
+-- professions, accessibility, locations, transport) is tenant-authored at
+-- runtime. Idempotent; tenants without any user cannot own entries yet and
+-- are skipped (they have no visits either).
+INSERT INTO catalog_entries (id, tenant_id, kind, code, name_en, name_es, config, created_by)
+SELECT md5('wellos-0015-catalog:' || t.id::text || ':' || b.kind || ':' || b.code)::uuid,
+       t.id, b.kind, b.code, b.name_en, b.name_es, b.config::jsonb, u.id
+FROM tenants t
+JOIN LATERAL (
+    SELECT id FROM users WHERE tenant_id = t.id AND NOT is_service ORDER BY created_at, id LIMIT 1
+) u ON true
+CROSS JOIN (VALUES
+    ('clinical_service', 'general_medicine', 'General medicine consultation', 'Consulta de medicina general',
+        '{"duration_minutes":20,"modality_codes":["in_person","telehealth"],"required_resource_types":["professional"]}'),
+    ('clinical_service', 'emergency', 'Emergency attendance', 'Atención de urgencias',
+        '{"duration_minutes":30,"modality_codes":["in_person"],"required_resource_types":["professional"]}'),
+    ('clinical_service', 'nursing', 'Nursing care', 'Atención de enfermería',
+        '{"duration_minutes":15,"modality_codes":["in_person","home_visit"],"required_resource_types":["professional"]}'),
+    ('clinical_service', 'telehealth', 'Telehealth consultation', 'Consulta de telesalud',
+        '{"duration_minutes":15,"modality_codes":["telehealth"],"required_resource_types":["professional"]}'),
+    ('modality', 'in_person', 'In person', 'Presencial', '{}'),
+    ('modality', 'telehealth', 'Telehealth', 'Telesalud', '{}'),
+    ('modality', 'home_visit', 'Home visit', 'Visita domiciliaria', '{}'),
+    ('resource_type', 'professional', 'Professional', 'Profesional', '{}'),
+    ('resource_type', 'team', 'Multidisciplinary team', 'Equipo multidisciplinar', '{}'),
+    ('resource_type', 'room', 'Consultation room', 'Consulta', '{}'),
+    ('resource_type', 'telehealth_channel', 'Telehealth channel', 'Canal de telesalud', '{}'),
+    ('resource_type', 'vehicle', 'Vehicle', 'Vehículo', '{}'),
+    ('resource_type', 'accessible_vehicle', 'Accessible vehicle', 'Vehículo adaptado', '{}'),
+    ('resource_type', 'ambulance', 'Ambulance', 'Ambulancia', '{}')
+) AS b(kind, code, name_en, name_es, config)
+ON CONFLICT (tenant_id, kind, code) DO NOTHING;
+
+INSERT INTO catalog_entry_history (id, tenant_id, entry_id, version, snapshot, change_reason, changed_by)
+SELECT md5('wellos-0015-catalog-history:' || e.id::text)::uuid, e.tenant_id, e.id, e.version,
+       jsonb_build_object('kind', e.kind, 'code', e.code, 'name_en', e.name_en, 'name_es', e.name_es,
+                          'config', e.config, 'active', e.active),
+       'baseline_catalog_migration_0015', e.created_by
+FROM catalog_entries e
+WHERE NOT EXISTS (SELECT 1 FROM catalog_entry_history h WHERE h.entry_id = e.id AND h.version = e.version);
+
+-- ---------------------------------------------------------------------------
+-- 14. Migrate existing scheduled visits into authoritative appointments
 -- ---------------------------------------------------------------------------
 
 -- Every visit registered as a scheduled appointment before this migration

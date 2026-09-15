@@ -17,6 +17,7 @@ use crate::policy::{actions, facility_scope, ResourceCtx};
 use crate::ratelimit;
 use crate::routes::encounter_docs::{validate_vitals, RecordVitals};
 use crate::routes::guard;
+use crate::scheduling;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -30,8 +31,8 @@ use sqlx::{PgConnection, Row, Transaction};
 use uuid::Uuid;
 use wellos_domain::ai::{ArtifactStatus, ProviderInfo};
 use wellos_domain::triage::{
-    is_concern, is_red_flag, is_service, safety_floor, ArrivalKind, Priority, TriageVitals,
-    VisitStatus, VisitTransition, SAFETY_RULES_VERSION,
+    is_concern, is_red_flag, safety_floor, ArrivalKind, Priority, TriageVitals, VisitStatus,
+    VisitTransition, SAFETY_RULES_VERSION,
 };
 
 const MAX_TEXT: usize = 2000;
@@ -93,15 +94,21 @@ fn parse_priority(s: &str) -> Result<Priority, ApiError> {
     })
 }
 
-fn require_service(s: &str) -> Result<String, ApiError> {
+/// Services are the tenant's active `clinical_service` catalog entries, not
+/// a closed list.
+async fn require_service(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    s: &str,
+) -> Result<String, ApiError> {
     let s = s.trim();
-    if !is_service(s) {
+    if s.is_empty() {
         return Err(ApiError::bad_request(
             "validation_failed",
-            "service must be one of general_medicine, emergency, nursing, telehealth",
+            "service is required",
         ));
     }
-    Ok(s.to_string())
+    Ok(scheduling::load_service(conn, tenant_id, s).await?.code)
 }
 
 // ---------------------------------------------------------------------------
@@ -597,7 +604,12 @@ pub async fn create(
             "arrival_kind must be one of scheduled, walk_in, urgent, remote",
         )
     })?;
-    let service = require_service(&body.service)?;
+    let service_entry = {
+        let mut conn = state.pool.acquire().await?;
+        let code = require_service(&mut conn, ctx.tenant_id, &body.service).await?;
+        scheduling::load_service(&mut conn, ctx.tenant_id, &code).await?
+    };
+    let service = service_entry.code.clone();
     let reason = clean_text(body.reason, "reason", MAX_REASON)?;
     let scheduled_at = match arrival_kind {
         ArrivalKind::Scheduled => {
@@ -720,14 +732,31 @@ pub async fn create(
     )
     .await
     .map_err(ApiError::internal)?;
+    let mut appointment_id = None;
     if status == VisitStatus::Arrived {
         on_arrival(&mut tx, &ctx, &state, &v).await?;
+    } else if let Some(at) = scheduled_at {
+        let appt = scheduling::direct_appointment_for_visit(
+            &mut tx,
+            &ctx,
+            &state,
+            id,
+            facility_id,
+            body.patient_id,
+            &service_entry,
+            at,
+            reason.as_deref(),
+        )
+        .await?;
+        appointment_id = Some(appt.id);
     }
+    let v = lock_visit(&mut tx, id).await?;
     tx.commit().await?;
     Ok(Json(json!({
         "id": id,
         "status": status.as_str(),
         "arrival_kind": arrival_kind.as_str(),
+        "appointment_id": appointment_id,
         "version": v.version,
     })))
 }
@@ -836,30 +865,8 @@ async fn manage_transition(
     match t {
         VisitTransition::Arrive => on_arrival(&mut tx, ctx, state, &v).await?,
         VisitTransition::Cancel | VisitTransition::MarkNoShow => {
-            sqlx::query("UPDATE visits SET closed_reason = $2 WHERE id = $1")
-                .bind(id)
-                .bind(&reason)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query(
-                "UPDATE care_team_assignments SET active = false, ends_at = now(), updated_at = now()
-                 WHERE tenant_id = $1 AND visit_id = $2 AND active",
-            )
-            .bind(v.tenant_id)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-            resolve_alerts(&mut tx, ctx, state, &v).await?;
-            audit::emit(
-                &mut *tx,
-                ctx,
-                event,
-                &state.cell,
-                json!({ "visit_id": id }),
-                None,
-            )
-            .await
-            .map_err(ApiError::internal)?;
+            close_visit_records(&mut tx, ctx, state, &v, reason.as_deref(), event).await?;
+            scheduling::on_visit_status(&mut tx, ctx, state, id, next, reason.as_deref()).await?;
         }
         _ => {}
     }
@@ -867,6 +874,73 @@ async fn manage_transition(
     Ok(Json(
         json!({ "id": id, "status": next.as_str(), "version": v.version }),
     ))
+}
+
+/// Shared closure bookkeeping for a visit that just moved to cancelled or
+/// no-show: reason, care-team deactivation, alert resolution and audit.
+async fn close_visit_records(
+    tx: &mut Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    v: &VisitRow,
+    reason: Option<&str>,
+    event: &str,
+) -> Result<(), ApiError> {
+    sqlx::query("UPDATE visits SET closed_reason = $2 WHERE id = $1")
+        .bind(v.id)
+        .bind(reason)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "UPDATE care_team_assignments SET active = false, ends_at = now(), updated_at = now()
+         WHERE tenant_id = $1 AND visit_id = $2 AND active",
+    )
+    .bind(v.tenant_id)
+    .bind(v.id)
+    .execute(&mut **tx)
+    .await?;
+    resolve_alerts(tx, ctx, state, v).await?;
+    audit::emit(
+        &mut **tx,
+        ctx,
+        event,
+        &state.cell,
+        json!({ "visit_id": v.id }),
+        None,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+/// Appointment → visit consistency, called inside the appointment
+/// transaction. A visit that is already closed is left alone; a visit whose
+/// patient is being seen cannot be closed from the scheduling side.
+pub async fn close_for_appointment(
+    tx: &mut Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    visit_id: Uuid,
+    t: VisitTransition,
+    reason: Option<&str>,
+) -> Result<(), ApiError> {
+    let v = lock_visit(tx, visit_id).await?;
+    if v.status.is_terminal() {
+        return Ok(());
+    }
+    if v.status.apply(t).is_err() {
+        return Err(ApiError::conflict(
+            "visit_in_progress",
+            "the linked visit is already under way; close it from the access board instead",
+        ));
+    }
+    transition(tx, &v, t).await?;
+    let event = match t {
+        VisitTransition::MarkNoShow => "visit.no_show",
+        _ => "visit.cancelled",
+    };
+    let v = lock_visit(tx, visit_id).await?;
+    close_visit_records(tx, ctx, state, &v, reason, event).await
 }
 
 pub async fn arrive(
@@ -1472,7 +1546,10 @@ pub async fn save_triage(
     let red_flags = clean_list(body.red_flags, "red_flags", is_red_flag)?;
     let requested_service = match body.requested_service.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(s) => Some(require_service(s)?),
+        Some(s) => {
+            let mut conn = state.pool.acquire().await?;
+            Some(require_service(&mut conn, ctx.tenant_id, s).await?)
+        }
     };
     let priority = body.priority.as_deref().map(parse_priority).transpose()?;
     if !body.vitals.is_empty() {
@@ -2036,7 +2113,10 @@ pub async fn review_proposal(
     let override_priority = body.priority.as_deref().map(parse_priority).transpose()?;
     let override_service = match body.requested_service.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(s) => Some(require_service(s)?),
+        Some(s) => {
+            let mut conn = state.pool.acquire().await?;
+            Some(require_service(&mut conn, ctx.tenant_id, s).await?)
+        }
     };
     if decision == "override" && override_priority.is_none() && override_service.is_none() {
         return Err(ApiError::bad_request(
@@ -2307,7 +2387,10 @@ pub async fn complete_triage(
     Json(body): Json<CompleteTriage>,
 ) -> Result<Json<Value>, ApiError> {
     let priority = parse_priority(&body.priority)?;
-    let service = require_service(&body.requested_service)?;
+    let service = {
+        let mut conn = state.pool.acquire().await?;
+        require_service(&mut conn, ctx.tenant_id, &body.requested_service).await?
+    };
     let handoff = clean_text(body.handoff_summary, "handoff_summary", MAX_TEXT)?;
     let v = load_visit(&state, id).await?;
     let allowed = guard(
@@ -2756,6 +2839,7 @@ pub async fn complete_for_encounter(
     )
     .await
     .map_err(ApiError::internal)?;
+    scheduling::on_visit_status(tx, ctx, state, v.id, VisitStatus::Completed, None).await?;
     Ok(())
 }
 
