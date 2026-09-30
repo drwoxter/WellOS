@@ -3,6 +3,7 @@ pub mod access_admin;
 pub mod admin;
 pub mod ai;
 pub mod brief;
+pub mod capacity;
 pub mod consent;
 pub mod creds;
 pub mod dashboard;
@@ -21,7 +22,9 @@ pub mod patients;
 pub mod risk;
 pub mod scribe;
 pub mod session;
+pub mod transport;
 pub mod visits;
+pub mod waitlist;
 
 use crate::audit;
 use crate::auth::AuthContext;
@@ -203,6 +206,9 @@ pub fn router(state: AppState) -> Router {
         .merge(access_admin_routes())
         .nest("/api/v1", access::routes())
         .nest("/api/v1", me::routes())
+        .nest("/api/v1", waitlist::routes())
+        .nest("/api/v1", capacity::routes())
+        .nest("/api/v1", transport::routes())
         .route(
             "/api/v1/patient-grants",
             get(grants::list_grants).post(grants::create_grant),
@@ -302,6 +308,10 @@ fn access_admin_routes() -> Router<AppState> {
         .route(
             "/api/v1/scheduling/calendar/:id/deactivate",
             post(access_admin::deactivate_calendar_event),
+        )
+        .route(
+            "/api/v1/scheduling/worker/tick",
+            post(access_admin::worker_tick),
         )
 }
 

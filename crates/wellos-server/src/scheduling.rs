@@ -32,6 +32,9 @@ use wellos_domain::triage::{VisitStatus, VisitTransition};
 pub const CONSENT_CALENDAR: &str = "scheduling_calendar";
 pub const CONSENT_LOCATION: &str = "scheduling_location";
 pub const CONSENT_TRANSPORT: &str = "transport_coordination";
+/// Opt-in to receive time-limited cancellation-recovery offers; recorded
+/// when the patient (or representative) joins a waitlist.
+pub const CONSENT_WAITLIST: &str = "waitlist_offers";
 
 /// Upper bound on facts loaded per matcher run (defence against a tenant
 /// with thousands of resources turning one request into a full scan).
@@ -1739,6 +1742,7 @@ pub async fn confirm_offer(
         .bind(appointment_id)
         .execute(&mut **tx)
         .await?;
+    crate::recovery::on_offer_accepted(tx, ctx, state, o, appointment_id).await?;
     if let Some(req) = o.access_request_id {
         let siblings = sqlx::query(&format!(
             "SELECT {OFFER_COLUMNS} FROM appointment_offers
@@ -1837,6 +1841,14 @@ pub async fn confirm_offer(
                 return Err(stale());
             }
             release_appointment_bookings(tx, prev.id).await?;
+            crate::transport::cancel_for_appointment(
+                tx,
+                ctx,
+                state,
+                prev.id,
+                "appointment_rescheduled",
+            )
+            .await?;
             appointment_history(
                 tx,
                 &prev,
@@ -2202,6 +2214,13 @@ pub async fn close_appointment(
     .await?;
     release_appointment_bookings(tx, a.id).await?;
     notify::cancel_pending_for_appointment(tx, a.tenant_id, a.id).await?;
+    if matches!(
+        next,
+        AppointmentStatus::Cancelled | AppointmentStatus::NoShow
+    ) {
+        crate::transport::cancel_for_appointment(tx, ctx, state, a.id, "appointment_closed")
+            .await?;
+    }
 
     // Linked visit follows in the same transaction.
     if let Some(visit_id) = a.visit_id {
@@ -2259,7 +2278,8 @@ pub async fn close_appointment(
     if next == AppointmentStatus::Cancelled {
         notify::schedule_cancellation(tx, ctx, state, a, policy).await?;
         if a.starts_at > now + Duration::minutes(30) {
-            open_cancellation_event(tx, ctx, state, a).await?;
+            let event_id = open_cancellation_event(tx, ctx, state, a).await?;
+            crate::recovery::start_event(tx, ctx, state, event_id).await?;
         }
     }
     lock_appointment(tx, a.id).await

@@ -1,6 +1,7 @@
 pub mod aigov;
 pub mod audit;
 pub mod auth;
+pub mod capacity;
 pub mod crypto;
 pub mod error;
 pub mod notify;

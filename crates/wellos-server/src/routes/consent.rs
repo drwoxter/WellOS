@@ -27,6 +27,7 @@ const KNOWN_PURPOSES: &[&str] = &[
     scheduling::CONSENT_CALENDAR,
     scheduling::CONSENT_LOCATION,
     scheduling::CONSENT_TRANSPORT,
+    scheduling::CONSENT_WAITLIST,
 ];
 
 /// Append one immutable consent version and audit it. Consent decisions are

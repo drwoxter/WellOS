@@ -2758,3 +2758,28 @@ pub async fn deactivate_calendar_event(
     tx.commit().await?;
     Ok(Json(calendar_json(&updated)))
 }
+
+// ---------------------------------------------------------------------------
+// Worker
+// ---------------------------------------------------------------------------
+
+/// Run one scheduling worker pass on demand (external schedulers, tests).
+/// Claims use `FOR UPDATE SKIP LOCKED`, so a concurrent in-process worker
+/// never double-delivers.
+pub async fn worker_tick(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+) -> Result<Json<Value>, ApiError> {
+    let allowed = guard(
+        &state,
+        &ctx,
+        actions::SCHEDULING_MANAGE,
+        "scheduling_worker",
+        manage_ctx(&ctx),
+    )
+    .await?;
+    allowed.record_on_pool(&state, &ctx).await?;
+    let worker_id = format!("api:{}", ctx.user_id);
+    let report = crate::notify::scheduling_tick(&state, &worker_id).await?;
+    Ok(Json(report))
+}

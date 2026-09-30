@@ -425,13 +425,14 @@ CREATE TABLE appointment_offers (
     score                 jsonb,
     explanation           jsonb,
     rank                  int,
-    offered_to            text NOT NULL CHECK (offered_to IN ('staff', 'patient')),
+    offered_to            text NOT NULL CHECK (offered_to IN ('staff', 'patient', 'waitlist')),
     offer_expires_at      timestamptz NOT NULL,
     hold_expires_at       timestamptz,
     appointment_id        uuid REFERENCES appointments(id),
     decline_reason        text,
     version               bigint NOT NULL DEFAULT 1,
-    created_by            uuid NOT NULL REFERENCES users(id),
+    -- NULL when the recovery worker offered a freed slot to the waitlist.
+    created_by            uuid REFERENCES users(id),
     created_at            timestamptz NOT NULL DEFAULT now(),
     updated_at            timestamptz NOT NULL DEFAULT now(),
     CHECK (ends_at > starts_at)
@@ -592,7 +593,9 @@ CREATE TABLE cancellation_events (
                            'open', 'offered', 'filled', 'exhausted', 'closed')),
     -- Deterministic eligibility + fairness ordering, persisted verbatim.
     eligible            jsonb NOT NULL DEFAULT '[]'::jsonb,
-    ranking_mode        text NOT NULL DEFAULT 'deterministic' CHECK (ranking_mode IN ('deterministic', 'dmind')),
+    -- Entries considered but excluded, with the deterministic reason.
+    excluded            jsonb NOT NULL DEFAULT '[]'::jsonb,
+    ranking_mode        text NOT NULL DEFAULT 'deterministic' CHECK (ranking_mode IN ('deterministic', 'dmind', 'human_override')),
     ranking_artifact_id uuid REFERENCES ai_artifacts(id),
     current_offer_id    uuid REFERENCES appointment_offers(id),
     offers_made         int NOT NULL DEFAULT 0,

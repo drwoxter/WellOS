@@ -199,6 +199,80 @@ pub fn enforce_floors(
     Ok(proposed.to_vec())
 }
 
+// ---------------------------------------------------------------------------
+// Waitlist entry state machine
+// ---------------------------------------------------------------------------
+
+/// Lifecycle of one waitlist entry. `Offered` is the transient state while
+/// a recovery offer is live; the entry returns to `Active` when the offer
+/// is declined, expires or is revoked, and becomes `Fulfilled` on booking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitlistStatus {
+    Active,
+    Paused,
+    Offered,
+    Fulfilled,
+    Left,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitlistTransition {
+    Pause,
+    Resume,
+    Offer,
+    OfferClosed,
+    Fulfil,
+    Leave,
+}
+
+impl WaitlistStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Offered => "offered",
+            Self::Fulfilled => "fulfilled",
+            Self::Left => "left",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "active" => Self::Active,
+            "paused" => Self::Paused,
+            "offered" => Self::Offered,
+            "fulfilled" => Self::Fulfilled,
+            "left" => Self::Left,
+            _ => return None,
+        })
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Fulfilled | Self::Left)
+    }
+
+    pub fn apply(self, t: WaitlistTransition) -> Result<Self, String> {
+        use WaitlistStatus::*;
+        use WaitlistTransition::*;
+        Ok(match (self, t) {
+            (Active, Pause) => Paused,
+            (Paused, Resume) => Active,
+            (Active, Offer) => Offered,
+            (Offered, OfferClosed) => Active,
+            (Offered, Fulfil) => Fulfilled,
+            (Active | Paused | Offered, Leave) => Left,
+            (from, t) => {
+                return Err(format!(
+                    "waitlist entry in status {} cannot {:?}",
+                    from.as_str(),
+                    t
+                ))
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +370,23 @@ mod tests {
         assert!(enforce_floors(&out.eligible, &[id(2), id(1), id(3)], 48).is_ok());
         assert!(enforce_floors(&out.eligible, &[id(2), id(1)], 48).is_err());
         assert!(enforce_floors(&out.eligible, &[id(2), id(1), id(1)], 48).is_err());
+    }
+
+    #[test]
+    fn waitlist_state_machine() {
+        use WaitlistStatus::*;
+        use WaitlistTransition::*;
+        assert_eq!(Active.apply(Pause), Ok(Paused));
+        assert_eq!(Paused.apply(Resume), Ok(Active));
+        assert_eq!(Active.apply(Offer), Ok(Offered));
+        assert_eq!(Offered.apply(OfferClosed), Ok(Active));
+        assert_eq!(Offered.apply(Fulfil), Ok(Fulfilled));
+        assert_eq!(Paused.apply(Leave), Ok(Left));
+        assert!(Paused.apply(Offer).is_err());
+        assert!(Fulfilled.apply(Resume).is_err());
+        assert!(Left.apply(Leave).is_err());
+        for s in [Active, Paused, Offered, Fulfilled, Left] {
+            assert_eq!(WaitlistStatus::parse(s.as_str()), Some(s));
+        }
     }
 }

@@ -387,6 +387,52 @@ fn resource_capacity_on(
     open
 }
 
+/// Bookable appointment count of one resource on one day for a service,
+/// as `capacity-forecast.v1` needs it: whole appointments (duration plus
+/// buffers) that fit the open intervals, times the parallel capacity, and
+/// how many of them leave/sickness/closure exceptions removed that day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlannedSlots {
+    pub slots: i32,
+    pub exception_slots_lost: i32,
+}
+
+pub fn planned_slots_on(
+    res: &ResourceFact,
+    facility: Option<&FacilityFact>,
+    date: NaiveDate,
+    service_code: &str,
+    default_duration_minutes: i32,
+) -> PlannedSlots {
+    let Some(service) = res.services.iter().find(|s| s.service_code == service_code) else {
+        return PlannedSlots::default();
+    };
+    let minutes = (service.duration_minutes.unwrap_or(default_duration_minutes)
+        + service.prep_minutes
+        + service.cleanup_minutes)
+        .max(1) as i64;
+    let count = |open: Vec<(Interval, i32)>| -> i32 {
+        open.iter()
+            .map(|(i, c)| ((i.end - i.start).num_minutes() / minutes) as i32 * (*c).max(1))
+            .sum()
+    };
+    let with = count(resource_capacity_on(res, facility, date));
+    let unaffected = ResourceFact {
+        exceptions: res
+            .exceptions
+            .iter()
+            .filter(|e| e.kind == "extra_capacity")
+            .cloned()
+            .collect(),
+        ..res.clone()
+    };
+    let without = count(resource_capacity_on(&unaffected, facility, date));
+    PlannedSlots {
+        slots: with,
+        exception_slots_lost: (without - with).max(0),
+    }
+}
+
 fn free_slot_index(res: &ResourceFact, capacity: i32, interval: &Interval) -> Option<i32> {
     (0..capacity).find(|idx| {
         !res.bookings

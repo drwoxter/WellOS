@@ -357,6 +357,9 @@ pub async fn cancel_pending_for_appointment(
     Ok(r.rows_affected())
 }
 
+pub const KIND_WAITLIST_OFFER: &str = "waitlist_offer";
+pub const KIND_WAITLIST_OFFER_EXPIRED: &str = "waitlist_offer_expired";
+
 pub async fn schedule_offer(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ctx: &AuthContext,

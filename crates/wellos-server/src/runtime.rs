@@ -195,6 +195,10 @@ pub struct NotificationConfig {
     pub max_backoff: Duration,
     /// How many due deliveries one worker claims per pass.
     pub batch_size: i64,
+    /// Interval of the in-process scheduling worker (holds/offers expiry,
+    /// recovery cascade, location purge, delivery). `None` disables the
+    /// loop so an external scheduler can drive `POST /scheduling/worker/tick`.
+    pub worker_interval: Option<Duration>,
 }
 
 impl NotificationConfig {
@@ -322,6 +326,7 @@ impl RuntimeConfig {
                 base_backoff: Duration::from_secs(1),
                 max_backoff: Duration::from_secs(60),
                 batch_size: 50,
+                worker_interval: None,
             },
             location: LocationConfig {
                 keyring: Some(crate::crypto::Keyring::synthetic("test-fixtures")),
@@ -428,6 +433,17 @@ fn notification_config_from_env(env: RuntimeEnv) -> anyhow::Result<NotificationC
     if batch_size > 1_000 {
         anyhow::bail!("WELLOS_NOTIFICATION_BATCH_SIZE must be at most 1000");
     }
+    let worker_secs = match std::env::var("WELLOS_SCHEDULING_WORKER_INTERVAL_SECS") {
+        Ok(v) => v.trim().parse::<i64>().map_err(|_| {
+            anyhow::anyhow!(
+                "WELLOS_SCHEDULING_WORKER_INTERVAL_SECS must be an integer (0 disables)"
+            )
+        })?,
+        Err(_) => 30,
+    };
+    if !(0..=3600).contains(&worker_secs) {
+        anyhow::bail!("WELLOS_SCHEDULING_WORKER_INTERVAL_SECS must be between 0 and 3600");
+    }
     Ok(NotificationConfig {
         smtp,
         webhook,
@@ -436,6 +452,7 @@ fn notification_config_from_env(env: RuntimeEnv) -> anyhow::Result<NotificationC
         base_backoff: Duration::from_secs(base_backoff as u64),
         max_backoff: Duration::from_secs(max_backoff as u64),
         batch_size,
+        worker_interval: (worker_secs > 0).then(|| Duration::from_secs(worker_secs as u64)),
     })
 }
 

@@ -26,8 +26,10 @@ use crate::routes::consent::{self, SELF_SERVICE_PURPOSES};
 use crate::routes::extract::OptionalJson;
 use crate::routes::grants::{self, GrantRow};
 use crate::routes::guard;
+use crate::routes::waitlist::{self, EntryActionBody, EntryRow, JoinInput};
 use crate::scheduling::{self, AppointmentRow, OfferRow};
 use crate::state::AppState;
+use crate::transport;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -42,6 +44,7 @@ use uuid::Uuid;
 use wellos_domain::access::WeeklyWindow;
 use wellos_domain::ics::{self, IcsError, MAX_HORIZON_DAYS, MAX_ICS_BYTES, MAX_TOTAL_INTERVALS};
 use wellos_domain::matcher::Interval;
+use wellos_domain::recovery::WaitlistTransition;
 
 const MAX_LIST: usize = 30;
 const MAX_CODE: usize = 64;
@@ -66,6 +69,7 @@ pub fn routes() -> Router<AppState> {
         .route("/me/access-requests/:id/match", post(match_request))
         .route("/me/access-requests/:id/offers", get(request_offers))
         .route("/me/access-requests/:id/history", get(request_history))
+        .route("/me/offers", get(list_offers))
         .route("/me/offers/:id", get(get_offer))
         .route("/me/offers/:id/hold", post(hold_offer))
         .route("/me/offers/:id/release", post(release_offer))
@@ -90,8 +94,17 @@ pub fn routes() -> Router<AppState> {
         .route("/me/calendars/ics", post(import_ics))
         .route("/me/calendars/device-sync", post(device_sync))
         .route("/me/calendars/:id/disconnect", post(disconnect_calendar))
+        .route("/me/waitlist", get(list_waitlist).post(join_waitlist))
+        .route("/me/waitlist/:id", get(get_waitlist_entry))
+        .route("/me/waitlist/:id/pause", post(pause_waitlist))
+        .route("/me/waitlist/:id/resume", post(resume_waitlist))
+        .route("/me/waitlist/:id/leave", post(leave_waitlist))
         .route("/me/notifications", get(list_notifications))
         .route("/me/notifications/:id/read", post(read_notification))
+        .route("/me/transport", get(list_transport).post(request_transport))
+        .route("/me/transport/:id", get(get_transport))
+        .route("/me/transport/:id/cancel", post(cancel_transport))
+        .route("/me/transport/:id/location", post(share_transport_location))
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +478,59 @@ async fn match_request(
 // ---------------------------------------------------------------------------
 // Offers
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListOffersQuery {
+    pub patient_id: Option<Uuid>,
+    /// `live` (default: offered or held), `all`.
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// Every offer addressed to the patient, whichever path produced it
+/// (matcher run, reschedule or cancellation recovery), newest first.
+async fn list_offers(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Query(q): Query<ListOffersQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (g, allowed) = scope(&state, &ctx, &mut conn, "appointment_offer", q.patient_id).await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    let statuses: Vec<String> = match q.status.as_deref() {
+        None | Some("live") => vec!["offered".into(), "held".into()],
+        Some("all") => [
+            "offered", "held", "accepted", "declined", "expired", "revoked",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "validation_failed",
+                "status must be live or all",
+            ))
+        }
+    };
+    let ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM appointment_offers
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = ANY($3)
+         ORDER BY created_at DESC, id
+         LIMIT $4",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .bind(&statuses)
+    .bind(bounded_limit(q.limit))
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut items = Vec::with_capacity(ids.len());
+    for id in ids {
+        let o = access::load_offer_scoped(&mut conn, g.tenant_id, id).await?;
+        items.push(scheduling::offer_json(&o));
+    }
+    Ok(Json(json!({ "patient_id": g.patient_id, "items": items })))
+}
 
 async fn own_offer(
     state: &AppState,
@@ -1788,6 +1854,194 @@ async fn disconnect_calendar(
 }
 
 // ---------------------------------------------------------------------------
+// Waitlist (cancellation recovery opt-in)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListWaitlistQuery {
+    pub patient_id: Option<Uuid>,
+    /// `live` (default: active, paused, offered) or `all`.
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+async fn list_waitlist(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Query(q): Query<ListWaitlistQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (g, allowed) = scope(&state, &ctx, &mut conn, "waitlist_entry", q.patient_id).await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    let statuses: Vec<String> = match q.status.as_deref() {
+        None | Some("live") => vec!["active".into(), "paused".into(), "offered".into()],
+        Some("all") => ["active", "paused", "offered", "fulfilled", "left"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "validation_failed",
+                "status must be live or all",
+            ))
+        }
+    };
+    let ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM waitlist_entries
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = ANY($3)
+         ORDER BY joined_at DESC, id
+         LIMIT $4",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .bind(&statuses)
+    .bind(bounded_limit(q.limit))
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut items = Vec::with_capacity(ids.len());
+    for id in ids {
+        let e = waitlist::load_entry(&mut conn, g.tenant_id, id).await?;
+        let offer = waitlist::current_offer_json(&mut conn, &e).await?;
+        let mut v = waitlist::entry_json(&e);
+        if let Value::Object(map) = &mut v {
+            map.insert("current_offer".into(), offer.unwrap_or(Value::Null));
+        }
+        items.push(v);
+    }
+    Ok(Json(json!({ "patient_id": g.patient_id, "items": items })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeJoinBody {
+    pub patient_id: Option<Uuid>,
+    #[serde(flatten)]
+    pub input: JoinInput,
+}
+
+/// Joining *is* the opt-in: the entry and the active `waitlist_offers`
+/// consent are recorded together, by the patient or their representative.
+async fn join_waitlist(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Json(body): Json<MeJoinBody>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (g, allowed) = scope(&state, &ctx, &mut conn, "waitlist_entry", body.patient_id).await?;
+    drop(conn);
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Scheduling).await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let e = waitlist::join_for(&mut tx, &ctx, &state, g.patient_id, body.input, true).await?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(waitlist::entry_json(&e))))
+}
+
+async fn own_waitlist_entry(
+    state: &AppState,
+    ctx: &AuthContext,
+    conn: &mut PgConnection,
+    id: Uuid,
+) -> Result<(EntryRow, crate::routes::Allowed), ApiError> {
+    guard(
+        state,
+        ctx,
+        actions::PATIENT_SELF_SERVICE,
+        "waitlist_entry",
+        None,
+    )
+    .await?;
+    let e = waitlist::load_entry(conn, ctx.tenant_id, id).await?;
+    let g = grants::grant_for_patient(conn, ctx, e.patient_id).await?;
+    let allowed = guard(
+        state,
+        ctx,
+        actions::PATIENT_SELF_SERVICE,
+        "waitlist_entry",
+        patient_ctx(&g),
+    )
+    .await?;
+    Ok((e, allowed))
+}
+
+async fn get_waitlist_entry(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (e, allowed) = own_waitlist_entry(&state, &ctx, &mut conn, id).await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    let offer = waitlist::current_offer_json(&mut conn, &e).await?;
+    Ok(Json(
+        json!({ "entry": waitlist::entry_json(&e), "current_offer": offer }),
+    ))
+}
+
+async fn me_waitlist_transition(
+    state: AppState,
+    ctx: AuthContext,
+    id: Uuid,
+    t: WaitlistTransition,
+    body: EntryActionBody,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (e, allowed) = own_waitlist_entry(&state, &ctx, &mut conn, id).await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    drop(conn);
+    let e = waitlist::transition_entry_for(&state, &ctx, &e, t, body, true).await?;
+    Ok(Json(waitlist::entry_json(&e)))
+}
+
+async fn pause_waitlist(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    body: OptionalJson<EntryActionBody>,
+) -> Result<Json<Value>, ApiError> {
+    me_waitlist_transition(
+        state,
+        ctx,
+        id,
+        WaitlistTransition::Pause,
+        body.0.unwrap_or_default(),
+    )
+    .await
+}
+
+async fn resume_waitlist(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    body: OptionalJson<EntryActionBody>,
+) -> Result<Json<Value>, ApiError> {
+    me_waitlist_transition(
+        state,
+        ctx,
+        id,
+        WaitlistTransition::Resume,
+        body.0.unwrap_or_default(),
+    )
+    .await
+}
+
+async fn leave_waitlist(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    body: OptionalJson<EntryActionBody>,
+) -> Result<Json<Value>, ApiError> {
+    me_waitlist_transition(
+        state,
+        ctx,
+        id,
+        WaitlistTransition::Leave,
+        body.0.unwrap_or_default(),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // In-app notifications
 // ---------------------------------------------------------------------------
 
@@ -1921,4 +2175,203 @@ mod tests {
     fn source_types_match_schema() {
         assert_eq!(SOURCE_TYPES, &["ics_import", "device_sync"]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Transport support (logistics only, grant-scoped)
+// ---------------------------------------------------------------------------
+
+/// Patient-side request body: no emergency flag, no operator, no vehicle.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeTransportBody {
+    pub appointment_id: Uuid,
+    #[serde(default)]
+    pub requirements: Vec<String>,
+    pub origin_area_code: Option<String>,
+    pub pickup_address: Option<String>,
+    pub pickup_window_start: Option<DateTime<Utc>>,
+    pub pickup_window_end: Option<DateTime<Utc>>,
+    pub note: Option<String>,
+}
+
+async fn own_transport(
+    state: &AppState,
+    ctx: &AuthContext,
+    conn: &mut PgConnection,
+    id: Uuid,
+) -> Result<(transport::TransportRow, GrantRow, crate::routes::Allowed), ApiError> {
+    guard(
+        state,
+        ctx,
+        actions::PATIENT_SELF_SERVICE,
+        "transport_request",
+        None,
+    )
+    .await?;
+    let t = transport::load(conn, ctx.tenant_id, id).await?;
+    let g = grants::grant_for_patient(conn, ctx, t.patient_id).await?;
+    let allowed = guard(
+        state,
+        ctx,
+        actions::PATIENT_SELF_SERVICE,
+        "transport_request",
+        patient_ctx(&g),
+    )
+    .await?;
+    Ok((t, g, allowed))
+}
+
+async fn list_transport(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Query(q): Query<PatientQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (g, allowed) = scope(&state, &ctx, &mut conn, "transport_request", q.patient_id).await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    let rows = transport::list(
+        &mut conn,
+        ctx.tenant_id,
+        transport::ListFilter {
+            facility_ids: None,
+            patient_id: Some(g.patient_id),
+            appointment_id: None,
+            statuses: &[],
+            operator_user_id: None,
+            limit: 50,
+        },
+    )
+    .await?;
+    Ok(Json(json!({
+        "patient_id": g.patient_id,
+        "items": rows.iter().map(transport::transport_json).collect::<Vec<_>>(),
+        "consent_active": scheduling::consent_active(
+            &mut conn, ctx.tenant_id, g.patient_id, scheduling::CONSENT_TRANSPORT).await?,
+        "location_encryption_configured": state.runtime.location.keyring.is_some(),
+    })))
+}
+
+async fn request_transport(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Json(body): Json<MeTransportBody>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (a, g, allowed) = own_appointment(&state, &ctx, &mut conn, body.appointment_id).await?;
+    drop(conn);
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Scheduling).await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    debug_assert_eq!(a.patient_id, g.patient_id);
+    let t = transport::create(
+        &mut tx,
+        &ctx,
+        &state,
+        transport::CreateInput {
+            appointment_id: a.id,
+            requirements: body.requirements,
+            emergency: false,
+            origin_area_code: body.origin_area_code,
+            pickup_address: body.pickup_address,
+            pickup_window_start: body.pickup_window_start,
+            pickup_window_end: body.pickup_window_end,
+            note: body.note,
+        },
+        false,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(transport::transport_json(&t))))
+}
+
+async fn get_transport(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (t, _, allowed) = own_transport(&state, &ctx, &mut conn, id).await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    let mut body = transport::transport_json(&t);
+    body["history"] = json!(transport::history_json(&mut conn, t.id).await?);
+    Ok(Json(body))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeTransportCancelBody {
+    pub version: Option<i64>,
+    pub reason: Option<String>,
+}
+
+async fn cancel_transport(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    body: OptionalJson<MeTransportCancelBody>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (_, _, allowed) = own_transport(&state, &ctx, &mut conn, id).await?;
+    drop(conn);
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Scheduling).await?;
+    let body = body.0.unwrap_or_default();
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let t = transport::transition(
+        &mut tx,
+        &ctx,
+        &state,
+        id,
+        transport::TransitionInput {
+            status: "cancelled".into(),
+            version: body.version,
+            reason: Some(body.reason.unwrap_or_else(|| "patient_cancelled".into())),
+            ..Default::default()
+        },
+        false,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(transport::transport_json(&t)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeLocationBody {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+/// Patient-side one-time position during pickup; requires location consent
+/// and is sealed with the same TTL as operator positions.
+async fn share_transport_location(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(body): Json<MeLocationBody>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (t, g, allowed) = own_transport(&state, &ctx, &mut conn, id).await?;
+    if !scheduling::consent_active(
+        &mut conn,
+        ctx.tenant_id,
+        g.patient_id,
+        scheduling::CONSENT_LOCATION,
+    )
+    .await?
+    {
+        return Err(scheduling::consent_required(scheduling::CONSENT_LOCATION));
+    }
+    drop(conn);
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Scheduling).await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let expires_at =
+        transport::share_location(&mut tx, &ctx, &state, &t, body.latitude, body.longitude).await?;
+    tx.commit().await?;
+    Ok(Json(json!({
+        "transport_request_id": t.id,
+        "expires_at": expires_at,
+    })))
 }
