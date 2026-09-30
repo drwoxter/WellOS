@@ -195,8 +195,20 @@ pub const BASELINE_CATALOG: &[(&str, &str, &str, &str, &str)] = &[
     ),
     ("modality", "in_person", "In person", "Presencial", "{}"),
     ("modality", "telehealth", "Telehealth", "Telesalud", "{}"),
-    ("modality", "home_visit", "Home visit", "Visita domiciliaria", "{}"),
-    ("resource_type", "professional", "Professional", "Profesional", "{}"),
+    (
+        "modality",
+        "home_visit",
+        "Home visit",
+        "Visita domiciliaria",
+        "{}",
+    ),
+    (
+        "resource_type",
+        "professional",
+        "Professional",
+        "Profesional",
+        "{}",
+    ),
     (
         "resource_type",
         "team",
@@ -204,7 +216,13 @@ pub const BASELINE_CATALOG: &[(&str, &str, &str, &str, &str)] = &[
         "Equipo multidisciplinar",
         "{}",
     ),
-    ("resource_type", "room", "Consultation room", "Consulta", "{}"),
+    (
+        "resource_type",
+        "room",
+        "Consultation room",
+        "Consulta",
+        "{}",
+    ),
     (
         "resource_type",
         "telehealth_channel",
@@ -220,7 +238,13 @@ pub const BASELINE_CATALOG: &[(&str, &str, &str, &str, &str)] = &[
         "Vehículo adaptado",
         "{}",
     ),
-    ("resource_type", "ambulance", "Ambulance", "Ambulancia", "{}"),
+    (
+        "resource_type",
+        "ambulance",
+        "Ambulance",
+        "Ambulancia",
+        "{}",
+    ),
 ];
 
 pub async fn install_baseline_catalog(
@@ -229,7 +253,8 @@ pub async fn install_baseline_catalog(
     created_by: Uuid,
 ) -> Result<(), sqlx::Error> {
     for (kind, code, name_en, name_es, config) in BASELINE_CATALOG {
-        let config: Value = serde_json::from_str(config).expect("baseline catalog config is valid JSON");
+        let config: Value =
+            serde_json::from_str(config).expect("baseline catalog config is valid JSON");
         let inserted = sqlx::query(
             "INSERT INTO catalog_entries (id, tenant_id, kind, code, name_en, name_es, config, created_by)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1557,66 +1582,6 @@ pub async fn confirm_offer(
         ));
     }
     let appointment_id = Uuid::now_v7();
-    // A live hold converts in place; an un-held offer books directly.
-    let live_hold: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM resource_bookings WHERE offer_id = $1 AND status = 'active'
-           AND kind = 'hold' AND expires_at > now()",
-    )
-    .bind(o.id)
-    .fetch_one(&mut **tx)
-    .await?;
-    let held: Vec<HeldResource> = if o.status == OfferStatus::Held
-        && live_hold as usize == o.resources.len()
-    {
-        lock_resources(
-            tx,
-            &o.resources
-                .iter()
-                .map(|p| p.resource_id)
-                .collect::<Vec<_>>(),
-        )
-        .await?;
-        let rows = sqlx::query(
-            "UPDATE resource_bookings SET kind = 'appointment', expires_at = NULL, appointment_id = $2
-             WHERE offer_id = $1 AND status = 'active' AND kind = 'hold'
-             RETURNING id, resource_id, slot_index",
-        )
-        .bind(o.id)
-        .bind(appointment_id)
-        .fetch_all(&mut **tx)
-        .await?;
-        rows.iter()
-            .map(|r| {
-                let resource_id: Uuid = r.get("resource_id");
-                let role = o
-                    .resources
-                    .iter()
-                    .find(|p| p.resource_id == resource_id)
-                    .map(|p| p.role.clone())
-                    .unwrap_or_else(|| "resource".into());
-                HeldResource {
-                    resource_id,
-                    booking_id: r.get("id"),
-                    role,
-                    slot_index: r.get("slot_index"),
-                }
-            })
-            .collect()
-    } else {
-        // Any stale partial hold is released before booking afresh.
-        release_offer_bookings(tx, o.id).await?;
-        book_plans(
-            tx,
-            o.tenant_id,
-            &o.resources,
-            "appointment",
-            Some(o.id),
-            Some(appointment_id),
-            None,
-            ctx.user_id,
-        )
-        .await?
-    };
     let primary = o
         .resources
         .iter()
@@ -1679,6 +1644,66 @@ pub async fn confirm_offer(
         }
         Err(e) => return Err(e.into()),
     }
+    // A live hold converts in place; an un-held offer books directly.
+    let live_hold: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM resource_bookings WHERE offer_id = $1 AND status = 'active'
+           AND kind = 'hold' AND expires_at > now()",
+    )
+    .bind(o.id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let held: Vec<HeldResource> = if o.status == OfferStatus::Held
+        && live_hold as usize == o.resources.len()
+    {
+        lock_resources(
+            tx,
+            &o.resources
+                .iter()
+                .map(|p| p.resource_id)
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+        let rows = sqlx::query(
+            "UPDATE resource_bookings SET kind = 'appointment', expires_at = NULL, appointment_id = $2
+             WHERE offer_id = $1 AND status = 'active' AND kind = 'hold'
+             RETURNING id, resource_id, slot_index",
+        )
+        .bind(o.id)
+        .bind(appointment_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                let resource_id: Uuid = r.get("resource_id");
+                let role = o
+                    .resources
+                    .iter()
+                    .find(|p| p.resource_id == resource_id)
+                    .map(|p| p.role.clone())
+                    .unwrap_or_else(|| "resource".into());
+                HeldResource {
+                    resource_id,
+                    booking_id: r.get("id"),
+                    role,
+                    slot_index: r.get("slot_index"),
+                }
+            })
+            .collect()
+    } else {
+        // Any stale partial hold is released before booking afresh.
+        release_offer_bookings(tx, o.id).await?;
+        book_plans(
+            tx,
+            o.tenant_id,
+            &o.resources,
+            "appointment",
+            Some(o.id),
+            Some(appointment_id),
+            None,
+            ctx.user_id,
+        )
+        .await?
+    };
     for h in &held {
         sqlx::query(
             "INSERT INTO appointment_resources (appointment_id, resource_id, booking_id, role)

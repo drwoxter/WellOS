@@ -2356,7 +2356,7 @@ pub async fn create_exception(
         &mut tx,
         &ctx,
         &state,
-        "scheduling.resource.exception_created",
+        "scheduling.resource.exception_recorded",
         json!({ "resource_id": id, "facility_id": facility_id, "exception_id": ex_id, "kind": kind,
                 "affected_appointments": affected_appointments.len() }),
     )
@@ -2698,7 +2698,7 @@ pub async fn create_calendar_event(
         &mut tx,
         &ctx,
         &state,
-        "scheduling.calendar.event_created",
+        "scheduling.calendar_event.recorded",
         json!({ "event_id": id, "kind": kind, "facility_id": body.facility_id }),
     )
     .await?;
@@ -2751,7 +2751,7 @@ pub async fn deactivate_calendar_event(
         &mut tx,
         &ctx,
         &state,
-        "scheduling.calendar.event_deactivated",
+        "scheduling.calendar_event.deactivated",
         json!({ "event_id": id }),
     )
     .await?;

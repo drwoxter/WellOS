@@ -35,6 +35,10 @@ pub enum Family {
     /// Visit registration (appointments and arrivals): bounded per principal
     /// so one compromised registration account cannot flood the worklists.
     VisitCreate,
+    /// Scheduling writes (access requests, matcher runs, holds, acceptances,
+    /// self-service mutations): bounded per principal so one account cannot
+    /// exhaust matcher capacity or hold-cycle every slot.
+    Scheduling,
 }
 
 impl Family {
@@ -46,6 +50,7 @@ impl Family {
             Self::Api => "api",
             Self::Scribe => "scribe",
             Self::VisitCreate => "visit_create",
+            Self::Scheduling => "scheduling",
         }
     }
 }
@@ -78,6 +83,7 @@ pub struct RateConfig {
     pub api_per_min: i64,
     pub scribe_per_min: i64,
     pub visit_create_per_min: i64,
+    pub scheduling_per_min: i64,
     /// Peers allowed to assert the end-client address for the anonymous
     /// login key (the BFF and/or reverse proxies). Empty means no peer is
     /// trusted and only the socket peer address is used.
@@ -94,6 +100,7 @@ impl RateConfig {
             Family::Api => self.api_per_min,
             Family::Scribe => self.scribe_per_min,
             Family::VisitCreate => self.visit_create_per_min,
+            Family::Scheduling => self.scheduling_per_min,
         }
     }
 }

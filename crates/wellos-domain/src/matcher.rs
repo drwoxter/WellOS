@@ -650,6 +650,10 @@ pub fn find_candidates(facts: &MatchFacts) -> MatchOutput {
                     }];
                     let mut ok = true;
                     for rt in required_types {
+                        // The primary deliverer satisfies its own type.
+                        if *rt == res.resource_type_code {
+                            continue;
+                        }
                         let found = facts.resources.iter().find_map(|other| {
                             if other.facility_id != res.facility_id
                                 || &other.resource_type_code != rt
@@ -1163,6 +1167,19 @@ mod tests {
         assert!(!out.candidates.is_empty());
         assert_eq!(out.candidates[0].bookings.len(), 2);
         assert_eq!(out.candidates[0].bookings[1].role, "dental_chair");
+    }
+
+    #[test]
+    fn primary_resource_satisfies_its_own_required_type() {
+        let mut facts = base_facts();
+        facts.request.service.required_resource_types = vec!["professional".into()];
+        let out = find_candidates(&facts);
+        assert!(!out.candidates.is_empty());
+        assert!(out
+            .candidates
+            .iter()
+            .all(|c| c.bookings.len() == 1 && c.bookings[0].role == "primary"));
+        assert!(!out.rejected.contains_key("required_resource_unavailable"));
     }
 
     #[test]

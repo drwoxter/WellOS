@@ -224,6 +224,7 @@ impl AuthConfig {
                 api_per_min: 100_000,
                 scribe_per_min: 1_000,
                 visit_create_per_min: 10_000,
+                scheduling_per_min: 10_000,
                 trusted_proxies: Vec::new(),
                 clock: WindowClock::Database,
             },
@@ -281,6 +282,7 @@ impl AuthConfig {
             api_per_min: parse_positive_i64("WELLOS_RATE_API_PER_MIN", 600)?,
             scribe_per_min: parse_positive_i64("WELLOS_RATE_SCRIBE_PER_MIN", 6)?,
             visit_create_per_min: parse_positive_i64("WELLOS_RATE_VISIT_CREATE_PER_MIN", 30)?,
+            scheduling_per_min: parse_positive_i64("WELLOS_RATE_SCHEDULING_PER_MIN", 60)?,
             trusted_proxies: parse_trusted_proxies("WELLOS_TRUSTED_PROXIES")?,
             // Not configurable: deployments always share the database clock.
             clock: WindowClock::Database,

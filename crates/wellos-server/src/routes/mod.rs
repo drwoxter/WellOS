@@ -1,3 +1,4 @@
+pub mod access;
 pub mod access_admin;
 pub mod admin;
 pub mod ai;
@@ -197,6 +198,7 @@ pub fn router(state: AppState) -> Router {
             post(admin::escalate_overdue),
         )
         .merge(access_admin_routes())
+        .nest("/api/v1", access::routes())
         .route("/fhir/r4/Patient/:id", get(fhir::patient))
         .route("/fhir/r4/Observation/:id", get(fhir::observation))
         .route("/fhir/r4/ServiceRequest/:id", get(fhir::service_request))
