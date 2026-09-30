@@ -347,7 +347,7 @@ pub async fn start_event(
     audit::emit(
         &mut **tx,
         ctx,
-        "waitlist.recovery.opened",
+        "waitlist.recovery.evaluated",
         &state.cell,
         json!({
             "cancellation_event_id": e.id,

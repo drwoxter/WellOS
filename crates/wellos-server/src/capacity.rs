@@ -361,7 +361,7 @@ pub async fn create_forecast(
     audit::emit(
         &mut **tx,
         ctx,
-        "capacity.forecast.created",
+        "capacity.forecast.calculated",
         &state.cell,
         json!({
             "capacity_forecast_id": id,

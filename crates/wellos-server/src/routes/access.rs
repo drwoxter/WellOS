@@ -3082,6 +3082,13 @@ pub async fn accept_offer_for(
         }
         None => None,
     };
+    // Recovery offers record their waitlist origin whichever channel
+    // accepted them; `booked_by` keeps the accepting principal.
+    let booked_via = if o.waitlist_entry_id.is_some() {
+        "waitlist"
+    } else {
+        booked_via
+    };
     let input = scheduling::ConfirmInput {
         offer: &o,
         booked_via,

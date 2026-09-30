@@ -133,6 +133,7 @@ pub const EVENT_TYPES: &[&str] = &[
     "waitlist.resumed",
     "waitlist.left",
     "waitlist.recovery.opened",
+    "waitlist.recovery.evaluated",
     "waitlist.recovery.offered",
     "waitlist.recovery.overridden",
     "waitlist.recovery.closed",

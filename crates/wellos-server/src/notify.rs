@@ -616,9 +616,19 @@ pub async fn run_pass(state: &AppState, worker_id: &str) -> Result<PassReport, A
             continue;
         }
         let (subject, body) = render(&kind, &language, &time_zone, &payload);
+        let already_delivered: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT channel FROM notification_deliveries
+             WHERE notification_id = $1 AND status = 'delivered'",
+        )
+        .bind(id)
+        .fetch_all(&mut *conn)
+        .await?;
         let mut any_failed = false;
         let mut error_code: Option<&'static str> = None;
         for channel in &channels {
+            if already_delivered.contains(channel) {
+                continue;
+            }
             let outcome = match channel.as_str() {
                 "in_app" => Outcome::Delivered,
                 "email" => deliver_email(state, cfg, tenant_id, patient_id, &subject, &body).await,
