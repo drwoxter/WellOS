@@ -52,7 +52,9 @@ use wellos_domain::access_ai::{
     AccessIntentV1, AppointmentRankingV1, ACCESS_INTENT_SCHEMA, APPOINTMENT_RANKING_SCHEMA,
 };
 use wellos_domain::ai::{ArtifactStatus, ProviderInfo};
-use wellos_domain::matcher::{find_candidates, Candidate, MatchFacts, RequestConstraints};
+use wellos_domain::matcher::{
+    find_candidates, Candidate, MatchFacts, MatchOutput, RequestConstraints,
+};
 
 const MAX_FREE_TEXT: usize = MAX_INTENT_TEXT_CHARS;
 const MAX_REASON: usize = 500;
@@ -669,6 +671,23 @@ pub async fn create_request_for(
     body: CreateRequestBody,
 ) -> Result<RequestRow, ApiError> {
     ratelimit::enforce_for_principal(state, ctx, ratelimit::Family::Scheduling).await?;
+    let mut tx = state.pool.begin().await?;
+    let r = create_request_in(&mut tx, ctx, state, patient_id, channel, body).await?;
+    tx.commit().await?;
+    Ok(r)
+}
+
+/// Transaction-level body of [`create_request_for`]: validation, idempotent
+/// replay, insert, history, audit and (optionally) submission with the
+/// deterministic triage floor.
+pub async fn create_request_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    patient_id: Uuid,
+    channel: &str,
+    body: CreateRequestBody,
+) -> Result<RequestRow, ApiError> {
     let idempotency_key = scheduling::clean_text(body.idempotency_key, "idempotency_key", 128)?;
     let free_text = scheduling::clean_text(body.free_text, "free_text", MAX_FREE_TEXT)?;
     let urgency = urgency_from(body.urgency)?;
@@ -678,7 +697,6 @@ pub async fn create_request_for(
             "urgency is established by staff or deterministic rules",
         ));
     }
-    let mut tx = state.pool.begin().await?;
     if let Some(key) = &idempotency_key {
         if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM access_requests WHERE tenant_id = $1 AND created_by = $2 AND idempotency_key = $3",
@@ -686,17 +704,16 @@ pub async fn create_request_for(
         .bind(ctx.tenant_id)
         .bind(ctx.user_id)
         .bind(key)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         {
-            let r = load_request(&mut tx, ctx.tenant_id, existing).await?;
+            let r = load_request(tx, ctx.tenant_id, existing).await?;
             if r.patient_id != patient_id {
                 return Err(ApiError::conflict(
                     "idempotency_conflict",
                     "this idempotency key was used for a different request",
                 ));
             }
-            tx.commit().await?;
             return Ok(r);
         }
     }
@@ -704,7 +721,7 @@ pub async fn create_request_for(
         sqlx::query_scalar("SELECT id FROM patients WHERE id = $1 AND tenant_id = $2")
             .bind(patient_id)
             .bind(ctx.tenant_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
     if known.is_none() {
         return Err(ApiError::not_found());
@@ -714,7 +731,7 @@ pub async fn create_request_for(
             sqlx::query_scalar("SELECT id FROM facilities WHERE id = $1 AND tenant_id = $2")
                 .bind(f)
                 .bind(ctx.tenant_id)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?;
         if ok.is_none() {
             return Err(ApiError::bad_request(
@@ -724,7 +741,7 @@ pub async fn create_request_for(
         }
     }
     let constraints = apply_constraints(
-        &mut tx,
+        tx,
         ctx.tenant_id,
         &Constraints::default(),
         body.constraints,
@@ -753,10 +770,10 @@ pub async fn create_request_for(
     .bind(urgency_source)
     .bind(&idempotency_key)
     .bind(ctx.user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     request_history(
-        &mut tx,
+        tx,
         ctx.tenant_id,
         id,
         None,
@@ -766,7 +783,7 @@ pub async fn create_request_for(
     )
     .await?;
     audit::emit(
-        &mut *tx,
+        &mut **tx,
         ctx,
         "access_request.created",
         &state.cell,
@@ -776,14 +793,13 @@ pub async fn create_request_for(
     )
     .await
     .map_err(ApiError::internal)?;
-    let mut r = load_request(&mut tx, ctx.tenant_id, id).await?;
+    let mut r = load_request(tx, ctx.tenant_id, id).await?;
     if body.submit {
-        transition_request(&mut tx, ctx, &r, AccessRequestTransition::Submit, None).await?;
-        r = load_request(&mut tx, ctx.tenant_id, id).await?;
-        apply_triage_floor(&mut tx, ctx, state, &r).await?;
-        r = load_request(&mut tx, ctx.tenant_id, id).await?;
+        transition_request(tx, ctx, &r, AccessRequestTransition::Submit, None).await?;
+        r = load_request(tx, ctx.tenant_id, id).await?;
+        apply_triage_floor(tx, ctx, state, &r).await?;
+        r = load_request(tx, ctx.tenant_id, id).await?;
     }
-    tx.commit().await?;
     Ok(r)
 }
 
@@ -1918,36 +1934,31 @@ pub fn match_result_json(m: &MatchResult) -> Value {
     })
 }
 
-/// Run `access-matcher.v1` for a request, persist the run verbatim and
-/// materialize its candidates as offers. Then, at most once, ask dMind to
-/// reorder and explain the head of the list; any AI failure leaves the
-/// deterministic result intact and reported as such.
-pub async fn run_matcher_for(
-    state: &AppState,
+/// The persisted deterministic half of a matcher run.
+pub struct MatcherRun {
+    pub run_id: Uuid,
+    pub output: MatchOutput,
+    pub facts: MatchFacts,
+    pub offers: Vec<OfferRow>,
+}
+
+/// Run `access-matcher.v1` for a request inside the caller's transaction:
+/// lock and validate the request, assemble the facts, persist the run
+/// verbatim, revoke live offers of earlier runs and materialize the new
+/// candidates as offers. Deterministic only; dMind ranking happens after
+/// commit in [`run_matcher_for`].
+pub async fn run_matcher_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ctx: &AuthContext,
-    r: RequestRow,
-    body: MatchBody,
+    state: &AppState,
+    tenant_id: Uuid,
+    request_id: Uuid,
+    version: Option<i64>,
+    origin: Option<Origin>,
     offered_to: &str,
-) -> Result<MatchResult, ApiError> {
-    ratelimit::enforce_for_principal(state, ctx, ratelimit::Family::Scheduling).await?;
-    let language = body
-        .language
-        .as_deref()
-        .map(str::trim)
-        .filter(|l| *l == "es" || *l == "en")
-        .unwrap_or("en")
-        .to_string();
-    if let Some(o) = body.origin {
-        if !(-90.0..=90.0).contains(&o.latitude) || !(-180.0..=180.0).contains(&o.longitude) {
-            return Err(ApiError::bad_request(
-                "validation_failed",
-                "origin coordinates are out of range",
-            ));
-        }
-    }
-    let mut tx = state.pool.begin().await?;
-    let r = lock_request(&mut tx, r.tenant_id, r.id).await?;
-    require_version(r.version, body.version)?;
+) -> Result<MatcherRun, ApiError> {
+    let r = lock_request(tx, tenant_id, request_id).await?;
+    require_version(r.version, version)?;
     if r.status == AccessRequestStatus::NeedsClinicalTriage {
         return Err(ApiError::conflict(
             "clinical_triage_required",
@@ -1969,15 +1980,15 @@ pub async fn run_matcher_for(
             "the requested service must be known before options can be generated",
         ));
     };
-    let service = scheduling::load_service(&mut tx, r.tenant_id, &service_code).await?;
+    let service = scheduling::load_service(tx, r.tenant_id, &service_code).await?;
     if service.config.requires_referral && !r.constraints.has_referral {
         return Err(ApiError::conflict(
             "referral_required",
             "this service requires a referral; record it on the request first",
         ));
     }
-    let policy = scheduling::load_policy(&mut tx, r.tenant_id).await?;
-    let prefs = scheduling::load_preferences(&mut tx, r.tenant_id, r.patient_id).await?;
+    let policy = scheduling::load_policy(tx, r.tenant_id).await?;
+    let prefs = scheduling::load_preferences(tx, r.tenant_id, r.patient_id).await?;
     let now = Utc::now();
     let window_start = r.constraints.earliest.map_or(now, |e| e.max(now)).max(now);
     let horizon_end = now + Duration::days(policy.horizon_days as i64);
@@ -1999,9 +2010,9 @@ pub async fn run_matcher_for(
         prefs.preferred_facility_ids.clone()
     };
     let facility_only = (!facility_filter.is_empty()).then_some(facility_filter.as_slice());
-    let facilities = scheduling::load_facility_facts(&mut tx, r.tenant_id, facility_only).await?;
+    let facilities = scheduling::load_facility_facts(tx, r.tenant_id, facility_only).await?;
     let resources = scheduling::load_resource_facts(
-        &mut tx,
+        tx,
         r.tenant_id,
         facility_only,
         &service.code,
@@ -2010,10 +2021,10 @@ pub async fn run_matcher_for(
         window_end,
     )
     .await?;
-    let origin = match body.origin {
+    let origin = match origin {
         Some(o) => {
             if !scheduling::consent_active(
-                &mut tx,
+                tx,
                 r.tenant_id,
                 r.patient_id,
                 scheduling::CONSENT_LOCATION,
@@ -2027,7 +2038,7 @@ pub async fn run_matcher_for(
         None => None,
     };
     let patient = scheduling::load_patient_facts(
-        &mut tx,
+        tx,
         r.tenant_id,
         r.patient_id,
         &prefs,
@@ -2048,7 +2059,7 @@ pub async fn run_matcher_for(
         }
     }
     let policy_facts = scheduling::load_policy_facts(
-        &mut tx,
+        tx,
         r.tenant_id,
         &policy,
         facility_only,
@@ -2056,8 +2067,7 @@ pub async fn run_matcher_for(
         window_end,
     )
     .await?;
-    let waitlist_position =
-        waitlist_position(&mut tx, r.tenant_id, r.patient_id, &service.code).await?;
+    let waitlist_position = waitlist_position(tx, r.tenant_id, r.patient_id, &service.code).await?;
     let modality_codes = if r.constraints.modality_codes.is_empty() {
         prefs.preferred_modalities.clone()
     } else {
@@ -2107,11 +2117,11 @@ pub async fn run_matcher_for(
     .bind(serde_json::to_value(&output.rejected).map_err(ApiError::internal)?)
     .bind(ctx.user_id)
     .bind(expires_at)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    revoke_live_offers(&mut tx, ctx, state, &r, "superseded_by_new_run").await?;
+    revoke_live_offers(tx, ctx, state, &r, "superseded_by_new_run").await?;
     let offers = scheduling::materialize_offers(
-        &mut tx,
+        tx,
         ctx,
         r.tenant_id,
         r.patient_id,
@@ -2125,7 +2135,7 @@ pub async fn run_matcher_for(
     )
     .await?;
     transition_request(
-        &mut tx,
+        tx,
         ctx,
         &r,
         AccessRequestTransition::OptionsGenerated,
@@ -2133,7 +2143,7 @@ pub async fn run_matcher_for(
     )
     .await?;
     audit::emit(
-        &mut *tx,
+        &mut **tx,
         ctx,
         "access_request.matched",
         &state.cell,
@@ -2150,7 +2160,61 @@ pub async fn run_matcher_for(
     )
     .await
     .map_err(ApiError::internal)?;
+    Ok(MatcherRun {
+        run_id,
+        output,
+        facts,
+        offers,
+    })
+}
+
+/// Run `access-matcher.v1` for a request, persist the run verbatim and
+/// materialize its candidates as offers. Then, at most once, ask dMind to
+/// reorder and explain the head of the list; any AI failure leaves the
+/// deterministic result intact and reported as such.
+pub async fn run_matcher_for(
+    state: &AppState,
+    ctx: &AuthContext,
+    r: RequestRow,
+    body: MatchBody,
+    offered_to: &str,
+) -> Result<MatchResult, ApiError> {
+    ratelimit::enforce_for_principal(state, ctx, ratelimit::Family::Scheduling).await?;
+    let language = body
+        .language
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| *l == "es" || *l == "en")
+        .unwrap_or("en")
+        .to_string();
+    if let Some(o) = body.origin {
+        if !(-90.0..=90.0).contains(&o.latitude) || !(-180.0..=180.0).contains(&o.longitude) {
+            return Err(ApiError::bad_request(
+                "validation_failed",
+                "origin coordinates are out of range",
+            ));
+        }
+    }
+    let mut tx = state.pool.begin().await?;
+    let run = run_matcher_in(
+        &mut tx,
+        ctx,
+        state,
+        r.tenant_id,
+        r.id,
+        body.version,
+        body.origin,
+        offered_to,
+    )
+    .await?;
+    let r = load_request(&mut tx, r.tenant_id, r.id).await?;
     tx.commit().await?;
+    let MatcherRun {
+        run_id,
+        output,
+        facts,
+        offers,
+    } = run;
 
     let ranking = if body.ranking == Some(false) {
         RankingOutcome {
@@ -2289,61 +2353,9 @@ async fn rank_run(
             _ => "unavailable",
         }));
     }
-    let head = &candidates[..candidates
-        .len()
-        .min(RANKING_HEAD)
-        .min(MAX_RANKING_CANDIDATES)];
     let mut conn = state.pool.acquire().await?;
-    let facility_names: BTreeMap<Uuid, String> =
-        sqlx::query("SELECT id, name FROM facilities WHERE tenant_id = $1")
-            .bind(r.tenant_id)
-            .fetch_all(&mut *conn)
-            .await?
-            .iter()
-            .map(|row| (row.get::<Uuid, _>("id"), row.get::<String, _>("name")))
-            .collect();
+    let req = ranking_request(&mut conn, r.tenant_id, facts, candidates, language).await?;
     drop(conn);
-    let resource_names: BTreeMap<Uuid, String> = facts
-        .resources
-        .iter()
-        .map(|res| (res.resource_id, res.name.clone()))
-        .collect();
-    let req = RankingRequest {
-        template: APPOINTMENT_RANKING_TEMPLATE.to_string(),
-        language: language.to_string(),
-        facts: ranking_facts(facts),
-        candidates: head
-            .iter()
-            .map(|c| RankingCandidate {
-                candidate_id: c.candidate_id.clone(),
-                starts_at: c.starts_at,
-                ends_at: c.ends_at,
-                facility_label: facility_names
-                    .get(&c.facility_id)
-                    .cloned()
-                    .unwrap_or_else(|| "facility".to_string()),
-                modality_code: c.modality_code.clone(),
-                resource_labels: c
-                    .resources
-                    .iter()
-                    .map(|res| {
-                        resource_names
-                            .get(&res.resource_id)
-                            .cloned()
-                            .unwrap_or_else(|| res.role.clone())
-                    })
-                    .collect(),
-                score: c.score,
-                factors: c
-                    .factors
-                    .iter()
-                    .map(|f| (f.code.clone(), f.points, f.detail.clone()))
-                    .collect(),
-                travel_minutes: c.travel.as_ref().map(|t| t.minutes),
-                reasons: c.reasons.clone(),
-            })
-            .collect(),
-    };
     let hash = hash_json(&req);
     let scope = aigov::ReuseScope::AppointmentRanking {
         matcher_run_id: run_id,
@@ -2448,6 +2460,137 @@ async fn rank_run(
     }
 
     let mut tx = state.pool.begin().await?;
+    let artifact_id = persist_ranking(
+        &mut tx,
+        ctx,
+        state,
+        r,
+        run_id,
+        RankingResult {
+            request: &req,
+            output: &output,
+            provider: &provider,
+            prompt_version: &prompt_version,
+            usage: usage.as_ref(),
+            synthetic,
+            reused_from,
+            execution_id,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(RankingOutcome {
+        mode: "dmind",
+        artifact_id: Some(artifact_id),
+        synthetic: Some(synthetic),
+        reused: reused_from.is_some(),
+        reason: None,
+    })
+}
+
+/// The bounded `appointment-ranking.v1` request for a deterministic run:
+/// the head of the candidate list (never one call per slot) with the
+/// tenant's facility and resource labels attached.
+pub async fn ranking_request(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    facts: &MatchFacts,
+    candidates: &[Candidate],
+    language: &str,
+) -> Result<RankingRequest, ApiError> {
+    let head = &candidates[..candidates
+        .len()
+        .min(RANKING_HEAD)
+        .min(MAX_RANKING_CANDIDATES)];
+    let facility_names: BTreeMap<Uuid, String> =
+        sqlx::query("SELECT id, name FROM facilities WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .fetch_all(&mut *conn)
+            .await?
+            .iter()
+            .map(|row| (row.get::<Uuid, _>("id"), row.get::<String, _>("name")))
+            .collect();
+    let resource_names: BTreeMap<Uuid, String> = facts
+        .resources
+        .iter()
+        .map(|res| (res.resource_id, res.name.clone()))
+        .collect();
+    Ok(RankingRequest {
+        template: APPOINTMENT_RANKING_TEMPLATE.to_string(),
+        language: language.to_string(),
+        facts: ranking_facts(facts),
+        candidates: head
+            .iter()
+            .map(|c| RankingCandidate {
+                candidate_id: c.candidate_id.clone(),
+                starts_at: c.starts_at,
+                ends_at: c.ends_at,
+                facility_label: facility_names
+                    .get(&c.facility_id)
+                    .cloned()
+                    .unwrap_or_else(|| "facility".to_string()),
+                modality_code: c.modality_code.clone(),
+                resource_labels: c
+                    .resources
+                    .iter()
+                    .map(|res| {
+                        resource_names
+                            .get(&res.resource_id)
+                            .cloned()
+                            .unwrap_or_else(|| res.role.clone())
+                    })
+                    .collect(),
+                score: c.score,
+                factors: c
+                    .factors
+                    .iter()
+                    .map(|f| (f.code.clone(), f.points, f.detail.clone()))
+                    .collect(),
+                travel_minutes: c.travel.as_ref().map(|t| t.minutes),
+                reasons: c.reasons.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// A validated ranking about to be persisted against its matcher run.
+pub struct RankingResult<'a> {
+    pub request: &'a RankingRequest,
+    pub output: &'a AppointmentRankingV1,
+    pub provider: &'a ProviderInfo,
+    pub prompt_version: &'a str,
+    pub usage: Option<&'a dmind_gateway::Usage>,
+    pub synthetic: bool,
+    pub reused_from: Option<Uuid>,
+    pub execution_id: Option<Uuid>,
+}
+
+/// Persist an already validated ranking as an `appointment_ranking`
+/// artifact bound to its matcher run, reorder the ranked head of the live
+/// offers and attach each explanation to its own candidate. Candidates
+/// beyond the head keep deterministic order.
+pub async fn persist_ranking(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    r: &RequestRow,
+    run_id: Uuid,
+    result: RankingResult<'_>,
+) -> Result<Uuid, ApiError> {
+    let RankingResult {
+        request: req,
+        output,
+        provider,
+        prompt_version,
+        usage,
+        synthetic,
+        reused_from,
+        execution_id,
+    } = result;
+    let hash = hash_json(req);
+    let scope = aigov::ReuseScope::AppointmentRanking {
+        matcher_run_id: run_id,
+    };
     let artifact_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO ai_artifacts
@@ -2466,33 +2609,31 @@ async fn rank_run(
     .bind(&provider.provider)
     .bind(APPOINTMENT_RANKING_TEMPLATE)
     .bind(&hash)
-    .bind(serde_json::to_value(&output).map_err(ApiError::internal)?)
+    .bind(serde_json::to_value(output).map_err(ApiError::internal)?)
     .bind(APPOINTMENT_RANKING_SCHEMA)
     .bind(serde_json::to_value(&output.cited_sources).map_err(ApiError::internal)?)
     .bind(serde_json::to_value(&output.limitations).map_err(ApiError::internal)?)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     let mut input_refs = req.fact_refs();
     input_refs.extend(req.candidate_ids());
     aigov::annotate(
-        &mut tx,
+        tx,
         artifact_id,
         &aigov::Provenance {
             scope,
-            provider: &provider,
-            prompt_version: &prompt_version,
+            provider,
+            prompt_version,
             input_refs: &input_refs,
-            usage: usage.as_ref(),
+            usage,
             synthetic,
             reused_from,
         },
     )
     .await?;
     if let Some(execution_id) = execution_id {
-        aigov::bind_execution(&mut tx, execution_id, artifact_id).await?;
+        aigov::bind_execution(tx, execution_id, artifact_id).await?;
     }
-    // Reorder the ranked head; candidates beyond it keep deterministic
-    // order after the head. Explanations attach to their own candidate.
     for ranked in &output.ranked {
         sqlx::query(
             "UPDATE appointment_offers SET rank = $3, explanation = $4, updated_at = now()
@@ -2507,7 +2648,7 @@ async fn rank_run(
             "cited_sources": ranked.cited_sources,
             "synthetic": synthetic,
         }))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
     sqlx::query(
@@ -2515,10 +2656,10 @@ async fn rank_run(
     )
     .bind(run_id)
     .bind(artifact_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     audit::emit(
-        &mut *tx,
+        &mut **tx,
         ctx,
         "ai.artifact.generated",
         &state.cell,
@@ -2539,14 +2680,7 @@ async fn rank_run(
     )
     .await
     .map_err(ApiError::internal)?;
-    tx.commit().await?;
-    Ok(RankingOutcome {
-        mode: "dmind",
-        artifact_id: Some(artifact_id),
-        synthetic: Some(synthetic),
-        reused: reused_from.is_some(),
-        reason: None,
-    })
+    Ok(artifact_id)
 }
 
 async fn run_matcher(

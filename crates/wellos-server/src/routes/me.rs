@@ -1638,11 +1638,52 @@ async fn import_ics(
             "time_zone must be an IANA time zone",
         ));
     }
-    let horizon = horizon(q.horizon_days)?;
-    let import =
-        ics::busy_intervals(&body, &default_tz, horizon.start, horizon.end).map_err(ics_error)?;
-    drop(body);
     drop(conn);
+    let created = q.source_id.is_none();
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let out = import_ics_in(
+        &mut tx,
+        &state,
+        &ctx,
+        &g,
+        body,
+        &default_tz,
+        q.horizon_days,
+        q.source_id,
+    )
+    .await?;
+    tx.commit().await?;
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(out)))
+}
+
+/// Parse an `.ics` body in memory with the bounded domain parser and
+/// persist only its normalized busy intervals for the grant's patient.
+/// Authorization, consent and time-zone validation are the caller's;
+/// the raw bytes are dropped before anything is written.
+#[allow(clippy::too_many_arguments)]
+pub async fn import_ics_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    state: &AppState,
+    ctx: &AuthContext,
+    g: &GrantRow,
+    body: Bytes,
+    default_tz: &str,
+    horizon_days: Option<i64>,
+    source_id: Option<Uuid>,
+) -> Result<Value, ApiError> {
+    if body.len() > MAX_ICS_BYTES {
+        return Err(ics_error(IcsError::TooLarge(MAX_ICS_BYTES)));
+    }
+    let horizon = horizon(horizon_days)?;
+    let import =
+        ics::busy_intervals(&body, default_tz, horizon.start, horizon.end).map_err(ics_error)?;
+    drop(body);
     let n = Normalized {
         meta: json!({
             "events_seen": import.events_seen,
@@ -1654,17 +1695,7 @@ async fn import_ics(
         integrity_hash: import.integrity_hash,
         horizon,
     };
-    let created = q.source_id.is_none();
-    let mut tx = state.pool.begin().await?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
-    let out = store_source(&mut tx, &state, &ctx, &g, "ics_import", q.source_id, n).await?;
-    tx.commit().await?;
-    let status = if created {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    Ok((status, Json(out)))
+    store_source(tx, state, ctx, g, "ics_import", source_id, n).await
 }
 
 #[derive(Debug, Deserialize)]

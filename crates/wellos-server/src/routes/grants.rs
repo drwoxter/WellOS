@@ -235,7 +235,7 @@ pub struct CreateGrantBody {
 pub async fn create_grant(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Json(body): Json<CreateGrantBody>,
+    Json(mut body): Json<CreateGrantBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     if !RELATIONSHIPS.contains(&body.relationship.as_str()) {
         return Err(ApiError::bad_request(
@@ -243,7 +243,7 @@ pub async fn create_grant(
             "relationship must be self, parent_guardian or authorized_proxy",
         ));
     }
-    let note = scheduling::clean_text(body.verification_note, "verification_note", MAX_NOTE)?
+    let note = scheduling::clean_text(body.verification_note.take(), "verification_note", MAX_NOTE)?
         .filter(|n| n.chars().count() >= MIN_NOTE)
         .ok_or_else(|| {
             ApiError::bad_request(
@@ -279,6 +279,22 @@ pub async fn create_grant(
 
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let g = create_grant_in(&mut tx, &ctx, &state, body, note).await?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(grant_json(&g))))
+}
+
+/// Insert a verified grant inside the caller's transaction (authorization
+/// and input validation already done). Shared by the staff route and the
+/// synthetic fixtures so both follow the same rule: the grantee must be a
+/// person of the tenant holding `patient_representative`.
+pub async fn create_grant_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    body: CreateGrantBody,
+    note: String,
+) -> Result<GrantRow, ApiError> {
     let user = sqlx::query(
         "SELECT u.is_service,
                 EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.user_id = u.id AND ra.role = $3) AS is_rep
@@ -287,7 +303,7 @@ pub async fn create_grant(
     .bind(body.user_id)
     .bind(ctx.tenant_id)
     .bind(roles::PATIENT_REP)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| {
         ApiError::bad_request("validation_failed", "user_id is not an account of this tenant")
@@ -312,7 +328,7 @@ pub async fn create_grant(
     .bind(ctx.user_id)
     .bind(&note)
     .bind(body.expires_at)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await;
     match inserted {
         Ok(_) => {}
@@ -325,8 +341,8 @@ pub async fn create_grant(
         Err(e) => return Err(e.into()),
     }
     audit::emit(
-        &mut *tx,
-        &ctx,
+        &mut **tx,
+        ctx,
         "patient_grant.created",
         &state.cell,
         json!({ "grant_id": id, "grantee_user_id": body.user_id, "patient_id": body.patient_id,
@@ -335,9 +351,7 @@ pub async fn create_grant(
     )
     .await
     .map_err(ApiError::internal)?;
-    let g = load_grant(&mut tx, ctx.tenant_id, id).await?;
-    tx.commit().await?;
-    Ok((StatusCode::CREATED, Json(grant_json(&g))))
+    load_grant(tx, ctx.tenant_id, id).await
 }
 
 #[derive(Debug, Deserialize)]

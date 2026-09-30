@@ -334,7 +334,30 @@ pub async fn load_service(
         )
     })?;
     let config: Value = row.get("config");
-    let config: ServiceConfig = serde_json::from_value(config).unwrap_or_default();
+    let mut config: ServiceConfig = serde_json::from_value(config).unwrap_or_default();
+    // Administered resource combinations extend the service config; a
+    // quantity above one repeats the type so the matcher books that many
+    // distinct resources.
+    let requirements = sqlx::query(
+        "SELECT resource_type_code, quantity FROM service_resource_requirements
+         WHERE tenant_id = $1 AND service_code = $2 ORDER BY resource_type_code",
+    )
+    .bind(tenant_id)
+    .bind(code)
+    .fetch_all(&mut *conn)
+    .await?;
+    for r in &requirements {
+        let rtype: String = r.get("resource_type_code");
+        let quantity: i32 = r.get("quantity");
+        let present = config
+            .required_resource_types
+            .iter()
+            .filter(|t| **t == rtype)
+            .count();
+        for _ in present..quantity.max(1) as usize {
+            config.required_resource_types.push(rtype.clone());
+        }
+    }
     Ok(ServiceEntry {
         code: row.get("code"),
         name_en: row.get("name_en"),
