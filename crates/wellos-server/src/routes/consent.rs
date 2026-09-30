@@ -3,15 +3,74 @@ use crate::auth::AuthContext;
 use crate::error::ApiError;
 use crate::policy::{actions, ResourceCtx};
 use crate::routes::guard;
+use crate::scheduling;
 use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::Row;
+use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
-const KNOWN_PURPOSES: &[&str] = &["care_delivery", "ai_external_processing", "research"];
+/// Purposes a patient or representative may grant or revoke themselves
+/// through `/api/v1/me/consents`; each gates one scheduling data use.
+pub const SELF_SERVICE_PURPOSES: &[&str] = &[
+    scheduling::CONSENT_CALENDAR,
+    scheduling::CONSENT_LOCATION,
+    scheduling::CONSENT_TRANSPORT,
+];
+
+const KNOWN_PURPOSES: &[&str] = &[
+    "care_delivery",
+    "ai_external_processing",
+    "research",
+    scheduling::CONSENT_CALENDAR,
+    scheduling::CONSENT_LOCATION,
+    scheduling::CONSENT_TRANSPORT,
+];
+
+/// Append one immutable consent version and audit it. Consent decisions are
+/// append-only: readers select the highest version per purpose. Locking the
+/// patient row serializes version allocation per patient, and a unique
+/// (tenant, patient, purpose, version) index backstops it.
+pub async fn append_consent(
+    tx: &mut PgConnection,
+    ctx: &AuthContext,
+    cell: &str,
+    tenant_id: Uuid,
+    patient_id: Uuid,
+    purpose: &str,
+    status: &str,
+) -> Result<(), ApiError> {
+    sqlx::query("SELECT id FROM patients WHERE id = $1 FOR UPDATE")
+        .bind(patient_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO consents (id, tenant_id, patient_id, purpose, status, version)
+         VALUES ($1,$2,$3,$4,$5,
+                 COALESCE((SELECT MAX(version) FROM consents
+                           WHERE tenant_id=$2 AND patient_id=$3 AND purpose=$4), 0) + 1)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(patient_id)
+    .bind(purpose)
+    .bind(status)
+    .execute(&mut *tx)
+    .await?;
+    audit::emit(
+        &mut *tx,
+        ctx,
+        "consent.changed",
+        cell,
+        json!({ "patient_id": patient_id, "purpose": purpose, "status": status }),
+        None,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
+}
 
 #[derive(Deserialize)]
 pub struct SetConsent {
@@ -61,37 +120,16 @@ pub async fn set_consent(
 
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
-    // Consent decisions are append-only: each change is a new immutable
-    // version; readers select the highest version per purpose. Locking the
-    // patient row serializes version allocation per patient, and a unique
-    // (tenant, patient, purpose, version) index backstops it.
-    sqlx::query("SELECT id FROM patients WHERE id = $1 FOR UPDATE")
-        .bind(body.patient_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "INSERT INTO consents (id, tenant_id, patient_id, purpose, status, version)
-         VALUES ($1,$2,$3,$4,$5,
-                 COALESCE((SELECT MAX(version) FROM consents
-                           WHERE tenant_id=$2 AND patient_id=$3 AND purpose=$4), 0) + 1)",
-    )
-    .bind(Uuid::now_v7())
-    .bind(tenant_id)
-    .bind(body.patient_id)
-    .bind(&body.purpose)
-    .bind(&body.status)
-    .execute(&mut *tx)
-    .await?;
-    audit::emit(
-        &mut *tx,
+    append_consent(
+        &mut tx,
         &ctx,
-        "consent.changed",
         &state.cell,
-        json!({ "patient_id": body.patient_id, "purpose": body.purpose, "status": body.status }),
-        None,
+        tenant_id,
+        body.patient_id,
+        &body.purpose,
+        &body.status,
     )
-    .await
-    .map_err(ApiError::internal)?;
+    .await?;
     tx.commit().await?;
     Ok(Json(
         json!({ "patient_id": body.patient_id, "purpose": body.purpose, "status": body.status }),

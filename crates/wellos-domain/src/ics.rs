@@ -351,6 +351,19 @@ pub fn busy_intervals(
         }
     }
 
+    Ok(BusyImport {
+        intervals: merge_intervals(intervals),
+        time_zone: default.name().to_string(),
+        integrity_hash: hex::encode(Sha256::digest(bytes)),
+        events_seen,
+        events_skipped,
+    })
+}
+
+/// Sort and coalesce overlapping or touching busy intervals. Shared by the
+/// `.ics` import and the device free/busy sync so both persist the same
+/// normalized shape.
+pub fn merge_intervals(mut intervals: Vec<Interval>) -> Vec<Interval> {
     intervals.sort_by_key(|i| (i.start, i.end));
     let mut merged: Vec<Interval> = Vec::with_capacity(intervals.len());
     for i in intervals {
@@ -363,13 +376,7 @@ pub fn busy_intervals(
             _ => merged.push(i),
         }
     }
-    Ok(BusyImport {
-        intervals: merged,
-        time_zone: default.name().to_string(),
-        integrity_hash: hex::encode(Sha256::digest(bytes)),
-        events_seen,
-        events_skipped,
-    })
+    merged
 }
 
 /// Expand one event into `out`; returns false if it contributed nothing.

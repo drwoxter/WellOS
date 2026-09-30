@@ -10,9 +10,12 @@ pub mod dashboard;
 pub mod dev;
 pub mod encounter_docs;
 pub mod encounters;
+pub mod extract;
 pub mod fhir;
+pub mod grants;
 pub mod lab;
 pub mod loops;
+pub mod me;
 pub mod oidc_login;
 pub mod patients;
 pub mod risk;
@@ -199,6 +202,16 @@ pub fn router(state: AppState) -> Router {
         )
         .merge(access_admin_routes())
         .nest("/api/v1", access::routes())
+        .nest("/api/v1", me::routes())
+        .route(
+            "/api/v1/patient-grants",
+            get(grants::list_grants).post(grants::create_grant),
+        )
+        .route("/api/v1/patient-grants/:id", get(grants::get_grant))
+        .route(
+            "/api/v1/patient-grants/:id/revoke",
+            post(grants::revoke_grant),
+        )
         .route("/fhir/r4/Patient/:id", get(fhir::patient))
         .route("/fhir/r4/Observation/:id", get(fhir::observation))
         .route("/fhir/r4/ServiceRequest/:id", get(fhir::service_request))

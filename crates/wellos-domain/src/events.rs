@@ -127,6 +127,7 @@ pub const EVENT_TYPES: &[&str] = &[
     "patient_calendar.connected",
     "patient_calendar.synchronized",
     "patient_calendar.disconnected",
+    "patient_preferences.updated",
     "waitlist.joined",
     "waitlist.paused",
     "waitlist.resumed",

@@ -24,6 +24,7 @@ use crate::auth::AuthContext;
 use crate::error::ApiError;
 use crate::policy::{actions, facility_scope, ResourceCtx};
 use crate::ratelimit;
+use crate::routes::extract::OptionalJson;
 use crate::routes::guard;
 use crate::scheduling::{self, AppointmentRow, OfferRow};
 use crate::state::AppState;
@@ -257,7 +258,7 @@ pub fn request_json(r: &RequestRow) -> Value {
     })
 }
 
-async fn request_history_rows(
+pub async fn request_history_rows(
     conn: &mut PgConnection,
     tenant_id: Uuid,
     request_id: Uuid,
@@ -1113,9 +1114,9 @@ async fn submit_request(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<TransitionBody>>,
+    body: OptionalJson<TransitionBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let r = load_request(&mut conn, ctx.tenant_id, id).await?;
     let allowed = guard(
@@ -1201,14 +1202,14 @@ async fn route_to_triage(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<TransitionBody>>,
+    body: OptionalJson<TransitionBody>,
 ) -> Result<Json<Value>, ApiError> {
     let r = simple_transition(
         &state,
         &ctx,
         id,
         AccessRequestTransition::RouteToTriage,
-        body.map(|b| b.0).unwrap_or_default(),
+        body.0.unwrap_or_default(),
         "access_request.triage_routed",
         true,
     )
@@ -1220,9 +1221,9 @@ async fn clear_triage(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<TransitionBody>>,
+    body: OptionalJson<TransitionBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let r = load_request(&mut conn, ctx.tenant_id, id).await?;
     // Clearing triage is a clinical decision on the request: the caller
@@ -1292,14 +1293,14 @@ async fn close_request(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<TransitionBody>>,
+    body: OptionalJson<TransitionBody>,
 ) -> Result<Json<Value>, ApiError> {
     let r = simple_transition(
         &state,
         &ctx,
         id,
         AccessRequestTransition::Close,
-        body.map(|b| b.0).unwrap_or_default(),
+        body.0.unwrap_or_default(),
         "access_request.closed",
         true,
     )
@@ -1311,14 +1312,14 @@ async fn withdraw_request(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<TransitionBody>>,
+    body: OptionalJson<TransitionBody>,
 ) -> Result<Json<Value>, ApiError> {
     let r = simple_transition(
         &state,
         &ctx,
         id,
         AccessRequestTransition::Withdraw,
-        body.map(|b| b.0).unwrap_or_default(),
+        body.0.unwrap_or_default(),
         "access_request.withdrawn",
         false,
     )
@@ -1408,7 +1409,7 @@ pub async fn offers_for_request(
     Ok(out)
 }
 
-async fn latest_run(
+pub async fn latest_run(
     conn: &mut PgConnection,
     tenant_id: Uuid,
     request_id: Uuid,
@@ -1847,9 +1848,9 @@ async fn interpret_request(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<InterpretBody>>,
+    body: OptionalJson<InterpretBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let r = load_request(&mut conn, ctx.tenant_id, id).await?;
     let allowed = guard(
@@ -2552,9 +2553,9 @@ async fn run_matcher(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<MatchBody>>,
+    body: OptionalJson<MatchBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let r = load_request(&mut conn, ctx.tenant_id, id).await?;
     let allowed = guard(
@@ -2806,9 +2807,9 @@ async fn hold_offer_route(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<OfferActionBody>>,
+    body: OptionalJson<OfferActionBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let o = load_offer_scoped(&mut conn, ctx.tenant_id, id).await?;
     let allowed = guard(
@@ -2865,9 +2866,9 @@ async fn release_hold_route(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<OfferActionBody>>,
+    body: OptionalJson<OfferActionBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let o = load_offer_scoped(&mut conn, ctx.tenant_id, id).await?;
     let allowed = guard(
@@ -2929,9 +2930,9 @@ async fn decline_offer_route(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<OfferActionBody>>,
+    body: OptionalJson<OfferActionBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let o = load_offer_scoped(&mut conn, ctx.tenant_id, id).await?;
     let allowed = guard(
@@ -2972,7 +2973,7 @@ pub async fn accept_offer_for(
     booked_via: &str,
 ) -> Result<AppointmentRow, ApiError> {
     ratelimit::enforce_for_principal(state, ctx, ratelimit::Family::Scheduling).await?;
-    let by_patient = booked_via == "patient";
+    let by_patient = matches!(booked_via, "patient" | "representative");
     let reason = scheduling::clean_text(body.reason, "reason", MAX_REASON)?;
     let override_reason =
         scheduling::clean_text(body.override_reason, "override_reason", MAX_REASON)?;
@@ -3108,9 +3109,9 @@ async fn accept_offer_route(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<AcceptBody>>,
+    body: OptionalJson<AcceptBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let o = load_offer_scoped(&mut conn, ctx.tenant_id, id).await?;
     let allowed = guard(
@@ -3612,9 +3613,9 @@ async fn confirm_attendance(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<ConfirmBody>>,
+    body: OptionalJson<ConfirmBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let a = load_appointment_scoped(&mut conn, ctx.tenant_id, id).await?;
     let allowed = guard(
@@ -3753,9 +3754,9 @@ async fn reschedule_options(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<RescheduleOptionsBody>>,
+    body: OptionalJson<RescheduleOptionsBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.0.unwrap_or_default();
     let mut conn = state.pool.acquire().await?;
     let a = load_appointment_scoped(&mut conn, ctx.tenant_id, id).await?;
     let allowed = guard(
@@ -3888,14 +3889,14 @@ async fn cancel_appointment(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<CloseBody>>,
+    body: OptionalJson<CloseBody>,
 ) -> Result<Json<Value>, ApiError> {
     close_route(
         state,
         ctx,
         id,
         AppointmentTransition::Cancel,
-        body.map(|b| b.0).unwrap_or_default(),
+        body.0.unwrap_or_default(),
     )
     .await
 }
@@ -3904,14 +3905,14 @@ async fn no_show_appointment(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<CloseBody>>,
+    body: OptionalJson<CloseBody>,
 ) -> Result<Json<Value>, ApiError> {
     close_route(
         state,
         ctx,
         id,
         AppointmentTransition::MarkNoShow,
-        body.map(|b| b.0).unwrap_or_default(),
+        body.0.unwrap_or_default(),
     )
     .await
 }
@@ -3920,14 +3921,14 @@ async fn fulfil_appointment(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
-    body: Option<Json<CloseBody>>,
+    body: OptionalJson<CloseBody>,
 ) -> Result<Json<Value>, ApiError> {
     close_route(
         state,
         ctx,
         id,
         AppointmentTransition::Fulfil,
-        body.map(|b| b.0).unwrap_or_default(),
+        body.0.unwrap_or_default(),
     )
     .await
 }
