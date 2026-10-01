@@ -1204,7 +1204,7 @@ async fn imported_busy_time_excludes_matcher_candidates() {
     let now = chrono::Utc::now();
     let free_day = (now + chrono::Duration::days(5)).date_naive();
     let mut intervals = Vec::new();
-    for d in 1..=120 {
+    for d in 0..=120 {
         let day = (now + chrono::Duration::days(d)).date_naive();
         if day == free_day {
             continue;

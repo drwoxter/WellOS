@@ -305,6 +305,67 @@ pub struct ServiceEntry {
     pub config: ServiceConfig,
 }
 
+/// Attach a minimal `patient` summary (name and identifier) to staff-facing
+/// list items that carry a `patient_id`, so consoles can label rows without
+/// a per-row chart read. Items whose patient is outside the tenant are left
+/// untouched.
+pub async fn attach_patient_summaries<'e, E>(
+    exec: E,
+    tenant_id: Uuid,
+    items: &mut [Value],
+    with_identifier: bool,
+) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let ids: Vec<Uuid> = items
+        .iter()
+        .filter_map(|v| v.get("patient_id").and_then(Value::as_str))
+        .filter_map(|s| s.parse().ok())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let rows = sqlx::query(
+        "SELECT id, family_name, given_name, identifier FROM patients
+         WHERE tenant_id = $1 AND id = ANY($2)",
+    )
+    .bind(tenant_id)
+    .bind(&ids)
+    .fetch_all(exec)
+    .await?;
+    let summaries: BTreeMap<Uuid, Value> = rows
+        .iter()
+        .map(|r| {
+            let id: Uuid = r.get("id");
+            let mut v = json!({
+                "id": id,
+                "family_name": r.get::<String, _>("family_name"),
+                "given_name": r.get::<String, _>("given_name"),
+            });
+            if with_identifier {
+                v["identifier"] = json!(r.get::<String, _>("identifier"));
+            }
+            (id, v)
+        })
+        .collect();
+    for item in items.iter_mut() {
+        let Some(pid) = item
+            .get("patient_id")
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<Uuid>().ok())
+        else {
+            continue;
+        };
+        if let Some(p) = summaries.get(&pid) {
+            item["patient"] = p.clone();
+        }
+    }
+    Ok(())
+}
+
 /// The tenant's active `clinical_service` entry for `code`, or 400.
 pub async fn load_service(
     conn: &mut PgConnection,

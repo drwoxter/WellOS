@@ -605,6 +605,8 @@ async fn list_entries(
     for r in rows.iter().take(limit as usize) {
         items.push(entry_json(&entry_from_row(r)?));
     }
+    crate::scheduling::attach_patient_summaries(&state.pool, ctx.tenant_id, &mut items, true)
+        .await?;
     let next_after = if rows.len() as i64 > limit {
         items.last().and_then(|v| v.get("id").cloned())
     } else {

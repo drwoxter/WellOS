@@ -141,8 +141,12 @@ async fn list_requests(
         },
     )
     .await?;
+    let mut items: Vec<Value> = rows.iter().map(transport::transport_json).collect();
+    // Logistics need a name to meet the patient; the record number stays out.
+    crate::scheduling::attach_patient_summaries(&state.pool, ctx.tenant_id, &mut items, false)
+        .await?;
     Ok(Json(json!({
-        "items": rows.iter().map(transport::transport_json).collect::<Vec<_>>(),
+        "items": items,
         "statuses": transport::STATUSES,
         "location_encryption_configured": state.runtime.location.keyring.is_some(),
     })))
