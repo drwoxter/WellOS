@@ -701,9 +701,18 @@ pub fn find_candidates(facts: &MatchFacts) -> MatchOutput {
                             continue;
                         }
                         let found = facts.resources.iter().find_map(|other| {
+                            // A companion that declares services must be
+                            // able to deliver this one; generic resources
+                            // (no service list) qualify by type alone.
+                            let capable = other.services.is_empty()
+                                || other
+                                    .services
+                                    .iter()
+                                    .any(|s| s.service_code == req.service_code);
                             if other.facility_id != res.facility_id
                                 || &other.resource_type_code != rt
                                 || other.resource_id == res.resource_id
+                                || !capable
                                 || bookings.iter().any(|b| b.resource_id == other.resource_id)
                             {
                                 return None;
@@ -1213,6 +1222,53 @@ mod tests {
         assert!(!out.candidates.is_empty());
         assert_eq!(out.candidates[0].bookings.len(), 2);
         assert_eq!(out.candidates[0].bookings[1].role, "dental_chair");
+    }
+
+    #[test]
+    fn companion_that_declares_services_must_deliver_the_requested_one() {
+        let mut facts = base_facts();
+        facts.request.service.required_resource_types = vec!["room".into()];
+        let room = |id: u128, services: Vec<ResourceServiceFact>| ResourceFact {
+            resource_id: Uuid::from_u128(id),
+            facility_id: Uuid::from_u128(1),
+            resource_type_code: "room".into(),
+            name: format!("Room {id}"),
+            user_id: None,
+            languages: vec![],
+            accessibility_codes: vec![],
+            capacity: 1,
+            time_zone: "Europe/Madrid".into(),
+            services,
+            rules: vec![],
+            exceptions: vec![],
+            bookings: vec![],
+        };
+        let other_service = ResourceServiceFact {
+            service_code: "dental_checkup".into(),
+            duration_minutes: None,
+            prep_minutes: 0,
+            cleanup_minutes: 0,
+            modality_codes: vec![],
+        };
+        // A room dedicated to another service is not a valid companion.
+        facts.resources.push(room(30, vec![other_service.clone()]));
+        let out = find_candidates(&facts);
+        assert!(out.candidates.is_empty());
+        assert!(out.rejected.contains_key("required_resource_unavailable"));
+        // One that lists this service (or none) is.
+        facts.resources.push(room(
+            31,
+            vec![ResourceServiceFact {
+                service_code: "general_medicine".into(),
+                ..other_service
+            }],
+        ));
+        let out = find_candidates(&facts);
+        assert!(!out.candidates.is_empty());
+        assert!(out
+            .candidates
+            .iter()
+            .all(|c| c.bookings[1].resource_id == Uuid::from_u128(31)));
     }
 
     #[test]

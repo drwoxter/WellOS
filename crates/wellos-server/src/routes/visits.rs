@@ -1046,7 +1046,7 @@ fn can_start(
 const VISIT_LIST_SQL: &str = "
     SELECT v.id, v.facility_id, v.status, v.arrival_kind, v.service, v.reason, v.scheduled_at,
            v.arrived_at, v.ready_at, v.consultation_started_at, v.priority, v.handoff_summary,
-           v.encounter_id, v.version, v.updated_at,
+           v.encounter_id, v.appointment_id, v.version, v.updated_at,
            p.id AS patient_id, p.family_name, p.given_name, p.identifier, p.birth_date,
            f.name AS facility_name,
            a.assignee_user_id, au.display_name AS assignee_name,
@@ -1111,6 +1111,7 @@ fn visit_item(ctx: &AuthContext, r: &sqlx::postgres::PgRow) -> Result<Value, Api
         "priority": r.get::<Option<String>,_>("priority"),
         "handoff_summary": r.get::<Option<String>,_>("handoff_summary"),
         "encounter_id": encounter_id,
+        "appointment_id": r.get::<Option<Uuid>,_>("appointment_id"),
         "version": r.get::<i64,_>("version"),
         "updated_at": r.get::<DateTime<Utc>,_>("updated_at"),
         "facility": { "id": facility_id, "name": r.get::<String,_>("facility_name") },

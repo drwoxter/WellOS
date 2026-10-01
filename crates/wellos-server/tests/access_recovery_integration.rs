@@ -16,7 +16,7 @@ use wellos_server::state::AppState;
 
 fn database_url() -> String {
     std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://wellos:wellos@localhost:5432/wellos".to_string())
+        .unwrap_or_else(|_| "postgres://wellos:wellos_dev@localhost:5432/wellos".to_string())
 }
 
 async fn test_state() -> AppState {
@@ -1329,6 +1329,132 @@ async fn notifications_are_idempotent_retry_with_backoff_and_dead_letter() {
             .filter(|(k, _)| k == "reminder" || k == "preparation" || k == "confirmation_request")
             .all(|(_, st)| st == "cancelled" || st == "dead" || st == "delivered"),
         "{kinds:?}"
+    );
+
+    // Email: with a sealed address but no SMTP configured the channel is
+    // skipped as disabled; with SMTP pointed at a closed loopback port the
+    // attempt fails (never leaving the machine) and is retried, while the
+    // in-app copy is delivered exactly once.
+    let sealed_email = disabled_state
+        .runtime
+        .location
+        .keyring
+        .as_ref()
+        .unwrap()
+        .seal(b"synthetic.patient@example.invalid");
+    sqlx::query(
+        "UPDATE patient_scheduling_preferences SET contact_email_enc = $2, channels = ARRAY['in_app','email']
+         WHERE patient_id = $1",
+    )
+    .bind(pid)
+    .bind(&sealed_email)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let cancellation: Uuid = sqlx::query_scalar(
+        "SELECT id FROM notifications WHERE patient_id = $1 AND kind = 'cancellation' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(pid)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE notifications SET scheduled_for = now() - interval '1 minute',
+             channels = ARRAY['in_app','email'] WHERE id = $1",
+    )
+    .bind(cancellation)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    tick_unlocked(&disabled_state).await;
+    let email_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT channel, status, error_code FROM notification_deliveries
+         WHERE notification_id = $1 ORDER BY channel",
+    )
+    .bind(cancellation)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        email_rows,
+        vec![
+            (
+                "email".into(),
+                "skipped".into(),
+                Some("email_delivery_disabled".into())
+            ),
+            ("in_app".into(), "delivered".into(), None),
+        ]
+    );
+
+    let mut smtp_runtime = wellos_server::runtime::RuntimeConfig::test_fixtures();
+    smtp_runtime.notifications.dev_sink = false;
+    smtp_runtime.notifications.smtp = Some(wellos_server::runtime::SmtpConfig {
+        host: "127.0.0.1".into(),
+        port: 9,
+        username: "synthetic".into(),
+        password: "synthetic".into(),
+        from: "WellOS <no-reply@example.invalid>".into(),
+        tls: wellos_server::runtime::SmtpTls::None,
+        timeout: std::time::Duration::from_secs(2),
+    });
+    let smtp_state = AppState::from_runtime(
+        state.pool.clone(),
+        Arc::new(dmind_gateway::fake::FakeProvider::new()),
+        Arc::new(dmind_gateway::scribe::FakeTranscription::new()),
+        wellos_server::state::AuthConfig::development(),
+        smtp_runtime,
+    );
+    sqlx::query(
+        "UPDATE notifications SET status = 'scheduled', attempts = 0, next_attempt_at = NULL,
+             scheduled_for = now() - interval '1 minute' WHERE id = $1",
+    )
+    .bind(cancellation)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "DELETE FROM notification_deliveries WHERE notification_id = $1 AND channel = 'email'",
+    )
+    .bind(cancellation)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    tick_unlocked(&smtp_state).await;
+    let (status, attempts, next, last_error): (
+        String,
+        i32,
+        Option<chrono::DateTime<Utc>>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT status, attempts, next_attempt_at, last_error_code FROM notifications WHERE id = $1",
+    )
+    .bind(cancellation)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), attempts), ("failed", 1));
+    assert!(next.is_some(), "SMTP failure schedules a retry");
+    assert_eq!(last_error.as_deref(), Some("smtp_send_failed"));
+    let deliveries: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT channel, status, error_code FROM notification_deliveries
+         WHERE notification_id = $1 ORDER BY channel, attempt",
+    )
+    .bind(cancellation)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        deliveries,
+        vec![
+            (
+                "email".into(),
+                "failed".into(),
+                Some("smtp_send_failed".into())
+            ),
+            ("in_app".into(), "delivered".into(), None),
+        ],
+        "in-app is not re-sent when only email fails"
     );
 }
 

@@ -729,3 +729,674 @@ async fn unknown_specialty_added_at_runtime_becomes_schedulable() {
         "Bring previous reports"
     );
 }
+
+/// Book the first offer of a fresh request for `patient` and return the
+/// confirmed appointment together with the offer it came from.
+async fn book_first_offer(
+    state: &AppState,
+    facility: &str,
+    patient: &str,
+    service: &str,
+) -> (Value, Value) {
+    let req = submit_request(state, facility, patient, service).await;
+    let (st, m) = call(
+        state,
+        "POST",
+        &format!("/api/v1/access-requests/{}/match", s(&req["id"])),
+        REG,
+        Some(json!({ "version": req["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    let offer = m["offers"][0].clone();
+    assert!(offer.is_object(), "{m}");
+    let (st, acc) = call(
+        state,
+        "POST",
+        &format!("/api/v1/offers/{}/accept", s(&offer["id"])),
+        REG,
+        Some(json!({ "version": offer["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{acc}");
+    (acc, offer)
+}
+
+async fn visit_status(state: &AppState, visit_id: &str) -> String {
+    let (st, v) = call(
+        state,
+        "GET",
+        &format!("/api/v1/visits/{visit_id}"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    s(&v["status"])
+}
+
+#[tokio::test]
+async fn reschedule_keeps_history_and_moves_the_linked_visit() {
+    let state = test_state().await;
+    let facility = main_facility(&state).await;
+    let service = create_service(&state).await;
+    create_professional(&state, &facility, &service).await;
+    let patient = register_patient(&state, &facility).await;
+    let (first, _) = book_first_offer(&state, &facility, &patient, &service).await;
+    let first_id = s(&first["id"]);
+    let visit_id = s(&first["visit_id"]);
+    let first_start = s(&first["starts_at"]);
+
+    // Staff open reschedule options with a reason; the prior appointment is
+    // untouched until an option is accepted.
+    let (st, opts) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/appointments/{first_id}/reschedule-options"),
+        REG,
+        Some(json!({ "version": first["version"], "reason": "Clinic asked to move the slot" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{opts}");
+    assert_eq!(opts["request"]["status"], "options_ready");
+    assert_eq!(
+        s(&opts["request"]["constraints"]["reschedule_of"]),
+        first_id
+    );
+    let (st, still) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/appointments/{first_id}"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(still["status"], "confirmed", "{still}");
+
+    // Pick an option at a different time and accept it as the replacement.
+    let offer = opts["offers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| s(&o["starts_at"]) != first_start)
+        .cloned()
+        .expect("an alternative slot");
+    let (st, second) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/offers/{}/accept", s(&offer["id"])),
+        REG,
+        Some(json!({
+            "version": offer["version"],
+            "reschedule_of": first_id,
+            "reschedule_reason": "Clinic asked to move the slot",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{second}");
+    assert_eq!(second["status"], "confirmed");
+    assert_eq!(s(&second["rescheduled_from"]), first_id);
+    assert_ne!(s(&second["starts_at"]), first_start);
+
+    // The prior appointment is history (not overwritten), the single visit
+    // moved to the new time and now belongs to the new appointment.
+    let (st, prior) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/appointments/{first_id}"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(prior["status"], "rescheduled", "{prior}");
+    assert_eq!(s(&prior["rescheduled_to"]), s(&second["id"]));
+    assert_eq!(
+        s(&prior["starts_at"]),
+        first_start,
+        "prior time is preserved"
+    );
+    assert_eq!(
+        s(&second["visit_id"]),
+        visit_id,
+        "the visit is moved, not duplicated"
+    );
+    let (st, visit) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/visits/{visit_id}"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(visit["status"], "scheduled");
+    assert_eq!(visit["scheduled_at"], second["starts_at"], "{visit}");
+    let patient_uuid: Uuid = patient.parse().unwrap();
+    let visits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM visits WHERE patient_id = $1")
+        .bind(patient_uuid)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(visits, 1);
+    // The freed slot is released at the database level.
+    let active_prior: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM resource_bookings WHERE appointment_id = $1 AND status = 'active'",
+    )
+    .bind(first_id.parse::<Uuid>().unwrap())
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(active_prior, 0);
+    let (st, hist) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/appointments/{first_id}/history"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{hist}");
+    let items = hist["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|h| h["to_status"] == "rescheduled"),
+        "{hist}"
+    );
+    // A rescheduled appointment cannot be rescheduled or cancelled again.
+    let (st, again) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/appointments/{first_id}/cancel"),
+        REG,
+        Some(json!({ "version": prior["version"], "reason_code": "patient_request", "override_reason": "x" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{again}");
+    assert_eq!(code(&again), "invalid_transition");
+}
+
+#[tokio::test]
+async fn visit_closures_move_the_appointment_in_the_same_transaction() {
+    let state = test_state().await;
+    let facility = main_facility(&state).await;
+    let service = create_service(&state).await;
+    create_professional(&state, &facility, &service).await;
+
+    // No-show recorded on the visit board → appointment no_show.
+    let p1 = register_patient(&state, &facility).await;
+    let (a1, _) = book_first_offer(&state, &facility, &p1, &service).await;
+    let v1 = s(&a1["visit_id"]);
+    let (st, visit) = call(&state, "GET", &format!("/api/v1/visits/{v1}"), REG, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, ns) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/visits/{v1}/no-show"),
+        REG,
+        Some(json!({ "version": visit["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ns}");
+    let (st, appt) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/appointments/{}", s(&a1["id"])),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(appt["status"], "no_show", "{appt}");
+    assert!(appt["no_show_at"].is_string());
+
+    // Arrival keeps the appointment confirmed; the visit becomes operational.
+    let p2 = register_patient(&state, &facility).await;
+    let (a2, _) = book_first_offer(&state, &facility, &p2, &service).await;
+    let v2 = s(&a2["visit_id"]);
+    let (_, visit) = call(&state, "GET", &format!("/api/v1/visits/{v2}"), REG, None).await;
+    let (st, arrived) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/visits/{v2}/arrive"),
+        REG,
+        Some(json!({ "version": visit["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{arrived}");
+    assert_eq!(arrived["status"], "arrived");
+    let (st, board) = call(&state, "GET", &format!("/api/v1/visits/{v2}"), REG, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(s(&board["appointment_id"]), s(&a2["id"]), "{board}");
+    let (_, appt) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/appointments/{}", s(&a2["id"])),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(appt["status"], "confirmed", "{appt}");
+
+    // Appointment no-show recorded from the scheduling side closes the visit.
+    // Before the slot has started it is an override and needs a reason.
+    let p3 = register_patient(&state, &facility).await;
+    let (a3, _) = book_first_offer(&state, &facility, &p3, &service).await;
+    let (st, early) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/appointments/{}/no-show", s(&a3["id"])),
+        REG,
+        Some(json!({ "version": a3["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{early}");
+    assert_eq!(code(&early), "override_required");
+    assert_eq!(visit_status(&state, &s(&a3["visit_id"])).await, "scheduled");
+    let (st, ns) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/appointments/{}/no-show", s(&a3["id"])),
+        REG,
+        Some(json!({
+            "version": a3["version"],
+            "override_reason": "patient phoned to say they will not attend",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ns}");
+    assert_eq!(ns["status"], "no_show");
+    assert_eq!(visit_status(&state, &s(&a3["visit_id"])).await, "no_show");
+}
+
+#[tokio::test]
+async fn required_room_is_never_double_booked_across_professionals() {
+    let state = test_state().await;
+    let facility = main_facility(&state).await;
+    let service = create_service(&state).await;
+    let (st, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/scheduling/services/{service}/requirements"),
+        ADMIN,
+        Some(json!({ "requirements": [
+            { "resource_type_code": "professional", "quantity": 1 },
+            { "resource_type_code": "room", "quantity": 1 },
+        ]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let pro_a = create_professional(&state, &facility, &service).await;
+    let pro_b = create_professional(&state, &facility, &service).await;
+    // One generic room (no service list), open for exactly one 30-minute
+    // slot per day.
+    let (st, room) = call(
+        &state,
+        "POST",
+        "/api/v1/scheduling/resources",
+        ADMIN,
+        Some(json!({
+            "facility_id": facility,
+            "resource_type_code": "room",
+            "name": uniq("Room"),
+            "capacity": 1,
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{room}");
+    let room_id = s(&room["id"]);
+    let rules: Vec<Value> = (1..=7)
+        .map(|d| json!({ "weekday": d, "start_local": "09:00:00", "end_local": "09:30:00" }))
+        .collect();
+    let (st, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/scheduling/resources/{room_id}/availability"),
+        ADMIN,
+        Some(json!({ "version": room["version"], "rules": rules })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    let p1 = register_patient(&state, &facility).await;
+    let (first, offer) = book_first_offer(&state, &facility, &p1, &service).await;
+    let used: Vec<String> = offer["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| s(&r["resource_id"]))
+        .collect();
+    assert!(used.contains(&room_id), "room is part of the plan: {offer}");
+    assert!(
+        used.contains(&pro_a) || used.contains(&pro_b),
+        "a professional is part of the plan: {offer}"
+    );
+    let (st, detail) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/appointments/{}", s(&first["id"])),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(detail["resources"].as_array().unwrap().len(), 2, "{detail}");
+    let bookings: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM resource_bookings WHERE appointment_id = $1 AND status = 'active'",
+    )
+    .bind(s(&first["id"]).parse::<Uuid>().unwrap())
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        bookings, 2,
+        "one booking row per resource in the combination"
+    );
+
+    // The second patient has a free professional at that time but no room:
+    // the taken slot must not be offered at all, with either professional.
+    let p2 = register_patient(&state, &facility).await;
+    let req = submit_request(&state, &facility, &p2, &service).await;
+    let (st, m) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/access-requests/{}/match", s(&req["id"])),
+        REG,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    let offers = m["offers"].as_array().unwrap();
+    assert!(!offers.is_empty(), "{m}");
+    assert!(
+        offers.iter().all(|o| o["starts_at"] != first["starts_at"]),
+        "{m}"
+    );
+
+    // Defence in depth: an overlapping active booking on the room is refused
+    // by the exclusion constraint even when written directly.
+    let tenant: Uuid = sqlx::query_scalar("SELECT tenant_id FROM appointments WHERE id = $1")
+        .bind(s(&first["id"]).parse::<Uuid>().unwrap())
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let staff: Uuid = sqlx::query_scalar("SELECT booked_by FROM appointments WHERE id = $1")
+        .bind(s(&first["id"]).parse::<Uuid>().unwrap())
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let err = sqlx::query(
+        "INSERT INTO resource_bookings (id, tenant_id, resource_id, slot_index, starts_at, ends_at, kind, created_by)
+         VALUES ($1, $2, $3, 0, $4::timestamptz + interval '10 minutes', $5::timestamptz + interval '10 minutes', 'appointment', $6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant)
+    .bind(room_id.parse::<Uuid>().unwrap())
+    .bind(s(&first["starts_at"]))
+    .bind(s(&first["ends_at"]))
+    .bind(staff)
+    .execute(&state.pool)
+    .await
+    .expect_err("overlap must be refused");
+    let db = err.as_database_error().expect("database error");
+    assert_eq!(db.code().as_deref(), Some("23P01"), "{db}");
+}
+
+#[tokio::test]
+async fn matching_stays_deterministic_when_dmind_is_disabled_or_degraded() {
+    let base = test_state().await;
+    let facility = main_facility(&base).await;
+    let service = create_service(&base).await;
+    create_professional(&base, &facility, &service).await;
+
+    // Disabled provider: options, hold and confirmation all work; the run
+    // says so explicitly and no artifact exists.
+    let disabled = AppState::new(
+        base.pool.clone(),
+        Arc::new(dmind_gateway::DisabledGateway::disabled(
+            "DMIND_MODEL_PROVIDER=disabled",
+        )),
+    );
+    let patient = register_patient(&disabled, &facility).await;
+    let req = submit_request(&disabled, &facility, &patient, &service).await;
+    let (st, m) = call(
+        &disabled,
+        "POST",
+        &format!("/api/v1/access-requests/{}/match", s(&req["id"])),
+        REG,
+        Some(json!({ "version": req["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    assert_eq!(m["ranking"]["mode"], "deterministic", "{m}");
+    assert_eq!(m["ranking"]["reason"], "disabled", "{m}");
+    assert!(m["ranking"]["artifact_id"].is_null());
+    let offers = m["offers"].as_array().unwrap();
+    assert!(offers.len() >= 2, "{m}");
+    assert!(offers.iter().all(|o| o["explanation"].is_null()), "{m}");
+    let (st, run) = call(
+        &disabled,
+        "GET",
+        &format!("/api/v1/matcher-runs/{}", s(&m["matcher_run_id"])),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(run["ranking_mode"], "deterministic", "{run}");
+    let (st, acc) = call(
+        &disabled,
+        "POST",
+        &format!("/api/v1/offers/{}/accept", s(&offers[0]["id"])),
+        REG,
+        Some(json!({ "version": offers[0]["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{acc}");
+
+    // Degraded provider (configured but failing): same deterministic
+    // outcome, reported as unavailable, nothing fabricated.
+    let fake = Arc::new(dmind_gateway::fake::FakeProvider::new());
+    fake.set_unavailable(true);
+    let degraded = AppState::new(base.pool.clone(), fake.clone());
+    let patient = register_patient(&degraded, &facility).await;
+    let req = submit_request(&degraded, &facility, &patient, &service).await;
+    let (st, m) = call(
+        &degraded,
+        "POST",
+        &format!("/api/v1/access-requests/{}/match", s(&req["id"])),
+        REG,
+        Some(json!({ "version": req["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    assert_eq!(m["ranking"]["mode"], "deterministic", "{m}");
+    assert_eq!(m["ranking"]["reason"], "unavailable", "{m}");
+    assert!(m["ranking"]["artifact_id"].is_null());
+    assert!(!m["offers"].as_array().unwrap().is_empty());
+
+    // Ready provider: one bounded ranking call over the same deterministic
+    // candidates; the artifact is synthetic, cites candidate ids and the
+    // offer set is unchanged (a permutation, never an invention).
+    fake.set_unavailable(false);
+    let patient = register_patient(&degraded, &facility).await;
+    let req = submit_request(&degraded, &facility, &patient, &service).await;
+    let (st, m) = call(
+        &degraded,
+        "POST",
+        &format!("/api/v1/access-requests/{}/match", s(&req["id"])),
+        REG,
+        Some(json!({ "version": req["version"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    assert_eq!(m["ranking"]["mode"], "dmind", "{m}");
+    assert_eq!(m["ranking"]["synthetic"], true, "{m}");
+    let artifact: Uuid = s(&m["ranking"]["artifact_id"]).parse().unwrap();
+    let (atype, synthetic, run_ref, patient_ref): (String, bool, Option<Uuid>, Option<Uuid>) =
+        sqlx::query_as(
+            "SELECT artifact_type, synthetic, matcher_run_id, patient_id FROM ai_artifacts WHERE id = $1",
+        )
+        .bind(artifact)
+        .fetch_one(&base.pool)
+        .await
+        .unwrap();
+    assert_eq!(atype, "appointment_ranking");
+    assert!(synthetic);
+    assert_eq!(run_ref, Some(s(&m["matcher_run_id"]).parse().unwrap()));
+    assert_eq!(patient_ref, Some(patient.parse().unwrap()));
+    let offers = m["offers"].as_array().unwrap();
+    let candidates: i32 =
+        sqlx::query_scalar("SELECT jsonb_array_length(candidates) FROM matcher_runs WHERE id = $1")
+            .bind(s(&m["matcher_run_id"]).parse::<Uuid>().unwrap())
+            .fetch_one(&base.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        offers.len(),
+        usize::try_from(candidates).unwrap(),
+        "ranking never adds or drops options"
+    );
+}
+
+/// The legacy-visit migration statements of 0015, exactly as shipped.
+fn legacy_visit_migration_sql() -> &'static str {
+    let sql = include_str!("../migrations/0015_dmind_access.sql");
+    let start = sql
+        .find("WITH candidates AS (")
+        .expect("legacy migration block");
+    let end = sql[start..]
+        .find("-- Rollback (manual")
+        .expect("end of legacy migration block");
+    &sql[start..start + end]
+}
+
+#[tokio::test]
+async fn legacy_scheduled_visits_migrate_once_into_appointments() {
+    let state = test_state().await;
+    let facility = main_facility(&state).await;
+    let patient = register_patient(&state, &facility).await;
+    let facility_uuid: Uuid = facility.parse().unwrap();
+    let patient_uuid: Uuid = patient.parse().unwrap();
+    let (tenant, staff): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT p.tenant_id, (SELECT id FROM users WHERE tenant_id = p.tenant_id AND NOT is_service ORDER BY created_at LIMIT 1)
+         FROM patients p WHERE p.id = $1",
+    )
+    .bind(patient_uuid)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    // Visits as the pre-0015 access board created them: no appointment link.
+    let mut legacy = Vec::new();
+    for (status, closed_reason, offset_h) in [
+        ("scheduled", None, 48i64),
+        ("cancelled", Some("cancelled"), 72),
+        ("no_show", Some("no_show"), -24),
+        ("completed", None, -48),
+    ] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO visits (id, tenant_id, facility_id, patient_id, status, arrival_kind, service, reason,
+                                 scheduled_at, closed_at, closed_reason, completed_at, created_by)
+             VALUES ($1, $2, $3, $4, $5, 'scheduled', 'general_medicine', 'legacy follow-up',
+                     now() + make_interval(hours => $6), CASE WHEN $7::text IS NOT NULL THEN now() END, $7,
+                     CASE WHEN $5 = 'completed' THEN now() END, $8)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(facility_uuid)
+        .bind(patient_uuid)
+        .bind(status)
+        .bind(offset_h as i32)
+        .bind(closed_reason)
+        .bind(staff)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        legacy.push((id, status));
+    }
+
+    // Run the shipped migration block twice: once to upgrade, once to prove
+    // idempotency.
+    for _ in 0..2 {
+        let mut tx = state.pool.begin().await.unwrap();
+        sqlx::raw_sql(legacy_visit_migration_sql())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let expected = [
+        ("scheduled", "confirmed"),
+        ("cancelled", "cancelled"),
+        ("no_show", "no_show"),
+        ("completed", "fulfilled"),
+    ];
+    for (visit_id, visit_status) in &legacy {
+        let rows: Vec<(Uuid, String, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT a.id, a.status, a.booked_via, v.appointment_id
+             FROM appointments a JOIN visits v ON v.id = a.visit_id WHERE a.visit_id = $1",
+        )
+        .bind(visit_id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "exactly one appointment per legacy visit");
+        let (appt_id, status, via, link) = &rows[0];
+        let want = expected
+            .iter()
+            .find(|(v, _)| v == visit_status)
+            .map(|(_, a)| *a)
+            .unwrap();
+        assert_eq!(status, want);
+        assert_eq!(via, "migration");
+        assert_eq!(link.as_ref(), Some(appt_id), "visit links back");
+        let history: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM appointment_history WHERE appointment_id = $1 AND reason_code = 'migrated_from_scheduled_visit'",
+        )
+        .bind(appt_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(history, 1);
+    }
+
+    // The migrated confirmed appointment is a first-class record: it is
+    // listed, has history, and cancelling it closes the legacy visit.
+    let (visit_id, _) = legacy[0];
+    let (appt_id,): (Uuid,) = sqlx::query_as("SELECT id FROM appointments WHERE visit_id = $1")
+        .bind(visit_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let (st, appt) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/appointments/{appt_id}"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{appt}");
+    assert_eq!(appt["status"], "confirmed");
+    assert_eq!(appt["service_code"], "general_medicine");
+    let (st, cancelled) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/appointments/{appt_id}/cancel"),
+        REG,
+        Some(json!({
+            "version": appt["version"],
+            "reason_code": "patient_request",
+            "override_reason": "legacy visit cancelled by phone",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{cancelled}");
+    assert_eq!(
+        visit_status(&state, &visit_id.to_string()).await,
+        "cancelled"
+    );
+}
