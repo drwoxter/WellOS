@@ -398,8 +398,38 @@ pub async fn transition_entry_for(
     ratelimit::enforce_for_principal(state, ctx, ratelimit::Family::Scheduling).await?;
     let reason = scheduling::clean_text(body.reason, "reason", MAX_REASON)?;
     let mut tx = state.pool.begin().await?;
-    let e = lock_entry(&mut tx, entry.tenant_id, entry.id).await?;
-    if let Some(v) = body.version {
+    let e = transition_entry_in(
+        &mut tx,
+        ctx,
+        state,
+        entry.tenant_id,
+        entry.id,
+        body.version,
+        t,
+        reason,
+        by_patient,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(e)
+}
+
+/// Transaction-scoped core of [`transition_entry_for`]; the caller owns the
+/// transaction (route wrappers, fixtures).
+#[allow(clippy::too_many_arguments)]
+pub async fn transition_entry_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    tenant_id: Uuid,
+    entry_id: Uuid,
+    version: Option<i64>,
+    t: WaitlistTransition,
+    reason: Option<String>,
+    by_patient: bool,
+) -> Result<EntryRow, ApiError> {
+    let e = lock_entry(tx, tenant_id, entry_id).await?;
+    if let Some(v) = version {
         if v != e.version {
             return Err(ApiError::conflict(
                 "stale_version",
@@ -416,14 +446,14 @@ pub async fn transition_entry_for(
         )
         .bind(e.tenant_id)
         .bind(e.id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
         if let Some(offer_id) = live {
-            let o = scheduling::lock_offer(&mut tx, offer_id).await?;
+            let o = scheduling::lock_offer(tx, offer_id).await?;
             if matches!(o.status, OfferStatus::Offered | OfferStatus::Held) {
-                scheduling::release_offer_bookings(&mut tx, o.id).await?;
+                scheduling::release_offer_bookings(tx, o.id).await?;
                 scheduling::transition_offer(
-                    &mut tx,
+                    tx,
                     &o,
                     OfferTransition::Decline,
                     None,
@@ -432,7 +462,7 @@ pub async fn transition_entry_for(
                 )
                 .await?;
                 audit::emit(
-                    &mut *tx,
+                    &mut **tx,
                     ctx,
                     "appointment.offer.declined",
                     &state.cell,
@@ -443,11 +473,11 @@ pub async fn transition_entry_for(
                 )
                 .await
                 .map_err(ApiError::internal)?;
-                recovery::on_offer_closed(&mut tx, ctx, state, o.id, "declined").await?;
+                recovery::on_offer_closed(tx, ctx, state, o.id, "declined").await?;
             }
         }
         // `on_offer_closed` returned the entry to `active`.
-        from = lock_entry(&mut tx, e.tenant_id, e.id).await?.status;
+        from = lock_entry(tx, e.tenant_id, e.id).await?.status;
     }
     let next = from
         .apply(t)
@@ -461,7 +491,7 @@ pub async fn transition_entry_for(
     )
     .bind(e.id)
     .bind(next.as_str())
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     let event = match t {
         WaitlistTransition::Pause => "waitlist.paused",
@@ -469,7 +499,7 @@ pub async fn transition_entry_for(
         _ => "waitlist.left",
     };
     audit::emit(
-        &mut *tx,
+        &mut **tx,
         ctx,
         event,
         &state.cell,
@@ -479,9 +509,7 @@ pub async fn transition_entry_for(
     )
     .await
     .map_err(ApiError::internal)?;
-    let e = load_entry(&mut tx, e.tenant_id, e.id).await?;
-    tx.commit().await?;
-    Ok(e)
+    load_entry(tx, e.tenant_id, e.id).await
 }
 
 // ---------------------------------------------------------------------------

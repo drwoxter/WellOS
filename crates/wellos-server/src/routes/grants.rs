@@ -243,14 +243,15 @@ pub async fn create_grant(
             "relationship must be self, parent_guardian or authorized_proxy",
         ));
     }
-    let note = scheduling::clean_text(body.verification_note.take(), "verification_note", MAX_NOTE)?
-        .filter(|n| n.chars().count() >= MIN_NOTE)
-        .ok_or_else(|| {
-            ApiError::bad_request(
-                "validation_failed",
-                "verification_note is required (how identity and relationship were verified)",
-            )
-        })?;
+    let note =
+        scheduling::clean_text(body.verification_note.take(), "verification_note", MAX_NOTE)?
+            .filter(|n| n.chars().count() >= MIN_NOTE)
+            .ok_or_else(|| {
+                ApiError::bad_request(
+                    "validation_failed",
+                    "verification_note is required (how identity and relationship were verified)",
+                )
+            })?;
     if let Some(e) = body.expires_at {
         if e <= Utc::now() {
             return Err(ApiError::bad_request(

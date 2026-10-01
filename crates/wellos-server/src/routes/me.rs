@@ -1062,12 +1062,27 @@ async fn update_preferences(
     .await?;
     allowed.record(&mut conn, &ctx, &state.cell).await?;
     ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Scheduling).await?;
+    drop(conn);
+    let mut tx = state.pool.begin().await?;
+    let out = update_preferences_in(&mut tx, &ctx, &state, &g, body).await?;
+    tx.commit().await?;
+    Ok(Json(out))
+}
 
+/// Validate and persist scheduling preferences for the granted patient
+/// inside the caller's transaction (route and synthetic fixtures share it).
+pub async fn update_preferences_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    g: &GrantRow,
+    body: PreferencesBody,
+) -> Result<Value, ApiError> {
     scheduling::validate_windows(&body.available_windows, "available_windows")?;
     scheduling::validate_windows(&body.unavailable_windows, "unavailable_windows")?;
     let modalities = clean_codes(body.preferred_modalities, "preferred_modalities")?;
     scheduling::require_codes(
-        &mut conn,
+        tx,
         g.tenant_id,
         "modality",
         &modalities,
@@ -1076,7 +1091,7 @@ async fn update_preferences(
     .await?;
     let accessibility = clean_codes(body.accessibility_needs, "accessibility_needs")?;
     scheduling::require_codes(
-        &mut conn,
+        tx,
         g.tenant_id,
         "accessibility_capability",
         &accessibility,
@@ -1101,7 +1116,7 @@ async fn update_preferences(
         )
         .bind(g.tenant_id)
         .bind(&facilities)
-        .fetch_one(&mut *conn)
+        .fetch_one(&mut **tx)
         .await?;
         if known as usize != facilities.len() {
             return Err(ApiError::bad_request(
@@ -1146,28 +1161,26 @@ async fn update_preferences(
         ));
     }
     let email = seal_contact(
-        &state,
+        state,
         body.contact_email,
         "contact_email",
         MAX_EMAIL,
         plausible_email,
     )?;
     let push = seal_contact(
-        &state,
+        state,
         body.push_endpoint,
         "push_endpoint",
         MAX_ENDPOINT,
         plausible_endpoint,
     )?;
-    drop(conn);
 
-    let mut tx = state.pool.begin().await?;
     let current: Option<i64> = sqlx::query_scalar(
         "SELECT version FROM patient_scheduling_preferences WHERE tenant_id = $1 AND patient_id = $2 FOR UPDATE",
     )
     .bind(g.tenant_id)
     .bind(g.patient_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     if let (Some(expected), Some(actual)) = (body.version, current) {
         if expected != actual {
@@ -1232,11 +1245,11 @@ async fn update_preferences(
     .bind(push_mode)
     .bind(push_value)
     .bind(ctx.user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     audit::emit(
-        &mut *tx,
-        &ctx,
+        &mut **tx,
+        ctx,
         "patient_preferences.updated",
         &state.cell,
         json!({ "patient_id": g.patient_id, "relationship": g.relationship,
@@ -1248,10 +1261,9 @@ async fn update_preferences(
     )
     .await
     .map_err(ApiError::internal)?;
-    let p = scheduling::load_preferences(&mut tx, g.tenant_id, g.patient_id).await?;
-    let c = contact_flags(&mut tx, g.tenant_id, g.patient_id).await?;
-    tx.commit().await?;
-    Ok(Json(preferences_json(g.patient_id, &p, &c)))
+    let p = scheduling::load_preferences(tx, g.tenant_id, g.patient_id).await?;
+    let c = contact_flags(tx, g.tenant_id, g.patient_id).await?;
+    Ok(preferences_json(g.patient_id, &p, &c))
 }
 
 // ---------------------------------------------------------------------------

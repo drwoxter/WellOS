@@ -155,8 +155,8 @@ pub async fn assemble_inputs(
                 count(*)::int AS demand,
                 count(*) FILTER (WHERE status = 'cancelled')::int AS cancellations,
                 count(*) FILTER (WHERE status = 'no_show')::int AS no_shows,
-                avg(extract(epoch FROM (starts_at - cancelled_at)) / 3600.0)
-                    FILTER (WHERE status = 'cancelled' AND cancelled_at IS NOT NULL) AS lead_hours
+                (avg(extract(epoch FROM (starts_at - cancelled_at)) / 3600.0)
+                    FILTER (WHERE status = 'cancelled' AND cancelled_at IS NOT NULL))::float8 AS lead_hours
          FROM appointments
          WHERE tenant_id = $1 AND facility_id = $2 AND service_code = $3
            AND starts_at >= ($5::date::timestamp AT TIME ZONE $4)

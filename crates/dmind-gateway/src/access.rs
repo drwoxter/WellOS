@@ -79,6 +79,11 @@ pub struct AccessIntentRequest {
     /// Urgency already set by deterministic rules or staff; the model may
     /// not change it and it feeds the triage floor.
     pub urgency: Urgency,
+    /// Structured fields the request already carries (`service`,
+    /// `modality`, `preferred_windows`, `facility`, `language`,
+    /// `accessibility`): the model must not ask for them again.
+    #[serde(default)]
+    pub already_known: Vec<String>,
     pub services: Vec<VocabularyTerm>,
     pub specialties: Vec<VocabularyTerm>,
     pub modalities: Vec<VocabularyTerm>,
@@ -87,6 +92,10 @@ pub struct AccessIntentRequest {
 }
 
 impl AccessIntentRequest {
+    pub fn knows(&self, field: &str) -> bool {
+        self.already_known.iter().any(|f| f == field)
+    }
+
     pub fn vocabulary(&self) -> IntentVocabulary {
         let codes = |v: &[VocabularyTerm]| v.iter().map(|t| t.code.clone()).collect();
         IntentVocabulary {
@@ -267,21 +276,21 @@ pub fn deterministic_intent(
     };
 
     let mut missing = Vec::new();
-    if services.is_empty() && specialties.is_empty() {
+    if services.is_empty() && specialties.is_empty() && !req.knows("service") {
         missing.push(if es {
             "¿Qué tipo de consulta o servicio necesita?".to_string()
         } else {
             "Which service or type of consultation do you need?".to_string()
         });
     }
-    if preferred_windows.is_empty() {
+    if preferred_windows.is_empty() && !req.knows("preferred_windows") {
         missing.push(if es {
             "¿Qué días u horas le vienen mejor?".to_string()
         } else {
             "Which days or times suit you best?".to_string()
         });
     }
-    if modality_codes.is_empty() && req.modalities.len() > 1 {
+    if modality_codes.is_empty() && req.modalities.len() > 1 && !req.knows("modality") {
         missing.push(if es {
             "¿Prefiere consulta presencial, telefónica o por vídeo?".to_string()
         } else {
@@ -956,6 +965,7 @@ mod tests {
             language: "en".into(),
             free_text: text.into(),
             urgency: Urgency::Routine,
+            already_known: vec![],
             services: vec![
                 term(
                     "derm_consult",

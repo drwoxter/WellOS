@@ -692,6 +692,21 @@ pub async fn create_catalog(
         manage_ctx(&ctx),
     )
     .await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let out = create_catalog_in(&mut tx, &ctx, &state, body).await?;
+    tx.commit().await?;
+    Ok(Json(out))
+}
+
+/// Create a catalog entry inside the caller's transaction (route and
+/// synthetic fixtures share this path). Authorization is the caller's job.
+pub async fn create_catalog_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    body: CreateCatalogEntry,
+) -> Result<Value, ApiError> {
     let kind = require_kind(&body.kind)?;
     let code = require_code(&body.code, "code")?;
     let name_en = clean_required(&body.name_en, "name_en", MAX_NAME)?;
@@ -700,11 +715,8 @@ pub async fn create_catalog(
     let codings = clean_codings(body.external_codings)?;
     validate_dates(body.effective_from, body.effective_to)?;
     let reason = clean_optional(body.change_reason, "change_reason", MAX_TEXT)?;
-
-    let mut tx = state.pool.begin().await?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
-    let config = validate_config(&mut tx, ctx.tenant_id, &kind, body.config).await?;
-    check_parent(&mut tx, ctx.tenant_id, &kind, body.parent_id, None).await?;
+    let config = validate_config(tx, ctx.tenant_id, &kind, body.config).await?;
+    check_parent(tx, ctx.tenant_id, &kind, body.parent_id, None).await?;
     let id = Uuid::now_v7();
     let inserted = sqlx::query(
         "INSERT INTO catalog_entries (id, tenant_id, kind, code, parent_id, name_en, name_es, synonyms,
@@ -724,7 +736,7 @@ pub async fn create_catalog(
     .bind(body.effective_from)
     .bind(body.effective_to)
     .bind(ctx.user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await;
     match inserted {
         Ok(_) => {}
@@ -736,21 +748,20 @@ pub async fn create_catalog(
         }
         Err(e) => return Err(e.into()),
     }
-    replace_facilities(&mut tx, ctx.tenant_id, id, &body.facility_ids).await?;
-    let row = load_catalog_entry(&mut tx, ctx.tenant_id, id).await?;
-    write_catalog_history(&mut tx, &ctx, &row, reason.as_deref()).await?;
+    replace_facilities(tx, ctx.tenant_id, id, &body.facility_ids).await?;
+    let row = load_catalog_entry(tx, ctx.tenant_id, id).await?;
+    write_catalog_history(tx, ctx, &row, reason.as_deref()).await?;
     emit(
-        &mut tx,
-        &ctx,
-        &state,
+        tx,
+        ctx,
+        state,
         "catalog.entry.created",
         json!({ "entry_id": id, "kind": kind, "code": code }),
     )
     .await?;
-    tx.commit().await?;
     let mut out = catalog_json(&row);
     out["facility_ids"] = json!(body.facility_ids);
-    Ok(Json(out))
+    Ok(out)
 }
 
 #[derive(Deserialize)]
@@ -918,14 +929,29 @@ pub async fn deactivate_catalog(
         manage_ctx(&ctx),
     )
     .await?;
-    let reason = clean_optional(body.change_reason, "change_reason", MAX_TEXT)?;
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let out = deactivate_catalog_in(&mut tx, &ctx, &state, id, body).await?;
+    tx.commit().await?;
+    Ok(Json(out))
+}
+
+/// Transactional core of [`deactivate_catalog`] (authorization already
+/// recorded by the caller): deactivates the entry and its descendants,
+/// writing one history row per affected entry.
+pub async fn deactivate_catalog_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    id: Uuid,
+    body: Deactivate,
+) -> Result<Value, ApiError> {
+    let reason = clean_optional(body.change_reason, "change_reason", MAX_TEXT)?;
     let row =
         sqlx::query("SELECT * FROM catalog_entries WHERE id = $1 AND tenant_id = $2 FOR UPDATE")
             .bind(id)
             .bind(ctx.tenant_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .ok_or_else(ApiError::not_found)?;
     require_version(row.get("version"), body.version)?;
@@ -946,25 +972,24 @@ pub async fn deactivate_catalog(
          RETURNING e.id",
     )
     .bind(id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     for r in &affected {
         let eid: Uuid = r.get("id");
-        let e = load_catalog_entry(&mut tx, ctx.tenant_id, eid).await?;
-        write_catalog_history(&mut tx, &ctx, &e, reason.as_deref()).await?;
+        let e = load_catalog_entry(tx, ctx.tenant_id, eid).await?;
+        write_catalog_history(tx, ctx, &e, reason.as_deref()).await?;
     }
     emit(
-        &mut tx,
-        &ctx,
-        &state,
+        tx,
+        ctx,
+        state,
         "catalog.entry.deactivated",
         json!({ "entry_id": id, "kind": row.get::<String, _>("kind"), "code": row.get::<String, _>("code"),
                 "cascaded": affected.len().saturating_sub(1) }),
     )
     .await?;
-    let row = load_catalog_entry(&mut tx, ctx.tenant_id, id).await?;
-    tx.commit().await?;
-    Ok(Json(catalog_json(&row)))
+    let row = load_catalog_entry(tx, ctx.tenant_id, id).await?;
+    Ok(catalog_json(&row))
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,18 +1056,30 @@ pub async fn update_policy(
     .await?;
     let mut tx = state.pool.begin().await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let p = update_policy_in(&mut tx, &ctx, &state, body).await?;
+    tx.commit().await?;
+    Ok(Json(serde_json::to_value(p).map_err(ApiError::internal)?))
+}
+
+/// Apply a tenant policy update inside the caller's transaction.
+pub async fn update_policy_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    body: UpdatePolicy,
+) -> Result<scheduling::Policy, ApiError> {
     // Policies are created lazily with defaults so the first update works.
     sqlx::query(
         "INSERT INTO tenant_scheduling_policies (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING",
     )
     .bind(ctx.tenant_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     sqlx::query("SELECT tenant_id FROM tenant_scheduling_policies WHERE tenant_id = $1 FOR UPDATE")
         .bind(ctx.tenant_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    let cur = scheduling::load_policy(&mut tx, ctx.tenant_id).await?;
+    let cur = scheduling::load_policy(tx, ctx.tenant_id).await?;
     require_version(cur.version, body.version)?;
     let time_zone = match body.time_zone {
         Some(t) => validate_tz(&t)?,
@@ -1147,19 +1184,18 @@ pub async fn update_policy(
     .bind(qe)
     .bind(max_candidates)
     .bind(ctx.user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    let p = scheduling::load_policy(&mut tx, ctx.tenant_id).await?;
+    let p = scheduling::load_policy(tx, ctx.tenant_id).await?;
     emit(
-        &mut tx,
-        &ctx,
-        &state,
+        tx,
+        ctx,
+        state,
         "scheduling.policy.updated",
         json!({ "tenant_id": ctx.tenant_id, "version": p.version }),
     )
     .await?;
-    tx.commit().await?;
-    Ok(Json(serde_json::to_value(p).map_err(ApiError::internal)?))
+    Ok(p)
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,6 +1345,23 @@ pub async fn update_facility_scheduling(
         }),
     )
     .await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let out = update_facility_scheduling_in(&mut tx, &ctx, &state, facility_id, body).await?;
+    tx.commit().await?;
+    Ok(Json(out))
+}
+
+/// Apply a facility scheduling update (hours, zone, location) inside the
+/// caller's transaction.
+pub async fn update_facility_scheduling_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    facility_id: Uuid,
+    body: UpdateFacilityScheduling,
+) -> Result<Value, ApiError> {
+    facility_in_tenant(tx, ctx.tenant_id, facility_id).await?;
     let opening_hours = match &body.opening_hours {
         Some(h) => {
             if h.len() > 21 {
@@ -1336,12 +1389,10 @@ pub async fn update_facility_scheduling(
         None => None,
     };
     let address = clean_optional(body.address_line, "address_line", MAX_TEXT)?;
-    let mut tx = state.pool.begin().await?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
-    let (row, name) = facility_scheduling_row(&mut tx, ctx.tenant_id, facility_id).await?;
+    let (row, name) = facility_scheduling_row(tx, ctx.tenant_id, facility_id).await?;
     sqlx::query("SELECT facility_id FROM facility_scheduling WHERE facility_id = $1 FOR UPDATE")
         .bind(facility_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     require_version(row.get("version"), body.version)?;
     let time_zone = match body.time_zone {
@@ -1391,22 +1442,21 @@ pub async fn update_facility_scheduling(
     .bind(radius)
     .bind(&address)
     .bind(ctx.user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     let row = sqlx::query("SELECT * FROM facility_scheduling WHERE facility_id = $1")
         .bind(facility_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     emit(
-        &mut tx,
-        &ctx,
-        &state,
+        tx,
+        ctx,
+        state,
         "scheduling.facility.updated",
         json!({ "facility_id": facility_id, "version": row.get::<i64, _>("version") }),
     )
     .await?;
-    tx.commit().await?;
-    Ok(Json(facility_json(&row, &name)))
+    Ok(facility_json(&row, &name))
 }
 
 // ---------------------------------------------------------------------------
@@ -1816,6 +1866,22 @@ pub async fn create_resource(
         }),
     )
     .await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let out = create_resource_in(&mut tx, &ctx, &state, body).await?;
+    tx.commit().await?;
+    Ok(Json(out))
+}
+
+/// Create a schedulable resource and its service mappings inside the
+/// caller's transaction. Returns the resource JSON (with `id`).
+pub async fn create_resource_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    body: CreateResource,
+) -> Result<Value, ApiError> {
+    facility_in_tenant(tx, ctx.tenant_id, body.facility_id).await?;
     let rtype = require_code(&body.resource_type_code, "resource_type_code")?;
     let name = clean_required(&body.name, "name", MAX_NAME)?;
     let profession = body
@@ -1830,11 +1896,8 @@ pub async fn create_resource(
     let languages = clean_languages(body.languages)?;
     let capacity = range(body.capacity.unwrap_or(1), 1, 500, "capacity")?;
     let metadata = clean_metadata(body.metadata)?;
-
-    let mut tx = state.pool.begin().await?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
     validate_resource_codes(
-        &mut tx,
+        tx,
         ctx.tenant_id,
         &rtype,
         profession.as_deref(),
@@ -1842,13 +1905,13 @@ pub async fn create_resource(
         &accessibility,
     )
     .await?;
-    check_resource_user(&mut tx, ctx.tenant_id, body.user_id).await?;
+    check_resource_user(tx, ctx.tenant_id, body.user_id).await?;
     let time_zone = match body.time_zone {
         Some(t) => validate_tz(&t)?,
         None => {
             sqlx::query_scalar("SELECT time_zone FROM facility_scheduling WHERE facility_id = $1")
                 .bind(body.facility_id)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?
                 .unwrap_or_else(|| "UTC".to_string())
         }
@@ -1873,22 +1936,21 @@ pub async fn create_resource(
     .bind(&time_zone)
     .bind(&metadata)
     .bind(ctx.user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    replace_resource_services(&mut tx, ctx.tenant_id, id, body.services).await?;
+    replace_resource_services(tx, ctx.tenant_id, id, body.services).await?;
     emit(
-        &mut tx,
-        &ctx,
-        &state,
+        tx,
+        ctx,
+        state,
         "scheduling.resource.created",
         json!({ "resource_id": id, "facility_id": body.facility_id, "resource_type_code": rtype }),
     )
     .await?;
-    let row = load_resource(&mut tx, ctx.tenant_id, id, false).await?;
+    let row = load_resource(tx, ctx.tenant_id, id, false).await?;
     let mut out = resource_json(&row);
-    out["services"] = json!(resource_services(&mut tx, id).await?);
-    tx.commit().await?;
-    Ok(Json(out))
+    out["services"] = json!(resource_services(tx, id).await?);
+    Ok(out)
 }
 
 #[derive(Deserialize)]
@@ -2138,7 +2200,22 @@ pub async fn replace_availability(
     Path(id): Path<Uuid>,
     Json(body): Json<ReplaceAvailability>,
 ) -> Result<Json<Value>, ApiError> {
-    let (allowed, facility_id, _) = resource_manage_guard(&state, &ctx, id).await?;
+    let (allowed, _, _) = resource_manage_guard(&state, &ctx, id).await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let out = replace_availability_in(&mut tx, &ctx, &state, id, body).await?;
+    tx.commit().await?;
+    Ok(Json(out))
+}
+
+/// Replace a resource's weekly availability inside the caller's transaction.
+pub async fn replace_availability_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    id: Uuid,
+    body: ReplaceAvailability,
+) -> Result<Value, ApiError> {
     if body.rules.len() > 70 {
         return Err(ApiError::bad_request(
             "validation_failed",
@@ -2171,13 +2248,12 @@ pub async fn replace_availability(
         }
         validate_dates(r.effective_from, r.effective_to)?;
     }
-    let mut tx = state.pool.begin().await?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
-    let row = load_resource(&mut tx, ctx.tenant_id, id, true).await?;
+    let row = load_resource(tx, ctx.tenant_id, id, true).await?;
+    let facility_id: Uuid = row.get("facility_id");
     require_version(row.get("version"), body.version)?;
     sqlx::query("DELETE FROM resource_availability_rules WHERE resource_id = $1")
         .bind(id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     for r in &body.rules {
         sqlx::query(
@@ -2196,19 +2272,19 @@ pub async fn replace_availability(
         .bind(r.effective_from)
         .bind(r.effective_to)
         .bind(ctx.user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
     sqlx::query(
         "UPDATE schedulable_resources SET version = version + 1, updated_at = now() WHERE id = $1",
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     emit(
-        &mut tx,
-        &ctx,
-        &state,
+        tx,
+        ctx,
+        state,
         "scheduling.resource.availability_replaced",
         json!({ "resource_id": id, "facility_id": facility_id, "rules": body.rules.len() }),
     )
@@ -2218,7 +2294,7 @@ pub async fn replace_availability(
          FROM resource_availability_rules WHERE resource_id = $1 ORDER BY weekday, start_local",
     )
     .bind(id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?
     .iter()
     .map(rule_json)
@@ -2226,12 +2302,9 @@ pub async fn replace_availability(
     let version: i64 =
         sqlx::query_scalar("SELECT version FROM schedulable_resources WHERE id = $1")
             .bind(id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
-    tx.commit().await?;
-    Ok(Json(
-        json!({ "resource_id": id, "version": version, "rules": rules }),
-    ))
+    Ok(json!({ "resource_id": id, "version": version, "rules": rules }))
 }
 
 #[derive(Deserialize)]
@@ -2262,7 +2335,22 @@ pub async fn create_exception(
     Path(id): Path<Uuid>,
     Json(body): Json<CreateException>,
 ) -> Result<Json<Value>, ApiError> {
-    let (allowed, facility_id, _) = resource_manage_guard(&state, &ctx, id).await?;
+    let (allowed, _, _) = resource_manage_guard(&state, &ctx, id).await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let out = create_exception_in(&mut tx, &ctx, &state, id, body).await?;
+    tx.commit().await?;
+    Ok(Json(out))
+}
+
+/// Record a dated resource exception inside the caller's transaction.
+pub async fn create_exception_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    id: Uuid,
+    body: CreateException,
+) -> Result<Value, ApiError> {
     let kind = body.kind.trim();
     if !EXCEPTION_KINDS.contains(&kind) {
         return Err(ApiError::bad_request(
@@ -2288,9 +2376,8 @@ pub async fn create_exception(
         .filter(|s| !s.is_empty())
         .map(|s| require_code(s, "reason_code"))
         .transpose()?;
-    let mut tx = state.pool.begin().await?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
-    load_resource(&mut tx, ctx.tenant_id, id, true).await?;
+    let resource = load_resource(tx, ctx.tenant_id, id, true).await?;
+    let facility_id: Uuid = resource.get("facility_id");
     let ex_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO resource_exceptions (id, tenant_id, resource_id, kind, starts_at, ends_at, capacity_delta,
@@ -2306,7 +2393,7 @@ pub async fn create_exception(
     .bind(delta)
     .bind(&reason_code)
     .bind(ctx.user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     let mut affected_appointments: Vec<Uuid> = Vec::new();
     if kind != "extra_capacity" {
@@ -2319,14 +2406,14 @@ pub async fn create_exception(
         .bind(id)
         .bind(body.starts_at)
         .bind(body.ends_at)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
         for r in &released {
             if let Some(offer_id) = r.get::<Option<Uuid>, _>("offer_id") {
                 scheduling::revoke_offer_for_resource(
-                    &mut tx,
-                    &ctx,
-                    &state,
+                    tx,
+                    ctx,
+                    state,
                     offer_id,
                     "resource_exception",
                 )
@@ -2343,19 +2430,19 @@ pub async fn create_exception(
         .bind(id)
         .bind(body.starts_at)
         .bind(body.ends_at)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     }
     sqlx::query(
         "UPDATE schedulable_resources SET version = version + 1, updated_at = now() WHERE id = $1",
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     emit(
-        &mut tx,
-        &ctx,
-        &state,
+        tx,
+        ctx,
+        state,
         "scheduling.resource.exception_recorded",
         json!({ "resource_id": id, "facility_id": facility_id, "exception_id": ex_id, "kind": kind,
                 "affected_appointments": affected_appointments.len() }),
@@ -2363,12 +2450,11 @@ pub async fn create_exception(
     .await?;
     let row = sqlx::query("SELECT * FROM resource_exceptions WHERE id = $1")
         .bind(ex_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
-    tx.commit().await?;
     let mut out = exception_json(&row);
     out["affected_appointment_ids"] = json!(affected_appointments);
-    Ok(Json(out))
+    Ok(out)
 }
 
 pub async fn delete_exception(
@@ -2473,28 +2559,42 @@ pub async fn replace_requirements(
         manage_ctx(&ctx),
     )
     .await?;
-    let code = require_code(&service_code, "service_code")?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let out = replace_requirements_in(&mut tx, &ctx, &state, &service_code, body).await?;
+    tx.commit().await?;
+    Ok(Json(out))
+}
+
+/// Replace the required resource combination of a service inside the
+/// caller's transaction.
+pub async fn replace_requirements_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    service_code: &str,
+    body: ReplaceRequirements,
+) -> Result<Value, ApiError> {
+    let code = require_code(service_code, "service_code")?;
     if body.requirements.len() > 10 {
         return Err(ApiError::bad_request(
             "validation_failed",
             "requirements accepts at most 10 resource types",
         ));
     }
-    let mut tx = state.pool.begin().await?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
-    scheduling::load_service(&mut tx, ctx.tenant_id, &code).await?;
+    scheduling::load_service(tx, ctx.tenant_id, &code).await?;
     sqlx::query(
         "DELETE FROM service_resource_requirements WHERE tenant_id = $1 AND service_code = $2",
     )
     .bind(ctx.tenant_id)
     .bind(&code)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     let mut out = Vec::new();
     for r in &body.requirements {
         let rtype = require_code(&r.resource_type_code, "requirements.resource_type_code")?;
         scheduling::require_codes(
-            &mut tx,
+            tx,
             ctx.tenant_id,
             "resource_type",
             std::slice::from_ref(&rtype),
@@ -2511,20 +2611,19 @@ pub async fn replace_requirements(
         .bind(&code)
         .bind(&rtype)
         .bind(qty)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         out.push(json!({ "resource_type_code": rtype, "quantity": qty }));
     }
     emit(
-        &mut tx,
-        &ctx,
-        &state,
+        tx,
+        ctx,
+        state,
         "catalog.service_requirements.replaced",
         json!({ "service_code": code, "count": out.len() }),
     )
     .await?;
-    tx.commit().await?;
-    Ok(Json(json!({ "service_code": code, "requirements": out })))
+    Ok(json!({ "service_code": code, "requirements": out }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2654,6 +2753,23 @@ pub async fn create_calendar_event(
         }),
     )
     .await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let out = create_calendar_event_in(&mut tx, &ctx, &state, body).await?;
+    tx.commit().await?;
+    Ok(Json(out))
+}
+
+/// Record an operational calendar event inside the caller's transaction.
+pub async fn create_calendar_event_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    body: CreateCalendarEvent,
+) -> Result<Value, ApiError> {
+    if let Some(f) = body.facility_id {
+        facility_in_tenant(tx, ctx.tenant_id, f).await?;
+    }
     let kind = body.kind.trim();
     if !CALENDAR_KINDS.contains(&kind) {
         return Err(ApiError::bad_request(
@@ -2674,8 +2790,6 @@ pub async fn create_calendar_event(
         if kind == "closure" { 0.0 } else { 1.0 },
         "capacity_multiplier",
     )?;
-    let mut tx = state.pool.begin().await?;
-    allowed.record(&mut tx, &ctx, &state.cell).await?;
     let id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO operational_calendar_events (id, tenant_id, facility_id, kind, name, starts_on, ends_on,
@@ -2692,22 +2806,21 @@ pub async fn create_calendar_event(
     .bind(demand)
     .bind(capacity)
     .bind(ctx.user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     emit(
-        &mut tx,
-        &ctx,
-        &state,
+        tx,
+        ctx,
+        state,
         "scheduling.calendar_event.recorded",
         json!({ "event_id": id, "kind": kind, "facility_id": body.facility_id }),
     )
     .await?;
     let row = sqlx::query("SELECT * FROM operational_calendar_events WHERE id = $1")
         .bind(id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
-    tx.commit().await?;
-    Ok(Json(calendar_json(&row)))
+    Ok(calendar_json(&row))
 }
 
 pub async fn deactivate_calendar_event(

@@ -53,7 +53,7 @@ pub const RESULT_PROMPT_VERSION: &str = "result-summary-openai.v1";
 pub const TRIAGE_PROMPT_VERSION: &str = "triage-proposal-openai.v1";
 pub const RISK_PROMPT_VERSION: &str = "risk-summary-openai.v1";
 pub const NOTE_PROMPT_VERSION: &str = "note-draft-openai.v1";
-pub const ACCESS_INTENT_PROMPT_VERSION: &str = "access-intent-openai.v1";
+pub const ACCESS_INTENT_PROMPT_VERSION: &str = "access-intent-openai.v2";
 pub const APPOINTMENT_RANKING_PROMPT_VERSION: &str = "appointment-ranking-openai.v1";
 pub const CANCELLATION_RECOVERY_PROMPT_VERSION: &str = "cancellation-recovery-openai.v1";
 pub const CAPACITY_EXPLANATION_PROMPT_VERSION: &str = "capacity-explanation-openai.v1";
@@ -632,7 +632,7 @@ impl ModelGateway for OpenAiCompatibleModel {
             "{COMMON_RULES} Task: convert a patient's or staff member's appointment request into \
              structured scheduling constraints. Use only the catalog codes supplied; when nothing \
              matches, leave the field null or empty and ask for the information in \
-             missing_information. Never diagnose, never rate urgency: set clinical_triage_suggested \
+             missing_information; never ask about a field listed in already_known. Never diagnose, never rate urgency: set clinical_triage_suggested \
              only when the text describes symptoms a clinician should see before scheduling, with \
              the reason in triage_reasons. {} Output schema: {{\"service_code\": string|null, \
              \"specialty_code\": string|null, \"modality_codes\": string[], \"facility_codes\": string[], \
@@ -650,6 +650,7 @@ impl ModelGateway for OpenAiCompatibleModel {
             "template": req.template,
             "language": req.language,
             "text": req.free_text,
+            "already_known": req.already_known,
             "catalog": {
                 "service": req.services,
                 "specialty": req.specialties,

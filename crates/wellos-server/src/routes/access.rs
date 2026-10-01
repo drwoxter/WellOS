@@ -531,6 +531,31 @@ pub async fn apply_constraints(
 }
 
 /// Questions still open before a matcher run can be attempted.
+/// Structured fields the request already carries; the intent model is told
+/// not to ask for them again.
+pub fn known_constraint_fields(c: &Constraints) -> Vec<String> {
+    let mut out = Vec::new();
+    if c.service_code.is_some() || c.specialty_code.is_some() {
+        out.push("service".to_string());
+    }
+    if !c.modality_codes.is_empty() {
+        out.push("modality".to_string());
+    }
+    if !c.preferred_windows.is_empty() {
+        out.push("preferred_windows".to_string());
+    }
+    if !c.facility_ids.is_empty() {
+        out.push("facility".to_string());
+    }
+    if c.language.is_some() {
+        out.push("language".to_string());
+    }
+    if !c.accessibility_codes.is_empty() {
+        out.push("accessibility".to_string());
+    }
+    out
+}
+
 pub fn missing_information(c: &Constraints) -> Vec<String> {
     let mut m = Vec::new();
     if c.service_code.is_none() {
@@ -740,13 +765,8 @@ pub async fn create_request_in(
             ));
         }
     }
-    let constraints = apply_constraints(
-        tx,
-        ctx.tenant_id,
-        &Constraints::default(),
-        body.constraints,
-    )
-    .await?;
+    let constraints =
+        apply_constraints(tx, ctx.tenant_id, &Constraints::default(), body.constraints).await?;
     let missing = missing_information(&constraints);
     let id = Uuid::now_v7();
     let (urgency_value, urgency_source) = match urgency {
@@ -1580,6 +1600,7 @@ pub async fn interpret_request_for(
         language: language.clone(),
         free_text,
         urgency: r.urgency,
+        already_known: known_constraint_fields(&r.constraints),
         services: vocabulary(&mut tx, r.tenant_id, "clinical_service").await?,
         specialties: vocabulary(&mut tx, r.tenant_id, "specialty").await?,
         modalities: vocabulary(&mut tx, r.tenant_id, "modality").await?,
@@ -1947,6 +1968,7 @@ pub struct MatcherRun {
 /// verbatim, revoke live offers of earlier runs and materialize the new
 /// candidates as offers. Deterministic only; dMind ranking happens after
 /// commit in [`run_matcher_for`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_matcher_in(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ctx: &AuthContext,
@@ -2897,34 +2919,7 @@ pub async fn hold_offer_for(
 ) -> Result<OfferRow, ApiError> {
     ratelimit::enforce_for_principal(state, ctx, ratelimit::Family::Scheduling).await?;
     let mut tx = state.pool.begin().await?;
-    let o = scheduling::lock_offer(&mut tx, o.id).await?;
-    require_version(o.version, body.version)?;
-    if o.status == OfferStatus::Held {
-        if o.hold_expires_at.is_some_and(|h| h > Utc::now()) {
-            tx.commit().await?;
-            return Ok(o);
-        }
-        // Lapsed hold: release then re-hold below.
-        scheduling::release_offer_bookings(&mut tx, o.id).await?;
-        scheduling::transition_offer(
-            &mut tx,
-            &o,
-            OfferTransition::ReleaseHold,
-            None,
-            Some("hold_lapsed"),
-            &scheduling::actor_label(ctx),
-        )
-        .await?;
-    }
-    let o = scheduling::lock_offer(&mut tx, o.id).await?;
-    if o.status.apply(OfferTransition::Hold).is_err() {
-        return Err(ApiError::conflict(
-            "invalid_transition",
-            format!("an offer in status {} cannot be held", o.status.as_str()),
-        ));
-    }
-    let policy = scheduling::load_policy(&mut tx, o.tenant_id).await?;
-    let held = match scheduling::hold_offer(&mut tx, ctx, state, &o, &policy).await {
+    let held = match hold_offer_in(&mut tx, ctx, state, o.id, body.version).await {
         Ok(h) => h,
         Err(e) if e.code == "slot_taken" => {
             drop(tx);
@@ -2935,6 +2930,45 @@ pub async fn hold_offer_for(
     };
     tx.commit().await?;
     Ok(held)
+}
+
+/// Transaction-scoped core of [`hold_offer_for`]: lock, re-hold a lapsed
+/// hold, and place the atomic hold. The caller owns the transaction (route
+/// wrappers, fixtures).
+pub async fn hold_offer_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    offer_id: Uuid,
+    version: Option<i64>,
+) -> Result<OfferRow, ApiError> {
+    let o = scheduling::lock_offer(tx, offer_id).await?;
+    require_version(o.version, version)?;
+    if o.status == OfferStatus::Held {
+        if o.hold_expires_at.is_some_and(|h| h > Utc::now()) {
+            return Ok(o);
+        }
+        // Lapsed hold: release then re-hold below.
+        scheduling::release_offer_bookings(tx, o.id).await?;
+        scheduling::transition_offer(
+            tx,
+            &o,
+            OfferTransition::ReleaseHold,
+            None,
+            Some("hold_lapsed"),
+            &scheduling::actor_label(ctx),
+        )
+        .await?;
+    }
+    let o = scheduling::lock_offer(tx, o.id).await?;
+    if o.status.apply(OfferTransition::Hold).is_err() {
+        return Err(ApiError::conflict(
+            "invalid_transition",
+            format!("an offer in status {} cannot be held", o.status.as_str()),
+        ));
+    }
+    let policy = scheduling::load_policy(tx, o.tenant_id).await?;
+    scheduling::hold_offer(tx, ctx, state, &o, &policy).await
 }
 
 async fn hold_offer_route(
@@ -3121,6 +3155,63 @@ pub async fn accept_offer_for(
     let reschedule_reason =
         scheduling::clean_text(body.reschedule_reason, "reschedule_reason", MAX_REASON)?;
     let mut tx = state.pool.begin().await?;
+    let input = AcceptInput {
+        offer_id: o.id,
+        version: body.version,
+        reason,
+        override_reason,
+        idempotency_key,
+        reschedule_of: body.reschedule_of,
+        reschedule_reason,
+        booked_via,
+    };
+    let a = match accept_offer_in(&mut tx, ctx, state, input).await {
+        Ok(a) => a,
+        Err(e) if e.code == "slot_taken" => {
+            drop(tx);
+            scheduling::record_race_lost(state, ctx, o.id, "accept").await;
+            return Err(e);
+        }
+        Err(e) => return Err(e),
+    };
+    tx.commit().await?;
+    Ok(a)
+}
+
+/// Validated acceptance parameters for [`accept_offer_in`].
+pub struct AcceptInput<'a> {
+    pub offer_id: Uuid,
+    pub version: Option<i64>,
+    pub reason: Option<String>,
+    pub override_reason: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub reschedule_of: Option<Uuid>,
+    pub reschedule_reason: Option<String>,
+    /// `staff`, `patient` or `representative`; recovery offers are recorded
+    /// as `waitlist` whichever channel accepted them.
+    pub booked_via: &'a str,
+}
+
+/// Transaction-scoped core of [`accept_offer_for`]. The caller owns the
+/// transaction (route wrappers, fixtures).
+pub async fn accept_offer_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    input: AcceptInput<'_>,
+) -> Result<AppointmentRow, ApiError> {
+    let AcceptInput {
+        offer_id,
+        version,
+        reason,
+        override_reason,
+        idempotency_key,
+        reschedule_of,
+        reschedule_reason,
+        booked_via,
+    } = input;
+    let by_patient = matches!(booked_via, "patient" | "representative");
+    let o = scheduling::load_offer(tx, offer_id).await?;
     if let Some(key) = &idempotency_key {
         if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM appointments WHERE tenant_id = $1 AND booked_by = $2 AND idempotency_key = $3",
@@ -3128,36 +3219,27 @@ pub async fn accept_offer_for(
         .bind(o.tenant_id)
         .bind(ctx.user_id)
         .bind(key)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         {
-            let a = scheduling::load_appointment(&mut tx, existing).await?;
+            let a = scheduling::load_appointment(tx, existing).await?;
             if a.offer_id != Some(o.id) {
                 return Err(ApiError::conflict(
                     "idempotency_conflict",
                     "this idempotency key was used for a different offer",
                 ));
             }
-            tx.commit().await?;
             return Ok(a);
         }
     }
-    let o = scheduling::lock_offer(&mut tx, o.id).await?;
-    require_version(o.version, body.version)?;
-    let policy = scheduling::load_policy(&mut tx, o.tenant_id).await?;
+    let o = scheduling::lock_offer(tx, o.id).await?;
+    require_version(o.version, version)?;
+    let policy = scheduling::load_policy(tx, o.tenant_id).await?;
     // Acceptance always goes through a hold: an un-held offer takes its
     // atomic hold here, in the same transaction, so a concurrent acceptance of
     // the same capacity loses on the booking exclusion rather than racing.
     let o = if o.status == OfferStatus::Offered {
-        match scheduling::hold_offer(&mut tx, ctx, state, &o, &policy).await {
-            Ok(h) => h,
-            Err(e) if e.code == "slot_taken" => {
-                drop(tx);
-                scheduling::record_race_lost(state, ctx, o.id, "accept").await;
-                return Err(e);
-            }
-            Err(e) => return Err(e),
-        }
+        scheduling::hold_offer(tx, ctx, state, &o, &policy).await?
     } else {
         o
     };
@@ -3170,7 +3252,7 @@ pub async fn accept_offer_for(
             ),
         ));
     }
-    let service = scheduling::load_service(&mut tx, o.tenant_id, &o.service_code).await?;
+    let service = scheduling::load_service(tx, o.tenant_id, &o.service_code).await?;
     let now = Utc::now();
     let notice_ok = o.starts_at - now >= Duration::hours(policy.min_notice_hours as i64);
     if !notice_ok && override_reason.is_none() {
@@ -3182,9 +3264,9 @@ pub async fn accept_offer_for(
             ),
         ));
     }
-    let prior = match body.reschedule_of {
+    let prior = match reschedule_of {
         Some(id) => {
-            let a = scheduling::lock_appointment(&mut tx, id).await?;
+            let a = scheduling::lock_appointment(tx, id).await?;
             if a.tenant_id != o.tenant_id || a.patient_id != o.patient_id {
                 return Err(ApiError::not_found());
             }
@@ -3233,17 +3315,7 @@ pub async fn accept_offer_for(
         reschedule_reason: reschedule_reason
             .or_else(|| prior.as_ref().map(|_| RESCHEDULE_REASON.to_string())),
     };
-    let a = match scheduling::confirm_offer(&mut tx, ctx, state, input, &policy, &service).await {
-        Ok(a) => a,
-        Err(e) if e.code == "slot_taken" => {
-            drop(tx);
-            scheduling::record_race_lost(state, ctx, o.id, "accept").await;
-            return Err(e);
-        }
-        Err(e) => return Err(e),
-    };
-    tx.commit().await?;
-    Ok(a)
+    scheduling::confirm_offer(tx, ctx, state, input, &policy, &service).await
 }
 
 async fn accept_offer_route(
@@ -3788,6 +3860,69 @@ pub struct RescheduleOptionsBody {
 /// service (linked through `reschedule_of`) is submitted and matched. The
 /// existing appointment stays confirmed until an option is accepted with
 /// `reschedule_of`, which moves the visit atomically.
+/// Transactional core of [`reschedule_options_for`]: opens the reschedule
+/// access request (`reschedule_of` bound to the locked appointment) with
+/// its history and audit rows. Policy/window checks belong to the caller.
+pub async fn open_reschedule_request_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    a: &AppointmentRow,
+    channel: &str,
+    reason: Option<String>,
+    mut input: ConstraintsInput,
+) -> Result<RequestRow, ApiError> {
+    let by_patient = channel != "staff";
+    let base = Constraints {
+        service_code: Some(a.service_code.clone()),
+        modality_codes: vec![a.modality_code.clone()],
+        facility_ids: vec![a.facility_id],
+        reschedule_of: Some(a.id),
+        ..Constraints::default()
+    };
+    input.service_code = None;
+    let constraints = apply_constraints(tx, a.tenant_id, &base, input).await?;
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO access_requests (id, tenant_id, patient_id, facility_id, status, channel, free_text,
+             constraints, missing_info, urgency, urgency_source, created_by)
+         VALUES ($1,$2,$3,$4,'submitted',$5,NULL,$6,'{}','routine','default',$7)",
+    )
+    .bind(id)
+    .bind(a.tenant_id)
+    .bind(a.patient_id)
+    .bind(constraints.facility_ids.first().copied())
+    .bind(channel)
+    .bind(serde_json::to_value(&constraints).map_err(ApiError::internal)?)
+    .bind(ctx.user_id)
+    .execute(&mut **tx)
+    .await?;
+    let actor = scheduling::actor_label(ctx);
+    request_history(tx, a.tenant_id, id, None, "draft", None, &actor).await?;
+    request_history(
+        tx,
+        a.tenant_id,
+        id,
+        Some("draft"),
+        "submitted",
+        Some(RESCHEDULE_REASON),
+        &actor,
+    )
+    .await?;
+    audit::emit(
+        &mut **tx,
+        ctx,
+        "appointment.reschedule_requested",
+        &state.cell,
+        json!({ "appointment_id": a.id, "patient_id": a.patient_id, "access_request_id": id,
+                "reason": reason, "by_patient": by_patient }),
+        None,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    load_request(tx, a.tenant_id, id).await
+}
+
 pub async fn reschedule_options_for(
     state: &AppState,
     ctx: &AuthContext,
@@ -3826,55 +3961,8 @@ pub async fn reschedule_options_for(
             ),
         ));
     }
-    let base = Constraints {
-        service_code: Some(a.service_code.clone()),
-        modality_codes: vec![a.modality_code.clone()],
-        facility_ids: vec![a.facility_id],
-        reschedule_of: Some(a.id),
-        ..Constraints::default()
-    };
-    let mut input = body.constraints;
-    input.service_code = None;
-    let constraints = apply_constraints(&mut tx, a.tenant_id, &base, input).await?;
-    let id = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO access_requests (id, tenant_id, patient_id, facility_id, status, channel, free_text,
-             constraints, missing_info, urgency, urgency_source, created_by)
-         VALUES ($1,$2,$3,$4,'submitted',$5,NULL,$6,'{}','routine','default',$7)",
-    )
-    .bind(id)
-    .bind(a.tenant_id)
-    .bind(a.patient_id)
-    .bind(constraints.facility_ids.first().copied())
-    .bind(channel)
-    .bind(serde_json::to_value(&constraints).map_err(ApiError::internal)?)
-    .bind(ctx.user_id)
-    .execute(&mut *tx)
-    .await?;
-    let actor = scheduling::actor_label(ctx);
-    request_history(&mut tx, a.tenant_id, id, None, "draft", None, &actor).await?;
-    request_history(
-        &mut tx,
-        a.tenant_id,
-        id,
-        Some("draft"),
-        "submitted",
-        Some(RESCHEDULE_REASON),
-        &actor,
-    )
-    .await?;
-    audit::emit(
-        &mut *tx,
-        ctx,
-        "appointment.reschedule_requested",
-        &state.cell,
-        json!({ "appointment_id": a.id, "patient_id": a.patient_id, "access_request_id": id,
-                "reason": reason, "by_patient": by_patient }),
-        None,
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let r = load_request(&mut tx, a.tenant_id, id).await?;
+    let r = open_reschedule_request_in(&mut tx, ctx, state, &a, channel, reason, body.constraints)
+        .await?;
     tx.commit().await?;
     run_matcher_for(
         state,
@@ -3950,9 +4038,42 @@ pub async fn close_appointment_for(
         ));
     }
     let mut tx = state.pool.begin().await?;
-    let a = scheduling::lock_appointment(&mut tx, a.id).await?;
-    require_version(a.version, body.version)?;
-    let policy = scheduling::load_policy(&mut tx, a.tenant_id).await?;
+    let a = close_appointment_in(
+        &mut tx,
+        ctx,
+        state,
+        a.id,
+        body.version,
+        t,
+        scheduling::CloseInput {
+            reason_code,
+            note,
+            override_reason,
+            by_patient,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(a)
+}
+
+/// Transaction-scoped core of [`close_appointment_for`]: policy windows and
+/// override requirements are enforced here, then the appointment and its
+/// linked visit close together. The caller owns the transaction.
+pub async fn close_appointment_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ctx: &AuthContext,
+    state: &AppState,
+    appointment_id: Uuid,
+    version: Option<i64>,
+    t: AppointmentTransition,
+    input: scheduling::CloseInput,
+) -> Result<AppointmentRow, ApiError> {
+    let by_patient = input.by_patient;
+    let override_reason = input.override_reason.clone();
+    let a = scheduling::lock_appointment(tx, appointment_id).await?;
+    require_version(a.version, version)?;
+    let policy = scheduling::load_policy(tx, a.tenant_id).await?;
     let now = Utc::now();
     // Staff cancelling inside the patient window act on the patient's
     // behalf and must say why.
@@ -3984,23 +4105,7 @@ pub async fn close_appointment_for(
             "this appointment has not started yet; an override reason is required",
         ));
     }
-    let a = scheduling::close_appointment(
-        &mut tx,
-        ctx,
-        state,
-        &a,
-        t,
-        scheduling::CloseInput {
-            reason_code,
-            note,
-            override_reason,
-            by_patient,
-        },
-        &policy,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(a)
+    scheduling::close_appointment(tx, ctx, state, &a, t, input, &policy).await
 }
 
 async fn close_route(

@@ -466,6 +466,19 @@ fn location_config_from_env(env: RuntimeEnv) -> anyhow::Result<LocationConfig> {
             "WELLOS_LOCATION_ENCRYPTION_KEYS and WELLOS_LOCATION_ENCRYPTION_ACTIVE_KEY must be set together"
         ),
     };
+    // Fixture builds running locally share one deterministic synthetic key
+    // so the seeded transport fixtures stay readable by the local server.
+    // Production binaries have no fixtures compiled in and keep failing
+    // closed without an operator-configured keyring.
+    #[cfg(feature = "dev-fixtures")]
+    let keyring = if keyring.is_none() && !env.is_deployed() {
+        tracing::warn!(
+            "no location encryption keyring configured: using the synthetic dev-fixtures key (local {env} only)"
+        );
+        Some(crate::crypto::Keyring::synthetic("local-dev-fixtures"))
+    } else {
+        keyring
+    };
     if keyring.is_none() && env.is_deployed() {
         tracing::warn!(
             "no location encryption keyring configured: transport/location retention is unavailable (fail closed)"
