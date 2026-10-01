@@ -52,6 +52,7 @@ function FindStage({
   reschedule,
   patient,
   onPickPatient,
+  onBooked,
   onDone,
 }: {
   lang: Lang;
@@ -59,6 +60,7 @@ function FindStage({
   reschedule: Appointment | null;
   patient: PatientOption | null;
   onPickPatient: (p: PatientOption | null) => void;
+  onBooked: () => void;
   onDone: () => void;
 }) {
   if (!request && !reschedule && !patient) {
@@ -106,7 +108,7 @@ function FindStage({
         initialPatientId={patient?.id ?? reschedule?.patient_id ?? null}
         initialRequest={request}
         rescheduleOf={reschedule}
-        onBooked={onDone}
+        onBooked={onBooked}
         headingId="find-h"
       />
     </section>
@@ -244,6 +246,7 @@ function SchedulingConsole() {
             reschedule={reschedule}
             patient={patient}
             onPickPatient={setPatient}
+            onBooked={bump}
             onDone={() => {
               setOpenRequest(null);
               setReschedule(null);

@@ -15,10 +15,21 @@
    ├── B4: SQLx (parameterized, tenant-scoped) ──▶ [PostgreSQL]
    │        same txn: clinical write + rule eval + audit + outbox
    │
-   └── B5: after commit ──▶ [dMind gateway → disabled | openai_compatible | fake*]
-            capability + consent + allow_external_ai + quota/reuse gate;
-            input hash recorded; *fake only in dev-fixtures builds in
-            development/test; egress only to allowlisted HTTPS hosts
+   ├── B5: after commit ──▶ [dMind gateway → disabled | openai_compatible | fake*]
+   │        capability + consent + allow_external_ai + quota/reuse gate;
+   │        input hash recorded; *fake only in dev-fixtures builds in
+   │        development/test; egress only to allowlisted HTTPS hosts
+   │
+   ├── B6: /api/v1/me/* ──▶ patient set derived from active patient_access_grants
+   │        of the authenticated subject; never from a client patient_id
+   │
+   ├── B7: calendar import ──▶ in-memory ICS parse (bounded) ──▶ busy intervals only
+   │        (no titles/attendees/raw file); scheduling_calendar consent
+   │
+   └── B8: scheduling worker (same binary, PostgreSQL-locked claims)
+            hold expiry, offer expiry/cascade, reminders, notification
+            delivery → in-app | SMTP (TLS) | signed webhook (HTTPS allowlist),
+            live-location purge; adapters disabled by default
 ```
 
 ## Boundaries
@@ -84,6 +95,28 @@
   providers exist only in `dev-fixtures` builds in development/test and are
   flagged `synthetic` on every artifact and capability report.
 
+- **B6 Patient self-service**: `/api/v1/me/...` never trusts a browser
+  `patient_id`. The accessible patient set is the active, unexpired,
+  unrevoked `patient_access_grants` for the OIDC subject; a patient outside
+  that set yields the same `not_found` as a missing one. The
+  `patient_representative` role has scheduling permissions only — no chart,
+  results, notes or risk. Grants are issued by staff after audited
+  verification.
+- **B7 Personal calendars**: `.ics` files are parsed in memory under hard
+  bounds and only normalised busy intervals, time zone, source type and an
+  integrity hash are stored; staff never see intervals, only the matcher's
+  "patient unavailable" reason. Disconnect deletes derived data; connect,
+  sync and disconnect are audited.
+- **B8 Worker and notification egress**: scheduling jobs claim rows with
+  `FOR UPDATE SKIP LOCKED` so replicas never deliver twice. External delivery
+  is disabled by default; SMTP requires TLS and the push webhook is
+  HMAC-SHA256 signed and restricted to allowlisted HTTPS hosts without
+  redirects. Payloads and subjects carry identifiers, kind, time and locale,
+  never clinical content. Retained addresses and live transport coordinates
+  are AES-256-GCM encrypted under a configured keyring; the capability fails
+  closed in staging/production without one, and live positions are purged
+  after their TTL.
+
 ## Data classes
 
 | Class | Examples | Handling |
@@ -91,3 +124,7 @@
 | Clinical (synthetic today) | observations, conditions | tenant-scoped tables only; never in logs/events/telemetry |
 | Governance | audit, break-glass, consent, rule evaluations | append-only; restricted read (audit roles) |
 | Operational | health/ready, counts | PHI-free by construction |
+| Scheduling | appointments, holds, access requests, waitlist, matcher runs | tenant/facility-scoped; patient reads via grants only; score decomposition visible to staff |
+| Personal calendar | busy intervals, time zone, source hash | derived data only; consent-gated; deleted on disconnect; never shown to staff |
+| Location / transport | origin area, retained addresses, live coordinates | one-time in-memory for matching; retained values encrypted (AES-256-GCM, keyring); reads audited and limited to `transport.coordinate`; live positions expire |
+| Notifications | outbox rows, delivery attempts | ids/kind/time/locale only in subjects, logs and webhook payloads; adapter secrets from environment only |

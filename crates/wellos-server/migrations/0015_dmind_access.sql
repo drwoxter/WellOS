@@ -365,7 +365,7 @@ CREATE UNIQUE INDEX appointments_idempotency ON appointments (tenant_id, booked_
 -- A patient holds at most one live appointment per service at a time.
 CREATE UNIQUE INDEX appointments_one_live_per_patient_slot
     ON appointments (tenant_id, patient_id, starts_at)
-    WHERE status IN ('confirmed', 'rescheduled');
+    WHERE status = 'confirmed';
 
 ALTER TABLE access_requests
     ADD CONSTRAINT access_requests_appointment_fkey FOREIGN KEY (appointment_id) REFERENCES appointments(id);

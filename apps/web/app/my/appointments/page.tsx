@@ -907,10 +907,7 @@ export default function MyAppointmentsPage() {
                       initialResult={findSeed.result ?? null}
                       rescheduleOf={findSeed.rescheduleOf ?? null}
                       headingId="me-find-h"
-                      onBooked={() => {
-                        bump();
-                        setTab("appointments");
-                      }}
+                      onBooked={bump}
                       onRequestChanged={bump}
                     />
                   </div>

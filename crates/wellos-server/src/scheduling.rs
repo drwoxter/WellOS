@@ -863,7 +863,7 @@ pub async fn load_patient_facts(
     // The patient's own live appointments are busy time too.
     let own: Vec<Interval> = sqlx::query(
         "SELECT starts_at, ends_at FROM appointments
-         WHERE tenant_id = $1 AND patient_id = $2 AND status IN ('confirmed','rescheduled')
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'confirmed'
            AND ends_at > $3 AND starts_at < $4",
     )
     .bind(tenant_id)

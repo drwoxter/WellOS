@@ -223,7 +223,7 @@ pub async fn assemble_inputs(
         "SELECT (starts_at AT TIME ZONE $4)::date AS day, count(*)::int AS confirmed
          FROM appointments
          WHERE tenant_id = $1 AND facility_id = $2 AND service_code = $3
-           AND status IN ('confirmed', 'rescheduled')
+           AND status = 'confirmed'
            AND starts_at >= $5 AND starts_at < $6
          GROUP BY 1",
     )

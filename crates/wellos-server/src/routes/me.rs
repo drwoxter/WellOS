@@ -704,7 +704,9 @@ async fn list_appointments(
         "SELECT id FROM appointments
          WHERE tenant_id = $1 AND patient_id = $2
            AND ($3::text IS NULL OR status = $3)
-           AND ($4 = 'all' OR ($4 = 'upcoming' AND ends_at >= now()) OR ($4 = 'past' AND ends_at < now()))
+           AND ($4 = 'all'
+                OR ($4 = 'upcoming' AND ends_at >= now() AND status = 'confirmed')
+                OR ($4 = 'past' AND (ends_at < now() OR status <> 'confirmed')))
          ORDER BY CASE WHEN $4 = 'past' THEN -extract(epoch from starts_at) ELSE extract(epoch from starts_at) END, id
          LIMIT $5",
     )

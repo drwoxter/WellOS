@@ -731,6 +731,39 @@ async fn representative_books_for_one_of_several_dependants() {
         .await
         .unwrap();
     assert_eq!(visit_status, "cancelled");
+
+    // A cancelled future appointment leaves "upcoming" and is kept in history.
+    let ids = |v: &Value| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| s(&a["id"]))
+            .collect()
+    };
+    let (st, up) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/appointments?patient_id={child_a}&range=upcoming"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{up}");
+    assert!(!ids(&up).contains(&aid), "cancelled still upcoming: {up}");
+    let (st, past) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/appointments?patient_id={child_a}&range=past"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{past}");
+    assert!(
+        ids(&past).contains(&aid),
+        "cancelled missing from history: {past}"
+    );
 }
 
 #[tokio::test]
