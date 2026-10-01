@@ -366,6 +366,122 @@ where
     Ok(())
 }
 
+fn uuid_field(v: &Value, key: &str) -> Option<Uuid> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse().ok())
+}
+
+/// Attach display labels to offer/appointment JSON so neither console has to
+/// resolve ids itself: `facility_name`, a bilingual `service` and, for every
+/// `resources[]` entry (and `primary_resource_id`), the resource `name` and
+/// `resource_type_code`. Batched and tenant-scoped; ids outside the tenant
+/// stay unlabelled.
+pub async fn attach_scheduling_labels(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    items: &mut [Value],
+) -> Result<(), ApiError> {
+    let mut facility_ids = BTreeSet::new();
+    let mut service_codes = BTreeSet::new();
+    let mut resource_ids = BTreeSet::new();
+    for item in items.iter() {
+        if let Some(f) = uuid_field(item, "facility_id") {
+            facility_ids.insert(f);
+        }
+        if let Some(code) = item.get("service_code").and_then(Value::as_str) {
+            service_codes.insert(code.to_string());
+        }
+        if let Some(r) = uuid_field(item, "primary_resource_id") {
+            resource_ids.insert(r);
+        }
+        if let Some(list) = item.get("resources").and_then(Value::as_array) {
+            for r in list {
+                if let Some(id) = uuid_field(r, "resource_id") {
+                    resource_ids.insert(id);
+                }
+            }
+        }
+    }
+    if facility_ids.is_empty() && service_codes.is_empty() && resource_ids.is_empty() {
+        return Ok(());
+    }
+    let facilities: BTreeMap<Uuid, String> =
+        sqlx::query("SELECT id, name FROM facilities WHERE tenant_id = $1 AND id = ANY($2)")
+            .bind(tenant_id)
+            .bind(facility_ids.iter().copied().collect::<Vec<_>>())
+            .fetch_all(&mut *conn)
+            .await?
+            .iter()
+            .map(|r| (r.get("id"), r.get("name")))
+            .collect();
+    let services: BTreeMap<String, Value> = sqlx::query(
+        "SELECT code, name_en, name_es FROM catalog_entries
+         WHERE tenant_id = $1 AND kind = 'clinical_service' AND code = ANY($2)",
+    )
+    .bind(tenant_id)
+    .bind(service_codes.iter().cloned().collect::<Vec<_>>())
+    .fetch_all(&mut *conn)
+    .await?
+    .iter()
+    .map(|r| {
+        let code: String = r.get("code");
+        (
+            code.clone(),
+            json!({
+                "code": code,
+                "name_en": r.get::<String, _>("name_en"),
+                "name_es": r.get::<String, _>("name_es"),
+            }),
+        )
+    })
+    .collect();
+    let resources: BTreeMap<Uuid, (String, String)> = sqlx::query(
+        "SELECT id, name, resource_type_code FROM schedulable_resources
+         WHERE tenant_id = $1 AND id = ANY($2)",
+    )
+    .bind(tenant_id)
+    .bind(resource_ids.iter().copied().collect::<Vec<_>>())
+    .fetch_all(&mut *conn)
+    .await?
+    .iter()
+    .map(|r| (r.get("id"), (r.get("name"), r.get("resource_type_code"))))
+    .collect();
+    for item in items.iter_mut() {
+        if let Some(name) = uuid_field(item, "facility_id").and_then(|f| facilities.get(&f)) {
+            item["facility_name"] = json!(name);
+        }
+        if let Some(s) = item
+            .get("service_code")
+            .and_then(Value::as_str)
+            .and_then(|c| services.get(c))
+        {
+            if item.get("service").is_none_or(Value::is_null) {
+                item["service"] = s.clone();
+            }
+        }
+        if let Some((name, kind)) =
+            uuid_field(item, "primary_resource_id").and_then(|r| resources.get(&r))
+        {
+            item["primary_resource"] = json!({
+                "name": name,
+                "resource_type_code": kind,
+            });
+        }
+        if let Some(list) = item.get_mut("resources").and_then(Value::as_array_mut) {
+            for r in list.iter_mut() {
+                if let Some((name, kind)) =
+                    uuid_field(r, "resource_id").and_then(|id| resources.get(&id))
+                {
+                    r["name"] = json!(name);
+                    r["resource_type_code"] = json!(kind);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The tenant's active `clinical_service` entry for `code`, or 400.
 pub async fn load_service(
     conn: &mut PgConnection,

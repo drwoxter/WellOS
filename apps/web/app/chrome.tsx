@@ -67,10 +67,17 @@ function NavLinks() {
   const { lang, meta } = useSession();
   const pathname = usePathname();
   const roles = meta?.user.roles ?? [];
+  const sched = meta?.scheduling_capabilities;
   const links = [
     { href: "/dashboard", label: t(lang, "navHome") },
+    ...(sched?.self_service
+      ? [{ href: "/my/appointments", label: t(lang, "navMyAppointments") }]
+      : []),
     ...(canSearchPatients(roles)
       ? [{ href: "/patients", label: t(lang, "navPatients") }]
+      : []),
+    ...(sched?.can_read
+      ? [{ href: "/scheduling", label: t(lang, "navScheduling") }]
       : []),
     ...(canReadVisits(roles)
       ? [{ href: "/access", label: t(lang, "navAccess") }]

@@ -85,6 +85,20 @@ pub async fn tenant_meta(
                 })
             })
             .collect::<Vec<_>>();
+    // Tenant-level scheduling capability hints (any assignment); facility
+    // scoping is still enforced per request by the policy layer.
+    let allows_any = |action: &str| ctx.assignments.iter().any(|a| role_allows(&a.role, action));
+    let scheduling_capabilities = json!({
+        "can_read": allows_any(actions::SCHEDULING_READ),
+        "can_manage": allows_any(actions::SCHEDULING_MANAGE),
+        "can_manage_catalog": allows_any(actions::CATALOG_MANAGE),
+        "can_manage_resources": allows_any(actions::RESOURCE_MANAGE),
+        "can_manage_waitlist": allows_any(actions::WAITLIST_MANAGE),
+        "can_coordinate_transport": allows_any(actions::TRANSPORT_COORDINATE),
+        "can_review_capacity": allows_any(actions::CAPACITY_REVIEW),
+        "can_manage_grants": allows_any(actions::PATIENT_GRANT_MANAGE),
+        "self_service": allows_any(actions::PATIENT_SELF_SERVICE),
+    });
     Ok(Json(json!({
         "tenant": {
             "id": ctx.tenant_id,
@@ -103,6 +117,7 @@ pub async fn tenant_meta(
             "synthetic_data": row.get::<String,_>("data_class") == "synthetic",
         },
         "ai_capabilities": aigov::capabilities(&state),
+        "scheduling_capabilities": scheduling_capabilities,
     })))
 }
 

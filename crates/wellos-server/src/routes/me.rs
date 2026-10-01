@@ -16,6 +16,7 @@
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
+use crate::notify;
 use crate::policy::{actions, ResourceCtx};
 use crate::ratelimit;
 use crate::routes::access::{
@@ -300,10 +301,11 @@ async fn own_request(
 /// were excluded) so the patient can see how options were produced.
 async fn request_view(conn: &mut PgConnection, r: &access::RequestRow) -> Result<Value, ApiError> {
     let offers = access::offers_for_request(conn, r).await?;
+    let offers = access::labelled_offers(conn, r.tenant_id, &offers).await?;
     let run = access::latest_run(conn, r.tenant_id, r.id).await?;
     Ok(json!({
         "request": access::request_json(r),
-        "offers": offers.iter().map(scheduling::offer_json).collect::<Vec<_>>(),
+        "offers": offers,
         "matcher_run": run,
     }))
 }
@@ -329,7 +331,7 @@ async fn request_offers(
     allowed.record(&mut conn, &ctx, &state.cell).await?;
     let offers = access::offers_for_request(&mut conn, &r).await?;
     Ok(Json(json!({
-        "items": offers.iter().map(scheduling::offer_json).collect::<Vec<_>>(),
+        "items": access::labelled_offers(&mut conn, r.tenant_id, &offers).await?,
     })))
 }
 
@@ -472,7 +474,7 @@ async fn match_request(
         "patient",
     )
     .await?;
-    Ok(Json(access::match_result_json(&m)))
+    Ok(Json(access::match_result_labelled(&state, &m).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +531,7 @@ async fn list_offers(
         let o = access::load_offer_scoped(&mut conn, g.tenant_id, id).await?;
         items.push(scheduling::offer_json(&o));
     }
+    scheduling::attach_scheduling_labels(&mut conn, g.tenant_id, &mut items).await?;
     Ok(Json(json!({ "patient_id": g.patient_id, "items": items })))
 }
 
@@ -715,8 +718,11 @@ async fn list_appointments(
     let mut items = Vec::with_capacity(ids.len());
     for id in ids {
         let a = access::load_appointment_scoped(&mut conn, g.tenant_id, id).await?;
-        items.push(scheduling::appointment_json(&a));
+        let mut v = scheduling::appointment_json(&a);
+        v["resources"] = access::appointment_resources(&mut *conn, a.id).await?;
+        items.push(v);
     }
+    scheduling::attach_scheduling_labels(&mut conn, g.tenant_id, &mut items).await?;
     Ok(Json(json!({ "patient_id": g.patient_id, "items": items })))
 }
 
@@ -820,7 +826,7 @@ async fn reschedule_options(
     let m =
         access::reschedule_options_for(&state, &ctx, a, body.0.unwrap_or_default(), booked_via(&g))
             .await?;
-    Ok(Json(access::match_result_json(&m)))
+    Ok(Json(access::match_result_labelled(&state, &m).await?))
 }
 
 /// Cancel within policy. Patients cannot override the cancellation
@@ -2097,7 +2103,8 @@ pub struct NotificationsQuery {
 
 /// In-app inbox: delivered notifications addressed to the caller's
 /// patient(s) or to the caller directly. Payloads are the PHI-minimized
-/// templates the worker stored; nothing is re-derived here.
+/// templates the worker stored; the subject/body are rendered from them
+/// with the same templates the delivery channels use.
 async fn list_notifications(
     State(state): State<AppState>,
     ctx: AuthContext,
@@ -2124,8 +2131,8 @@ async fn list_notifications(
         None => grants.iter().map(|g| g.patient_id).collect(),
     };
     let rows = sqlx::query(
-        "SELECT id, patient_id, kind, appointment_id, offer_id, payload, language, status, scheduled_for,
-                delivered_at, read_at
+        "SELECT id, patient_id, kind, appointment_id, offer_id, payload, language, time_zone, status,
+                scheduled_for, delivered_at, read_at
          FROM notifications
          WHERE tenant_id = $1
            AND (patient_id = ANY($2) OR ($3::uuid IS NULL AND user_id = $4))
@@ -2146,14 +2153,21 @@ async fn list_notifications(
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
+            let kind: String = r.get("kind");
+            let language: String = r.get("language");
+            let time_zone: String = r.get("time_zone");
+            let payload: Value = r.get("payload");
+            let (subject, body) = notify::render(&kind, &language, &time_zone, &payload);
             json!({
                 "id": r.get::<Uuid, _>("id"),
                 "patient_id": r.get::<Option<Uuid>, _>("patient_id"),
-                "kind": r.get::<String, _>("kind"),
+                "kind": kind,
                 "appointment_id": r.get::<Option<Uuid>, _>("appointment_id"),
                 "offer_id": r.get::<Option<Uuid>, _>("offer_id"),
-                "payload": r.get::<Value, _>("payload"),
-                "language": r.get::<String, _>("language"),
+                "payload": payload,
+                "subject": subject,
+                "body": body,
+                "language": language,
                 "status": r.get::<String, _>("status"),
                 "delivered_at": r.get::<Option<DateTime<Utc>>, _>("delivered_at"),
                 "read_at": r.get::<Option<DateTime<Utc>>, _>("read_at"),

@@ -87,6 +87,7 @@ pub fn routes() -> Router<AppState> {
         .route("/access-requests/:id/close", post(close_request))
         .route("/access-requests/:id/withdraw", post(withdraw_request))
         .route("/matcher-runs/:id", get(get_matcher_run))
+        .route("/offers", get(list_offers))
         .route("/offers/:id", get(get_offer))
         .route("/offers/:id/history", get(offer_history_route))
         .route("/offers/:id/hold", post(hold_offer_route))
@@ -943,6 +944,93 @@ async fn list_requests(
     Ok(Json(json!({ "items": items, "next_after": next_after })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListOffersQuery {
+    /// `active` (default: offered + held), `held`, `offered`, or one status.
+    pub status: Option<String>,
+    pub facility_id: Option<Uuid>,
+    pub patient_id: Option<Uuid>,
+    pub limit: Option<i64>,
+    pub after: Option<Uuid>,
+}
+
+/// Staff view of live offers and holds across requests and recovery events,
+/// facility-scoped like the request list. Expired holds are swept first so
+/// the console never shows a hold that no longer blocks capacity.
+async fn list_offers(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Query(q): Query<ListOffersQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let allowed = guard(
+        &state,
+        &ctx,
+        actions::SCHEDULING_READ,
+        "appointment_offer",
+        Some(ResourceCtx {
+            tenant_id: ctx.tenant_id,
+            patient_id: q.patient_id,
+            facility_id: q.facility_id,
+        }),
+    )
+    .await?;
+    let statuses: Vec<String> = match q.status.as_deref() {
+        None | Some("active") => vec!["offered".into(), "held".into()],
+        Some(s) => {
+            let st = OfferStatus::parse(s).ok_or_else(|| {
+                ApiError::bad_request("validation_failed", "unknown status filter")
+            })?;
+            vec![st.as_str().to_string()]
+        }
+    };
+    let (scope_all, mut scope_ids) = match facility_scope(&ctx, actions::SCHEDULING_READ) {
+        None => (true, Vec::new()),
+        Some(ids) => (false, ids),
+    };
+    if let Some(f) = q.facility_id {
+        if scope_all || scope_ids.contains(&f) {
+            scope_ids = vec![f];
+        } else {
+            return Ok(Json(json!({ "items": [], "next_after": null })));
+        }
+    }
+    let scope_all = scope_all && q.facility_id.is_none();
+    let limit = bounded_limit(q.limit);
+    let mut conn = state.pool.acquire().await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    scheduling::sweep_expired(&mut conn, &ctx, &state.cell, ctx.tenant_id).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM appointment_offers
+         WHERE tenant_id = $1 AND status = ANY($2)
+           AND ($3 OR facility_id = ANY($4))
+           AND ($5::uuid IS NULL OR patient_id = $5)
+           AND ($6::uuid IS NULL OR id > $6)
+         ORDER BY id
+         LIMIT $7",
+    )
+    .bind(ctx.tenant_id)
+    .bind(&statuses)
+    .bind(scope_all)
+    .bind(&scope_ids)
+    .bind(q.patient_id)
+    .bind(q.after)
+    .bind(limit + 1)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut offers = Vec::with_capacity(ids.len());
+    for id in ids.iter().take(limit as usize) {
+        offers.push(scheduling::load_offer(&mut conn, *id).await?);
+    }
+    let mut items = labelled_offers(&mut conn, ctx.tenant_id, &offers).await?;
+    scheduling::attach_patient_summaries(&mut *conn, ctx.tenant_id, &mut items, true).await?;
+    let next_after = if ids.len() as i64 > limit {
+        items.last().and_then(|v| v.get("id").cloned())
+    } else {
+        None
+    };
+    Ok(Json(json!({ "items": items, "next_after": next_after })))
+}
+
 async fn get_request(
     State(state): State<AppState>,
     ctx: AuthContext,
@@ -960,10 +1048,11 @@ async fn get_request(
     .await?;
     allowed.record(&mut conn, &ctx, &state.cell).await?;
     let offers = offers_for_request(&mut conn, &r).await?;
+    let offers = labelled_offers(&mut conn, r.tenant_id, &offers).await?;
     let run = latest_run(&mut conn, r.tenant_id, r.id).await?;
     Ok(Json(json!({
         "request": request_json(&r),
-        "offers": offers.iter().map(scheduling::offer_json).collect::<Vec<_>>(),
+        "offers": offers,
         "matcher_run": run,
     })))
 }
@@ -1496,7 +1585,7 @@ async fn request_offers(
     scheduling::sweep_expired(&mut conn, &ctx, &state.cell, ctx.tenant_id).await?;
     let offers = offers_for_request(&mut conn, &r).await?;
     Ok(Json(json!({
-        "items": offers.iter().map(scheduling::offer_json).collect::<Vec<_>>(),
+        "items": labelled_offers(&mut conn, r.tenant_id, &offers).await?,
     })))
 }
 
@@ -1954,6 +2043,27 @@ pub fn match_result_json(m: &MatchResult) -> Value {
         "rejected_summary": m.rejected,
         "ranking": m.ranking,
     })
+}
+
+/// `match_result_json` with facility/service/resource labels on every offer.
+pub async fn match_result_labelled(state: &AppState, m: &MatchResult) -> Result<Value, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let mut offers: Vec<Value> = m.offers.iter().map(scheduling::offer_json).collect();
+    scheduling::attach_scheduling_labels(&mut conn, m.request.tenant_id, &mut offers).await?;
+    let mut v = match_result_json(m);
+    v["offers"] = Value::Array(offers);
+    Ok(v)
+}
+
+/// Offer JSON for a request with display labels attached.
+pub async fn labelled_offers(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    offers: &[OfferRow],
+) -> Result<Vec<Value>, ApiError> {
+    let mut items: Vec<Value> = offers.iter().map(scheduling::offer_json).collect();
+    scheduling::attach_scheduling_labels(conn, tenant_id, &mut items).await?;
+    Ok(items)
 }
 
 /// The persisted deterministic half of a matcher run.
@@ -2726,7 +2836,7 @@ async fn run_matcher(
     allowed.record(&mut conn, &ctx, &state.cell).await?;
     drop(conn);
     let m = run_matcher_for(&state, &ctx, r, body, "staff").await?;
-    Ok(Json(match_result_json(&m)))
+    Ok(Json(match_result_labelled(&state, &m).await?))
 }
 
 async fn get_matcher_run(
@@ -3472,6 +3582,8 @@ async fn list_appointments(
         items.push(v);
     }
     scheduling::attach_patient_summaries(&state.pool, ctx.tenant_id, &mut items, true).await?;
+    let mut conn = state.pool.acquire().await?;
+    scheduling::attach_scheduling_labels(&mut conn, ctx.tenant_id, &mut items).await?;
     let next_after = if rows.len() as i64 > limit {
         items.last().and_then(|v| v.get("id").cloned())
     } else {
@@ -4001,7 +4113,7 @@ async fn reschedule_options(
     allowed.record(&mut conn, &ctx, &state.cell).await?;
     drop(conn);
     let m = reschedule_options_for(&state, &ctx, a, body, "staff").await?;
-    Ok(Json(match_result_json(&m)))
+    Ok(Json(match_result_labelled(&state, &m).await?))
 }
 
 #[derive(Debug, Default, Deserialize)]
