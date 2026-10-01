@@ -928,6 +928,9 @@ async fn event_detail(conn: &mut PgConnection, e: &EventRow) -> Result<Value, Ap
         }
         None => None,
     };
+    if let Some(Value::Array(eligible)) = detail.get_mut("eligible") {
+        scheduling::attach_patient_summaries(&mut *conn, e.tenant_id, eligible, true).await?;
+    }
     if let Value::Object(map) = &mut detail {
         map.insert("current_offer".into(), current_offer.unwrap_or(Value::Null));
         map.insert("ranking_artifact".into(), artifact.unwrap_or(Value::Null));

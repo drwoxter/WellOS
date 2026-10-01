@@ -12,6 +12,7 @@ import {
   urgencyLabel,
   waitlistStatusLabel,
   type CancellationEvent,
+  type CancellationEventSummary,
   type CapacityExplanation,
   type CapacityForecast,
   type CursorPage,
@@ -26,6 +27,7 @@ import {
   ReasonField,
   StatusBadge,
   nameFor,
+  opsFetch,
   postJson,
   useAction,
   useCatalog,
@@ -39,21 +41,21 @@ type Facility = { id: string; name: string };
 // Waitlist and cancellation recovery
 // ---------------------------------------------------------------------------
 
-type RecoveryData = { events: CancellationEvent[]; entries: WaitlistEntry[] };
+type RecoveryData = {
+  events: CancellationEventSummary[];
+  entries: WaitlistEntry[];
+};
 
 async function loadRecovery(facilityId: string): Promise<RecoveryData> {
-  const [open, offered, entries] = await Promise.all([
-    apiFetch<CursorPage<CancellationEvent>>(
-      `/api/v1/recovery-events${query({ status: "open", facility_id: facilityId, limit: 50 })}`,
-    ),
-    apiFetch<CursorPage<CancellationEvent>>(
-      `/api/v1/recovery-events${query({ status: "offered", facility_id: facilityId, limit: 50 })}`,
+  const [live, entries] = await Promise.all([
+    apiFetch<CursorPage<CancellationEventSummary>>(
+      `/api/v1/recovery-events${query({ status: "live", facility_id: facilityId, limit: 100 })}`,
     ),
     apiFetch<CursorPage<WaitlistEntry>>(
       `/api/v1/waitlist${query({ status: "active", facility_id: facilityId, limit: 100 })}`,
     ),
   ]);
-  const events = [...open.items, ...offered.items].sort((a, b) =>
+  const events = [...live.items].sort((a, b) =>
     a.starts_at.localeCompare(b.starts_at),
   );
   return { events, entries: entries.items };
@@ -82,11 +84,13 @@ export function WaitlistPanel({
     reason: string;
   } | null>(null);
 
-  async function openEvent(e: CancellationEvent) {
-    const d = await apiFetch<CancellationEvent>(
-      `/api/v1/recovery-events/${e.id}`,
-    );
-    setSelected(d);
+  async function openEvent(e: CancellationEventSummary) {
+    await run(async () => {
+      const d = await apiFetch<CancellationEvent>(
+        `/api/v1/recovery-events/${e.id}`,
+      );
+      setSelected(d);
+    });
   }
 
   async function rank(e: CancellationEvent) {
@@ -172,7 +176,7 @@ export function WaitlistPanel({
                       </strong>{" "}
                       · {formatDateTime(lang, e.starts_at)}
                       <div className="muted">
-                        {t(lang, "eligibleCandidates")}: {e.eligible.length} ·{" "}
+                        {t(lang, "eligibleCandidates")}: {e.eligible_count} ·{" "}
                         {t(lang, "offersMade")}: {e.offers_made} ·{" "}
                         {e.ranking_mode === "dmind"
                           ? t(lang, "rankingDmind")
@@ -398,7 +402,7 @@ export function WaitlistPanel({
 async function loadForecasts(
   facilityId: string,
 ): Promise<{ forecasts: CapacityForecast[] }> {
-  return apiFetch<{ forecasts: CapacityForecast[] }>(
+  return opsFetch<{ forecasts: CapacityForecast[] }>(
     `/api/v1/capacity/forecasts${query({ facility_id: facilityId, limit: 20 })}`,
   );
 }
@@ -496,7 +500,7 @@ export function CapacityPanel({
 
   async function create() {
     const ok = await run(async () => {
-      const f = await apiFetch<CapacityForecast>("/api/v1/capacity/forecasts", {
+      const f = await opsFetch<CapacityForecast>("/api/v1/capacity/forecasts", {
         method: "POST",
         body: JSON.stringify({
           facility_id: newFacility || facilityId || facilities[0]?.id,
@@ -512,7 +516,7 @@ export function CapacityPanel({
 
   async function explain(f: CapacityForecast) {
     await run(async () => {
-      const res = await apiFetch<{
+      const res = await opsFetch<{
         explanation: CapacityExplanation;
         forecast: CapacityForecast;
       }>(`/api/v1/capacity/forecasts/${f.id}/explain`, {

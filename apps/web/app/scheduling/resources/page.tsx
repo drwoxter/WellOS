@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { AppShell } from "../../chrome";
 import { t, type Lang } from "@/lib/i18n";
-import { apiFetch, useSession } from "@/lib/session";
+import { useSession } from "@/lib/session";
 import { formatDateTime } from "@/lib/clinical";
 import {
   EXCEPTION_KINDS,
@@ -25,7 +25,8 @@ import {
   ReasonField,
   StatusBadge,
   nameFor,
-  postJson,
+  opsFetch,
+  postOps,
   useAction,
   useCatalog,
   useLoader,
@@ -196,7 +197,7 @@ function ResourceEditor({
     const ok = await run(
       async () => {
         if (resource) {
-          await postJson(`/api/v1/scheduling/resources/${resource.id}`, {
+          await postOps(`/api/v1/scheduling/resources/${resource.id}`, {
             version: resource.version,
             name: form.name.trim(),
             profession_code: form.profession_code || null,
@@ -209,7 +210,7 @@ function ResourceEditor({
             reason: form.reason.trim() || null,
           });
         } else {
-          await postJson("/api/v1/scheduling/resources", {
+          await postOps("/api/v1/scheduling/resources", {
             facility_id: form.facility_id,
             resource_type_code: form.resource_type_code,
             name: form.name.trim(),
@@ -530,7 +531,7 @@ function AvailabilityEditor({
 
   async function save() {
     const ok = await run(async () => {
-      await postJson(
+      await postOps(
         `/api/v1/scheduling/resources/${resource.id}/availability`,
         {
           version: resource.version,
@@ -715,7 +716,7 @@ function ExceptionsEditor({
   async function add(e: React.FormEvent) {
     e.preventDefault();
     const ok = await run(async () => {
-      await postJson(`/api/v1/scheduling/resources/${resource.id}/exceptions`, {
+      await postOps(`/api/v1/scheduling/resources/${resource.id}/exceptions`, {
         kind: form.kind,
         starts_at: new Date(form.starts_at).toISOString(),
         ends_at: new Date(form.ends_at).toISOString(),
@@ -732,7 +733,7 @@ function ExceptionsEditor({
 
   async function remove(id: string) {
     const ok = await run(async () => {
-      await apiFetch(
+      await opsFetch(
         `/api/v1/scheduling/resources/${resource.id}/exceptions/${id}`,
         { method: "DELETE" },
       );
@@ -864,7 +865,7 @@ function ResourceDetail({
   onClose: () => void;
 }) {
   const state = useLoader(
-    () => apiFetch<SchedulableResource>(`/api/v1/scheduling/resources/${id}`),
+    () => opsFetch<SchedulableResource>(`/api/v1/scheduling/resources/${id}`),
     id,
   );
   const [editing, setEditing] = useState(false);
@@ -876,7 +877,7 @@ function ResourceDetail({
 
   async function setActive(r: SchedulableResource, active: boolean) {
     const ok = await run(async () => {
-      await postJson(`/api/v1/scheduling/resources/${r.id}`, {
+      await postOps(`/api/v1/scheduling/resources/${r.id}`, {
         version: r.version,
         active,
         reason: active ? t(lang, "reactivated") : deactivating.trim(),
@@ -1040,7 +1041,7 @@ function ResourcesAdmin() {
   const types = useCatalog("resource_type");
   const state = useLoader(
     () =>
-      apiFetch<Page<SchedulableResource>>(
+      opsFetch<Page<SchedulableResource>>(
         `/api/v1/scheduling/resources${query({
           facility_id: facilityId,
           resource_type_code: typeCode,

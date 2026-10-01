@@ -42,6 +42,20 @@ export const NO_SCHEDULING_CAPABILITIES: SchedulingCapabilities = {
   self_service: false,
 };
 
+/** Whether the staff `/scheduling` console has anything to show for these
+ * server-derived capabilities. Transport coordinators and capacity reviewers
+ * get their logistics/capacity panels without general scheduling read. */
+export function hasSchedulingConsoleAccess(
+  caps: SchedulingCapabilities | undefined,
+): boolean {
+  return Boolean(
+    caps &&
+    (caps.can_read ||
+      caps.can_coordinate_transport ||
+      caps.can_review_capacity),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Catalogs
 // ---------------------------------------------------------------------------
@@ -926,7 +940,8 @@ export type EligibleRecord = {
   patient?: PatientSummary;
 };
 
-export type CancellationEvent = {
+/** List representation: counts only, no per-patient ranking rows. */
+export type CancellationEventSummary = {
   id: string;
   appointment_id: string;
   facility_id: string;
@@ -935,19 +950,43 @@ export type CancellationEvent = {
   starts_at: string;
   ends_at: string;
   status: string;
-  eligible: EligibleRecord[];
+  eligible_count: number;
+  pending_count: number;
   excluded_count: number;
-  excluded: Record<string, number>;
   ranking_mode: string | null;
-  ranking_artifact_id: string | null;
   current_offer_id: string | null;
   offers_made: number;
-  override_by: string | null;
   override_reason: string | null;
   closed_reason: string | null;
   version: number;
   created_at: string;
   updated_at: string;
+};
+
+export type RankingArtifactSummary = {
+  id: string;
+  status: string;
+  synthetic: boolean;
+  provider: string;
+  model: string;
+  prompt_version: string;
+  reused: boolean;
+  created_at: string;
+};
+
+/** Detail representation returned by `GET /recovery-events/:id` and the
+ * rank/override/revoke/close actions. */
+export type CancellationEvent = Omit<
+  CancellationEventSummary,
+  "pending_count" | "eligible_count"
+> & {
+  tenant_id: string;
+  eligible: EligibleRecord[];
+  excluded: Record<string, number>;
+  ranking_artifact_id: string | null;
+  override_by: string | null;
+  current_offer: Offer | null;
+  ranking_artifact: RankingArtifactSummary | null;
 };
 
 // ---------------------------------------------------------------------------

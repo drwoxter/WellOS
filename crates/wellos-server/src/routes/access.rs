@@ -3559,7 +3559,7 @@ async fn list_appointments(
            AND ($10::uuid IS NULL OR a.id > $10)
          ORDER BY a.id
          LIMIT $11",
-        scheduling::APPOINTMENT_COLUMNS.replace("id,", "a.id,")
+        scheduling::APPOINTMENT_COLUMNS.replacen("id,", "a.id,", 1)
     ))
     .bind(ctx.tenant_id)
     .bind(scope_all)

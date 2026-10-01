@@ -7,6 +7,7 @@ import { useSession } from "@/lib/session";
 import { canReadWorklist, canSearchPatients } from "@/lib/clinical";
 import { canReadVisits } from "@/lib/visits";
 import { canReadRisk } from "@/lib/risk";
+import { hasSchedulingConsoleAccess } from "@/lib/access";
 import { confirmLeaveUnsaved } from "@/lib/unsaved-guard";
 
 /** Sign-out confirmed against unsaved documentation before the session is
@@ -76,7 +77,7 @@ function NavLinks() {
     ...(canSearchPatients(roles)
       ? [{ href: "/patients", label: t(lang, "navPatients") }]
       : []),
-    ...(sched?.can_read
+    ...(hasSchedulingConsoleAccess(sched)
       ? [{ href: "/scheduling", label: t(lang, "navScheduling") }]
       : []),
     ...(canReadVisits(roles)

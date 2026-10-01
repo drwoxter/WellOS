@@ -525,3 +525,20 @@ export function ConfirmBox({
 export async function postJson<T>(path: string, body: unknown): Promise<T> {
   return apiFetch<T>(path, { method: "POST", body: JSON.stringify(body) });
 }
+
+/** Administrative scheduling surfaces act under the `operations` purpose of use. */
+export const OPERATIONS_PURPOSE = { "x-purpose-of-use": "operations" } as const;
+
+export async function opsFetch<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  return apiFetch<T>(path, {
+    ...init,
+    headers: { ...OPERATIONS_PURPOSE, ...(init?.headers ?? {}) },
+  });
+}
+
+export async function postOps<T>(path: string, body: unknown): Promise<T> {
+  return opsFetch<T>(path, { method: "POST", body: JSON.stringify(body) });
+}

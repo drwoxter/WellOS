@@ -53,6 +53,7 @@ export async function fetchDevUsers(): Promise<DevUsersResponse | null> {
 export function homeForRoles(roles: string[]): string {
   if (roles.includes("patient_representative")) return "/my/appointments";
   if (roles.includes("registration_staff")) return "/access";
+  if (roles.includes("transport_coordinator")) return "/scheduling";
   return "/dashboard";
 }
 

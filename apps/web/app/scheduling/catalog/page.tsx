@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { AppShell } from "../../chrome";
 import { t, type Lang } from "@/lib/i18n";
-import { apiFetch, useSession } from "@/lib/session";
+import { useSession } from "@/lib/session";
 import { formatDateTime } from "@/lib/clinical";
 import {
   CATALOG_KINDS,
@@ -23,6 +23,7 @@ import {
   StatusBadge,
   useAction,
   useLoader,
+  opsFetch,
 } from "../shared";
 
 type Facility = { id: string; name: string };
@@ -118,7 +119,7 @@ function EntryEditor({
           .map((s) => s.trim())
           .filter(Boolean);
         if (entry) {
-          await apiFetch(`/api/v1/catalog/${entry.id}`, {
+          await opsFetch(`/api/v1/catalog/${entry.id}`, {
             method: "POST",
             body: JSON.stringify({
               version: entry.version,
@@ -136,7 +137,7 @@ function EntryEditor({
             }),
           });
         } else {
-          await apiFetch("/api/v1/catalog", {
+          await opsFetch("/api/v1/catalog", {
             method: "POST",
             body: JSON.stringify({
               kind,
@@ -315,7 +316,7 @@ function EntryEditor({
 function HistoryList({ lang, entryId }: { lang: Lang; entryId: string }) {
   const state = useLoader(
     () =>
-      apiFetch<{ items: CatalogHistoryEntry[] }>(
+      opsFetch<{ items: CatalogHistoryEntry[] }>(
         `/api/v1/catalog/${entryId}/history`,
       ),
     entryId,
@@ -386,7 +387,7 @@ function CatalogAdmin() {
   }
 
   async function openEdit(e: CatalogEntry) {
-    const full = await apiFetch<CatalogEntry & { facility_ids: string[] }>(
+    const full = await opsFetch<CatalogEntry & { facility_ids: string[] }>(
       `/api/v1/catalog/${e.id}`,
     );
     setEditing({ entry: full });
@@ -395,7 +396,7 @@ function CatalogAdmin() {
   async function deactivate() {
     if (!deactivating) return;
     const ok = await run(async () => {
-      await apiFetch(`/api/v1/catalog/${deactivating.entry.id}/deactivate`, {
+      await opsFetch(`/api/v1/catalog/${deactivating.entry.id}/deactivate`, {
         method: "POST",
         body: JSON.stringify({
           version: deactivating.entry.version,
@@ -409,7 +410,7 @@ function CatalogAdmin() {
 
   async function reactivate(e: CatalogEntry) {
     const ok = await run(async () => {
-      await apiFetch(`/api/v1/catalog/${e.id}`, {
+      await opsFetch(`/api/v1/catalog/${e.id}`, {
         method: "POST",
         body: JSON.stringify({
           version: e.version,

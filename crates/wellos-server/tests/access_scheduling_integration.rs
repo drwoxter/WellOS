@@ -5,6 +5,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use chrono::{DateTime, Duration, Utc};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -346,6 +347,28 @@ async fn golden_path_request_match_hold_accept_visit_ics_cancel() {
     assert_eq!(visit["scheduled_at"], acc["starts_at"]);
     assert_eq!(s(&visit["patient"]["id"]), patient);
     assert_eq!(visit_count(&state).await, 1, "exactly one linked visit");
+
+    // The staff list (agenda/worklists) returns the confirmed appointment
+    // with its resources and patient summary inside the requested window.
+    let starts_at: DateTime<Utc> = s(&acc["starts_at"]).parse().unwrap();
+    let (st, listed) = call(
+        &state,
+        "GET",
+        &format!(
+            "/api/v1/appointments?from={}&to={}&status=confirmed&patient_id={patient}",
+            (starts_at - Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            (starts_at + Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{listed}");
+    let listed_items = listed["items"].as_array().unwrap();
+    assert_eq!(listed_items.len(), 1, "{listed}");
+    assert_eq!(s(&listed_items[0]["id"]), aid);
+    assert!(listed_items[0]["resources"].is_array());
+    assert_eq!(s(&listed_items[0]["patient"]["id"]), patient, "{listed}");
 
     // ICS: one confirmed event, no clinical free text.
     let (st, headers, bytes) = raw(

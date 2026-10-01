@@ -7,6 +7,7 @@ import { t, type Lang, type TKey } from "@/lib/i18n";
 import { useSession } from "@/lib/session";
 import {
   NO_SCHEDULING_CAPABILITIES,
+  hasSchedulingConsoleAccess,
   type AccessRequest,
   type Appointment,
 } from "@/lib/access";
@@ -124,7 +125,7 @@ function SchedulingConsole() {
   const [patient, setPatient] = useState<PatientOption | null>(null);
   const bump = () => setRefresh((n) => n + 1);
 
-  if (meta && !caps.can_read) {
+  if (meta && !hasSchedulingConsoleAccess(caps)) {
     return (
       <div className="card">
         <p role="alert" className="error">
@@ -140,7 +141,7 @@ function SchedulingConsole() {
     if (x.id === "capacity") return caps.can_review_capacity;
     if (x.id === "transport")
       return caps.can_coordinate_transport || caps.can_read;
-    return true;
+    return caps.can_read;
   });
   const active = visible.some((x) => x.id === tab) ? tab : visible[0]?.id;
 
