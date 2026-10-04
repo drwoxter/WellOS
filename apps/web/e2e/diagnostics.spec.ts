@@ -192,7 +192,7 @@ test("administrator adds a runtime orderable that clinicians can find", async ({
 
 test("patient reads released results in Spanish", async ({ page }) => {
   await signInAsPatient(page, "rep.alba");
-  await page.getByRole("link", { name: "My results" }).first().click();
+  await page.getByRole("link", { name: "My tests" }).first().click();
   await expect(page).toHaveURL(/\/my\/diagnostics/);
   const released = page.getByTestId("my-dx-released");
   await expect(released).toBeVisible();

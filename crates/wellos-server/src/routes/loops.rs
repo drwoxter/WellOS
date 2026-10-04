@@ -675,7 +675,7 @@ pub async fn detail(
     });
 
     let observation_rows = sqlx::query(
-        "SELECT id, code_loinc, COALESCE(value_num::text, value_code_display, value_code, value_bool::text, value_datetime::text, value_text) AS value_num, COALESCE(unit, '') AS unit, reference_range, status,
+        "SELECT id, code_loinc, COALESCE(value_num::text, value_code_display, value_code, value_bool::text, value_datetime::text, value_text, value_narrative) AS value_num, COALESCE(unit, '') AS unit, reference_range, status,
                 amends, source_system, effective_at, received_at
          FROM observations WHERE tenant_id=$1 AND service_request_id=$2 ORDER BY received_at",
     )
@@ -701,7 +701,7 @@ pub async fn detail(
             json!({
                 "id": obs_id,
                 "code_loinc": r.get::<String,_>("code_loinc"),
-                "value": r.get::<String,_>("value_num"),
+                "value": r.get::<Option<String>,_>("value_num").unwrap_or_default(),
                 "unit": r.get::<String,_>("unit"),
                 "reference_range": r.get::<Option<String>,_>("reference_range"),
                 "status": status,

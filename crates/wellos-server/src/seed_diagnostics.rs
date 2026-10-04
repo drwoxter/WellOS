@@ -724,6 +724,23 @@ async fn order_only_encounter(
     patient: Uuid,
     practitioner: Uuid,
 ) -> anyhow::Result<Uuid> {
+    // Orders join the practitioner's open order-only context for the patient
+    // when one exists (the legacy laboratory fixtures create it).
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM encounters
+         WHERE tenant_id = $1 AND facility_id = $2 AND patient_id = $3 AND practitioner_id = $4
+           AND status = 'in_progress' AND encounter_type = 'order_only'
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(tenant)
+    .bind(facility)
+    .bind(patient)
+    .bind(practitioner)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some((id,)) = existing {
+        return Ok(id);
+    }
     let id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id, status, encounter_type, started_at)

@@ -1895,7 +1895,7 @@ async fn critical_report_review_release_and_patient_privacy() {
 #[tokio::test]
 async fn pathology_amendment_chain_and_entered_in_error() {
     let state = test_state().await;
-    let (f, _p, e) = consultation(&state).await;
+    let (f, p, e) = consultation(&state).await;
     let biopsy = orderable_id(&state, "skin_biopsy_histology").await;
     let group = place(&state, &e, &f, &[(&biopsy, Some("immediate"))], json!({})).await;
     let order = &group["orders"][0];
@@ -1953,6 +1953,39 @@ async fn pathology_amendment_chain_and_entered_in_error() {
         amended["criticality"], "critical",
         "configured critical conclusion codes: {amended}"
     );
+    // Narrative-only observations must stay readable through the legacy chart
+    // and service-request views (no numeric/coded value to project).
+    let (st, chart) = call(&state, "GET", &format!("/api/v1/patients/{p}"), DR, None).await;
+    assert_eq!(st, StatusCode::OK, "{chart}");
+    let narratives: Vec<&Value> = chart["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["code_loinc"] == "22637-3")
+        .collect();
+    assert!(
+        narratives
+            .iter()
+            .any(|o| o["value"].as_str().unwrap_or("").contains("melanoma")),
+        "chart projects narrative text: {chart}"
+    );
+    assert!(
+        chart["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["diagnostic_report_id"] == amended["id"] && a["observation_id"].is_null()),
+        "report-anchored critical alert is visible on the chart: {chart}"
+    );
+    let (st, legacy) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/service-requests/{}", id(&acc)),
+        DR,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{legacy}");
     let (st, old) = call(
         &state,
         "GET",

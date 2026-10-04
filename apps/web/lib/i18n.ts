@@ -1513,7 +1513,7 @@ const dict = {
     all: "All",
     save: "Save",
     navDiagnostics: "Diagnostics",
-    navMyDiagnostics: "My results",
+    navMyDiagnostics: "My tests",
     dxAccessRequestCreated:
       "Appointment request created. Scheduling will offer slots.",
     dxAccessRequestOpen: "An appointment request is open for this order.",
@@ -3318,7 +3318,7 @@ const dict = {
     all: "Todos",
     save: "Guardar",
     navDiagnostics: "Diagnósticos",
-    navMyDiagnostics: "Mis resultados",
+    navMyDiagnostics: "Mis pruebas",
     dxAccessRequestCreated:
       "Solicitud de cita creada. Programación ofrecerá horarios.",
     dxAccessRequestOpen: "Hay una solicitud de cita abierta para esta orden.",
