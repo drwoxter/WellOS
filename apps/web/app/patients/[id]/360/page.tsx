@@ -18,6 +18,17 @@ import type { VisitItem } from "@/lib/visits";
 import type { Brief, Diagnostics } from "../../../encounters/[id]/brief";
 import { DiagnosticHistory } from "../../../encounters/[id]/brief";
 import type { RiskSection } from "@/lib/risk";
+import {
+  loadPatientDiagnostics,
+  orderStatusLabel,
+  orderStatusTone,
+  criticalityLabel,
+  criticalityTone,
+  reportStatusLabel,
+  fulfilmentModeLabel,
+  type PatientDiagnostics,
+} from "@/lib/diagnostics";
+import { StatusBadge } from "../../../scheduling/shared";
 import { factorText, gapText } from "@/lib/risk";
 import {
   DomainList,
@@ -582,6 +593,118 @@ function Results({ data, lang }: { data: Patient360; lang: Lang }) {
   );
 }
 
+function PendingDiagnostics({ data, lang }: { data: Patient360; lang: Lang }) {
+  const { meta } = useSession();
+  const canRead = meta?.diagnostics_capabilities?.can_read ?? false;
+  const [dx, setDx] = useState<PatientDiagnostics | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const patientId = data.patient.id;
+  useEffect(() => {
+    if (!canRead) return;
+    let live = true;
+    loadPatientDiagnostics(patientId)
+      .then((d) => {
+        if (live) setDx(d);
+      })
+      .catch((e: unknown) => {
+        if (live) setError(errorText(lang, e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [canRead, patientId, lang]);
+  if (!canRead) return null;
+  const open = data.capabilities.open_consultation_id;
+  return (
+    <Section
+      id="diagnostics"
+      titleKey="dxPendingDiagnostics"
+      className="p360-wide"
+    >
+      <div className="p360-actions">
+        {open ? (
+          <Link
+            className="secondary button"
+            href={`/encounters/${open}#diagnostic-orders`}
+            data-testid="p360-order-diagnostics"
+          >
+            {t(lang, "dxOrderDiagnostics")}
+          </Link>
+        ) : (
+          <p className="muted">{t(lang, "dxOrderNeedsConsultation")}</p>
+        )}
+      </div>
+      {error ? (
+        <p role="alert" className="error">
+          {error}
+        </p>
+      ) : !dx ? (
+        <p className="muted" role="status">
+          {t(lang, "loading")}
+        </p>
+      ) : (
+        <>
+          {dx.pending_orders.length === 0 ? (
+            <p className="muted">{t(lang, "dxNoPendingOrders")}</p>
+          ) : (
+            <ul className="brief-list" data-testid="p360-pending-orders">
+              {dx.pending_orders.map((o) => (
+                <li key={o.id}>
+                  <Link
+                    className="navlink"
+                    href={`/diagnostics/orders/${o.id}`}
+                  >
+                    {o.display}
+                  </Link>{" "}
+                  <StatusBadge
+                    label={orderStatusLabel(lang, o.order_status)}
+                    tone={orderStatusTone(o.order_status)}
+                  />{" "}
+                  <span className="muted">
+                    {fulfilmentModeLabel(lang, o.fulfilment_mode)}
+                    {o.schedule_conflict
+                      ? ` · ${t(lang, "dxScheduleConflict")}`
+                      : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {dx.recent_reports.length > 0 ? (
+            <>
+              <h3>{t(lang, "dxRecentReports")}</h3>
+              <ul className="brief-list" data-testid="p360-recent-reports">
+                {dx.recent_reports.map((r) => (
+                  <li key={r.id}>
+                    <Link
+                      className="navlink"
+                      href={`/diagnostics/reports/${r.id}`}
+                    >
+                      {r.order_display ?? t(lang, "dxReport")} · v{r.version}
+                    </Link>{" "}
+                    <StatusBadge
+                      label={reportStatusLabel(lang, r.status)}
+                      tone="neutral"
+                    />{" "}
+                    <StatusBadge
+                      label={criticalityLabel(lang, r.criticality)}
+                      tone={criticalityTone(r.criticality)}
+                    />
+                    <span className="muted">
+                      {" "}
+                      · {formatDate(lang, r.issued_at ?? r.created_at)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </>
+      )}
+    </Section>
+  );
+}
+
 function Preventive({ data, lang }: { data: Patient360; lang: Lang }) {
   const domain = data.risk?.current?.domains.find(
     (d) => d.domain === "preventive_care",
@@ -843,6 +966,7 @@ function Patient360View({ id }: { id: string }) {
         <Encounters data={data} lang={lang} />
         <Pending data={data} lang={lang} />
         <Results data={data} lang={lang} />
+        <PendingDiagnostics data={data} lang={lang} />
         <Preventive data={data} lang={lang} />
         <RiskExtras data={data} lang={lang} onChanged={load} />
       </div>

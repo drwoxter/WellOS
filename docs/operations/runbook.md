@@ -178,6 +178,34 @@ Seed is idempotent-ish for demos but intended for empty databases; to reset:
   visit into a confirmed appointment once (idempotent, no deletions); the
   rollback statements are documented at the end of the migration file.
 
+### dMind Clinical Diagnostics
+
+- **Object store**: `WELLOS_OBJECT_STORE=disabled` (default) keeps every
+  diagnostic workflow working while document upload/download answer
+  `503 object_store_unavailable`. `s3` requires `WELLOS_S3_ENDPOINT`
+  (HTTPS outside local environments), `WELLOS_S3_BUCKET`,
+  `WELLOS_S3_REGION`, `WELLOS_S3_ACCESS_KEY_ID`,
+  `WELLOS_S3_SECRET_ACCESS_KEY` and optionally `WELLOS_S3_PATH_STYLE`;
+  `WELLOS_OBJECT_URL_TTL_SECS` (default 300, max 900) and
+  `WELLOS_OBJECT_MAX_BYTES` (default 50 MiB) bound download links and
+  uploads. `fixture` is refused outside development/test fixture builds.
+- **Diagnostic catalog**: orderables are data (`POST /api/v1/catalog` with
+  `kind='diagnostic_orderable'`, or `/diagnostics/catalog` for a clinical
+  administrator). Invalid `OrderableConfig` is rejected with field-level
+  errors; deactivate instead of deleting; history is in
+  `catalog_entry_history`.
+- **Unreviewed critical reports**: monitor
+  `SELECT tenant_id, count(*) FROM diagnostic_reports r WHERE r.criticality = 'critical' AND r.status IN ('preliminary','final','amended','corrected') AND NOT EXISTS (SELECT 1 FROM diagnostic_reviews v WHERE v.report_id = r.id AND v.report_version = r.version) GROUP BY 1;`
+  and alert when rows are older than the tenant's agreed window. Nothing
+  releases automatically; a human review and release decision is required.
+- **Order / appointment conflicts**: orders whose appointment was
+  rescheduled or cancelled show `schedule_conflict` in the worklist; staff
+  resolve them by re-scheduling or cancelling the order with a reason.
+- **Legacy results**: migration `0016` converted existing potassium /
+  glucose service requests and observations into orders, reports and
+  components once (idempotent, no deletions); the rollback statements are
+  documented at the end of the migration file.
+
 ## Troubleshooting
 
 | Symptom | Check |

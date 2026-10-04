@@ -229,7 +229,7 @@ async fn run_to_received(state: &AppState, value: f64) -> Loop {
     .await;
     assert_eq!(st, StatusCode::OK, "{res}");
     let (st, detail) = call(
-        &state,
+        state,
         "GET",
         &format!("/api/v1/service-requests/{sr_id}"),
         "dev-dr.garcia",

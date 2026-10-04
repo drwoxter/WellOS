@@ -12,6 +12,7 @@ import type { ApplyMode, NoteSectionKey, ScribeArtifact } from "@/lib/scribe";
 import { RecordingDock, ScribeReview } from "./scribe";
 import type { ApplyOutcome } from "./scribe";
 import { DiagnosticHistory, PatientBrief } from "./brief";
+import { OrderComposer } from "../../diagnostics/composer";
 import { CockpitRisk } from "../../risk/cockpit-risk";
 import { canReadRisk } from "@/lib/risk";
 import { aiAvailability } from "@/lib/capabilities";
@@ -119,6 +120,7 @@ type Workspace = {
     started_at: string;
     completed_at: string | null;
     practitioner: string;
+    facility_id: string;
     facility_name: string;
     own: boolean;
   };
@@ -162,6 +164,8 @@ type Workspace = {
     can_sign: boolean;
     can_add_addendum: boolean;
     can_order_lab: boolean;
+    can_order_diagnostics: boolean;
+    can_override_safety: boolean;
   };
 };
 
@@ -1448,6 +1452,8 @@ function EncounterWorkspace({ id }: { id: string }) {
             can_sign: false,
             can_add_addendum: false,
             can_order_lab: false,
+            can_order_diagnostics: false,
+            can_override_safety: false,
           },
         };
       });
@@ -2164,7 +2170,19 @@ function EncounterWorkspace({ id }: { id: string }) {
                 ))}
               </ul>
             )}
-            {ws.capabilities.can_order_lab && !signed ? (
+            {ws.capabilities.can_order_diagnostics && !signed ? (
+              <OrderComposer
+                encounterId={id}
+                lang={lang}
+                facilities={(meta?.facilities ?? []).filter(
+                  (f) => f.can_act_clinically,
+                )}
+                defaultFacilityId={ws.encounter.facility_id}
+                canOverride={ws.capabilities.can_override_safety}
+                aiCapabilities={meta?.ai_capabilities}
+                onPlaced={() => void load()}
+              />
+            ) : ws.capabilities.can_order_lab && !signed ? (
               <LabOrderForm encounterId={id} lang={lang} onSaved={load} />
             ) : null}
           </div>

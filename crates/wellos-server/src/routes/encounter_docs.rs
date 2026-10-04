@@ -527,6 +527,8 @@ pub async fn workspace(
         "can_sign": own && active && consultation && !note_signed && covers(actions::ENCOUNTER_SIGN),
         "can_add_addendum": own && consultation && note_signed && covers(actions::ENCOUNTER_DOCUMENT),
         "can_order_lab": own && active && covers(actions::SERVICE_REQUEST_CREATE),
+        "can_order_diagnostics": own && active && covers(actions::DIAGNOSTIC_ORDER_MANAGE),
+        "can_override_safety": own && active && covers(actions::DIAGNOSTIC_SAFETY_OVERRIDE),
         "can_record": own && active && consultation && covers(actions::ENCOUNTER_DOCUMENT)
             && covers(actions::AI_REVIEW),
     });
@@ -541,6 +543,7 @@ pub async fn workspace(
             "started_at": row.get::<chrono::DateTime<chrono::Utc>,_>("started_at"),
             "completed_at": row.get::<Option<chrono::DateTime<chrono::Utc>>,_>("completed_at"),
             "practitioner": row.get::<String,_>("practitioner"),
+            "facility_id": enc.facility_id,
             "facility_name": row.get::<String,_>("facility_name"),
             "own": own,
         },
