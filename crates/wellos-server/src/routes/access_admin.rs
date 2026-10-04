@@ -241,6 +241,48 @@ async fn validate_config(
             .await?;
             serde_json::to_value(parsed).map_err(ApiError::internal)
         }
+        "diagnostic_orderable" => {
+            let parsed: wellos_domain::diagnostics::OrderableConfig =
+                serde_json::from_value(config.clone()).map_err(|e| {
+                    ApiError::bad_request("validation_failed", format!("config: {e}"))
+                })?;
+            parsed
+                .validate()
+                .map_err(|m| ApiError::bad_request("validation_failed", format!("config: {m}")))?;
+            if let Some(svc) = &parsed.scheduling_service_code {
+                scheduling::require_codes(
+                    conn,
+                    tenant_id,
+                    "clinical_service",
+                    std::slice::from_ref(svc),
+                    "config.scheduling_service_code",
+                )
+                .await?;
+            }
+            scheduling::require_codes(
+                conn,
+                tenant_id,
+                "resource_type",
+                &parsed.required_resource_types,
+                "config.required_resource_types",
+            )
+            .await?;
+            let referenced: Vec<String> = parsed
+                .panel_member_codes
+                .iter()
+                .chain(parsed.redundant_with_codes.iter())
+                .cloned()
+                .collect();
+            scheduling::require_codes(
+                conn,
+                tenant_id,
+                "diagnostic_orderable",
+                &referenced,
+                "config.panel_member_codes/redundant_with_codes",
+            )
+            .await?;
+            serde_json::to_value(parsed).map_err(ApiError::internal)
+        }
         "location" => {
             let lat = config.get("latitude").and_then(Value::as_f64);
             let lon = config.get("longitude").and_then(Value::as_f64);

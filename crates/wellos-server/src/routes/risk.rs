@@ -317,7 +317,7 @@ pub(crate) async fn collect_input(
                            WHERE re.observation_id = o.id
                              AND re.outcome->>'outcome' = 'critical') AS critical
             FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
-            WHERE o.tenant_id = $1 AND o.patient_id = $2
+            WHERE o.tenant_id = $1 AND o.patient_id = $2 AND o.value_num IS NOT NULL
               AND NOT EXISTS (SELECT 1 FROM observations x WHERE x.amends = o.id)
          )
          SELECT * FROM (

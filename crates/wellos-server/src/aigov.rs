@@ -109,6 +109,20 @@ pub enum ReuseScope {
     CapacityExplanation {
         capacity_forecast_id: Uuid,
     },
+    /// diagnostic-order-suggestion.v1 bound to one consultation (encounter)
+    /// snapshot; the input hash carries the candidate set and facts.
+    DiagnosticOrderSuggestion {
+        encounter_id: Uuid,
+    },
+    /// diagnostic-result-synthesis.v1 bound to one exact report row.
+    DiagnosticResultSynthesis {
+        diagnostic_report_id: Uuid,
+    },
+    /// patient-result-explanation.v1 bound to one exact, professionally
+    /// reviewed report row.
+    PatientResultExplanation {
+        diagnostic_report_id: Uuid,
+    },
 }
 
 impl ReuseScope {
@@ -123,6 +137,9 @@ impl ReuseScope {
             ReuseScope::AppointmentRanking { .. } => "appointment_ranking",
             ReuseScope::CancellationRecovery { .. } => "cancellation_recovery",
             ReuseScope::CapacityExplanation { .. } => "capacity_explanation",
+            ReuseScope::DiagnosticOrderSuggestion { .. } => "diagnostic_order_suggestion",
+            ReuseScope::DiagnosticResultSynthesis { .. } => "diagnostic_result_synthesis",
+            ReuseScope::PatientResultExplanation { .. } => "patient_result_explanation",
         }
     }
 
@@ -138,6 +155,9 @@ impl ReuseScope {
             ReuseScope::AppointmentRanking { .. } => Operation::AppointmentRanking,
             ReuseScope::CancellationRecovery { .. } => Operation::CancellationRecovery,
             ReuseScope::CapacityExplanation { .. } => Operation::CapacityExplanation,
+            ReuseScope::DiagnosticOrderSuggestion { .. } => Operation::DiagnosticOrderSuggestion,
+            ReuseScope::DiagnosticResultSynthesis { .. } => Operation::DiagnosticResultSynthesis,
+            ReuseScope::PatientResultExplanation { .. } => Operation::PatientResultExplanation,
         }
     }
 
@@ -160,6 +180,9 @@ impl ReuseScope {
             ReuseScope::AppointmentRanking { .. } => "matcher_run_id",
             ReuseScope::CancellationRecovery { .. } => "cancellation_event_id",
             ReuseScope::CapacityExplanation { .. } => "capacity_forecast_id",
+            ReuseScope::DiagnosticOrderSuggestion { .. } => "encounter_id",
+            ReuseScope::DiagnosticResultSynthesis { .. }
+            | ReuseScope::PatientResultExplanation { .. } => "diagnostic_report_id",
         }
     }
 
@@ -178,6 +201,13 @@ impl ReuseScope {
             ReuseScope::CapacityExplanation {
                 capacity_forecast_id,
             } => capacity_forecast_id,
+            ReuseScope::DiagnosticOrderSuggestion { encounter_id } => encounter_id,
+            ReuseScope::DiagnosticResultSynthesis {
+                diagnostic_report_id,
+            }
+            | ReuseScope::PatientResultExplanation {
+                diagnostic_report_id,
+            } => diagnostic_report_id,
         }
     }
 }

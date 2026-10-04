@@ -46,12 +46,12 @@ pub use diagnostics::{
     DiagnosticResponse, OrderSuggestionRequest, PatientExplanationRequest, ResultSynthesisRequest,
 };
 pub use risk::{RiskSummaryRequest, RiskSummaryResponse};
-use wellos_domain::diagnostics_ai::{
-    DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, PatientResultExplanationV1,
-};
 pub use triage::{TriageRequest, TriageResponse};
 use wellos_domain::access_ai::{
     AccessIntentV1, AppointmentRankingV1, CancellationRecoveryV1, CapacityExplanationV1,
+};
+use wellos_domain::diagnostics_ai::{
+    DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, PatientResultExplanationV1,
 };
 
 /// Token accounting reported by a provider, when it reports any. Stored on

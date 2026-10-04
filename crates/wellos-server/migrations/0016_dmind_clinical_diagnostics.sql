@@ -468,6 +468,11 @@ ALTER TABLE notifications
 -- the earliest requester of that test. Codes are derived from the LOINC
 -- code (`loinc-2823-3`); tenants may rename them later through the normal
 -- versioned catalog administration.
+-- Packaged as a function so the synthetic seed can adopt legacy fixtures
+-- through exactly the same statements; idempotent on every call.
+CREATE OR REPLACE FUNCTION wellos_adopt_legacy_lab_orders() RETURNS void
+LANGUAGE plpgsql AS $wellos$
+BEGIN
 INSERT INTO catalog_entries (id, tenant_id, kind, code, name_en, name_es, synonyms, external_codings,
                              config, active, version, created_by, created_at, updated_at)
 SELECT gen_random_uuid(),
@@ -547,3 +552,7 @@ UPDATE observations o
 SET interpretation = 'critical'
 WHERE o.value_type = 'quantity' AND o.interpretation = 'unknown'
   AND EXISTS (SELECT 1 FROM rule_evaluations re WHERE re.observation_id = o.id AND re.outcome ? 'Critical');
+END;
+$wellos$;
+
+SELECT wellos_adopt_legacy_lab_orders();

@@ -675,7 +675,7 @@ pub async fn detail(
     });
 
     let observation_rows = sqlx::query(
-        "SELECT id, code_loinc, value_num::text AS value_num, unit, reference_range, status,
+        "SELECT id, code_loinc, COALESCE(value_num::text, value_code_display, value_code, value_bool::text, value_datetime::text, value_text) AS value_num, COALESCE(unit, '') AS unit, reference_range, status,
                 amends, source_system, effective_at, received_at
          FROM observations WHERE tenant_id=$1 AND service_request_id=$2 ORDER BY received_at",
     )

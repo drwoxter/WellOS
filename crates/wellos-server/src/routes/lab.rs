@@ -1,15 +1,19 @@
-//! Synthetic laboratory adapter boundary.
+//! Laboratory adapter boundary (single-quantity deliveries).
 //!
 //! Inbound results are idempotent (duplicate deliveries with the same
-//! idempotency key create nothing new). The deterministic critical rule runs
-//! in the ingestion transaction; AI summarization happens after commit and can
-//! fail without affecting the clinical record.
+//! idempotency key create nothing new). Each delivery is issued as a one
+//! component diagnostic report through the generalized typed result path, so
+//! deterministic rules, criticality, alerts and order/loop transitions are
+//! shared with every other modality; AI summarization happens after commit
+//! and can fail without affecting the clinical record.
 
 use crate::aigov;
 use crate::audit;
 use crate::auth::AuthContext;
 use crate::error::ApiError;
 use crate::policy::{actions, ResourceCtx};
+use crate::routes::diagnostics::reports::{issue_in, ComponentInput, IssueInput};
+use crate::routes::diagnostics::{load_order, lock_order};
 use crate::routes::guard;
 use crate::state::AppState;
 use axum::extract::State;
@@ -22,9 +26,7 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 use wellos_domain::ai::{ArtifactStatus, AutonomyLevel, ProviderInfo};
-use wellos_domain::result_loop::{LoopState, LoopTransition};
-use wellos_domain::rules::{baseline_rules, RuleOutcome};
-use wellos_domain::units::Quantity;
+use wellos_domain::diagnostics::{ReportStatus, ResultValue};
 
 #[derive(Deserialize)]
 pub struct InboundResult {
@@ -61,7 +63,7 @@ async fn find_duplicate(
     let Some(r) = row else { return Ok(None) };
     let same_delivery = r.get::<Uuid, _>("service_request_id") == body.service_request_id
         && r.get::<String, _>("code_loinc") == body.code_loinc
-        && r.get::<Decimal, _>("value_num") == body.value
+        && r.get::<Option<Decimal>, _>("value_num") == Some(body.value)
         && r.get::<String, _>("unit") == body.unit
         && r.get::<Option<String>, _>("reference_range") == body.reference_range
         && r.get::<String, _>("source_system") == body.source_system
@@ -114,29 +116,17 @@ pub async fn ingest_result(
             ));
         }
     }
-    let sr = sqlx::query(
-        "SELECT sr.tenant_id, sr.patient_id, sr.code_loinc, sr.loop_state, sr.version,
-                p.facility_id
-         FROM service_requests sr JOIN patients p ON p.id = sr.patient_id
-         WHERE sr.id = $1",
-    )
-    .bind(body.service_request_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(ApiError::not_found)?;
-    let tenant_id: Uuid = sr.get("tenant_id");
-    let patient_id: Uuid = sr.get("patient_id");
-    let facility_id: Uuid = sr.get("facility_id");
-    let ordered_code: String = sr.get("code_loinc");
-    if body.code_loinc != ordered_code {
+    let mut conn = state.pool.acquire().await?;
+    let o = load_order(&mut conn, ctx.tenant_id, body.service_request_id).await?;
+    drop(conn);
+    if o.code_loinc.as_deref() != Some(body.code_loinc.as_str()) {
         return Err(ApiError::bad_request(
             "code_mismatch",
             "result code_loinc does not match the ordered test",
         ));
     }
-    let loop_state = LoopState::parse(sr.get::<String, _>("loop_state").as_str())
-        .ok_or_else(|| ApiError::internal("invalid loop state in database"))?;
-
+    let tenant_id = o.tenant_id;
+    let patient_id = o.patient_id;
     let allowed = guard(
         &state,
         &ctx,
@@ -145,7 +135,7 @@ pub async fn ingest_result(
         Some(ResourceCtx {
             tenant_id,
             patient_id: Some(patient_id),
-            facility_id: Some(facility_id),
+            facility_id: Some(o.patient_facility_id),
         }),
     )
     .await?;
@@ -156,225 +146,68 @@ pub async fn ingest_result(
     }
 
     let is_amendment = body.amends_observation_id.is_some();
-    let transition = if is_amendment {
-        LoopTransition::ResultAmended
-    } else {
-        LoopTransition::ResultReceived
-    };
-    let next_state = loop_state
-        .apply(transition)
-        .map_err(|e| ApiError::conflict("invalid_loop_transition", e.to_string()))?;
-
-    let obs_id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    let o = lock_order(&mut tx, tenant_id, o.id).await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
 
-    if let Some(amended_id) = body.amends_observation_id {
-        // Observation rows are append-only: the correction is recorded as a
-        // new observation linked through `amends`, and supersession is
-        // derived from that relationship rather than mutating the prior row.
-        let amended: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM observations
-             WHERE id = $1 AND tenant_id = $2 AND service_request_id = $3",
-        )
-        .bind(amended_id)
-        .bind(tenant_id)
-        .bind(body.service_request_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if amended.is_none() {
-            return Err(ApiError::bad_request(
-                "unknown_amended_observation",
-                "amends_observation_id does not match an observation of this request",
-            ));
-        }
-        // Summaries of the superseded result must not remain reviewable;
-        // already reviewed artifacts stay as historical provenance.
-        sqlx::query(
-            "UPDATE ai_artifacts SET status='superseded'
-             WHERE tenant_id=$1 AND observation_id=$2
-               AND status IN ('draft','awaiting_review','unavailable')",
-        )
-        .bind(tenant_id)
-        .bind(amended_id)
-        .execute(&mut *tx)
-        .await?;
-        // Workflow items raised for the superseded result no longer describe
-        // the current clinical picture: retire open alerts on that
-        // observation and open follow-up tasks on the request. If the
-        // corrected result is still critical, fresh ones are created below.
-        sqlx::query(
-            "UPDATE alerts SET status='superseded', closed_at=now()
-             WHERE tenant_id=$1 AND observation_id=$2 AND status='open'",
-        )
-        .bind(tenant_id)
-        .bind(amended_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE follow_up_tasks SET status='superseded'
-             WHERE tenant_id=$1 AND service_request_id=$2 AND status IN ('open','overdue')",
-        )
-        .bind(tenant_id)
-        .bind(body.service_request_id)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    let inserted = sqlx::query(
-        "INSERT INTO observations
-         (id, tenant_id, service_request_id, patient_id, code_loinc, value_num, unit,
-          reference_range, status, amends, source_system, idempotency_key, effective_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-    )
-    .bind(obs_id)
-    .bind(tenant_id)
-    .bind(body.service_request_id)
-    .bind(patient_id)
-    .bind(&body.code_loinc)
-    .bind(body.value)
-    .bind(&body.unit)
-    .bind(&body.reference_range)
-    .bind(if is_amendment { "corrected" } else { "final" })
-    .bind(body.amends_observation_id)
-    .bind(&body.source_system)
-    .bind(&body.idempotency_key)
-    .bind(body.effective_at)
-    .execute(&mut *tx)
-    .await;
-    if let Err(e) = inserted {
+    // One quantity component per delivery, issued through the generalized
+    // report path: typed observation, deterministic rules and criticality,
+    // alerts/tasks, order and result-loop transitions all happen there.
+    let input = IssueInput {
+        status: if is_amendment {
+            ReportStatus::Corrected
+        } else {
+            ReportStatus::Final
+        },
+        components: vec![ComponentInput {
+            code: body.code_loinc.clone(),
+            system: Some("http://loinc.org".to_string()),
+            display: None,
+            value: ResultValue::Quantity {
+                value: body.value,
+                unit: body.unit.clone(),
+            },
+            reference_range: body.reference_range.clone(),
+            effective_at: Some(body.effective_at),
+            amends_observation_id: body.amends_observation_id,
+        }],
+        conclusion: None,
+        conclusion_codes: Vec::new(),
+        change_reason: is_amendment.then(|| "corrected laboratory delivery".to_string()),
+        idempotency_key: body.idempotency_key.clone(),
+        source_system: body.source_system.clone(),
+        effective_at: Some(body.effective_at),
+        external_report_id: None,
+        sign: true,
+        performer_id: None,
+        legacy_observation_key: true,
+    };
+    let out = match issue_in(&mut tx, &ctx, &state, &o, input).await {
+        Ok(out) => out,
         // A concurrent delivery with the same idempotency key won the race:
         // discard this attempt and return the winner's observation.
-        if matches!(&e, sqlx::Error::Database(db) if db.is_unique_violation()) {
+        Err(e) if e.code == "report_conflict" => {
             tx.rollback().await?;
             if let Some(dup) = find_duplicate(&state, tenant_id, &body).await? {
                 return Ok(Json(dup));
             }
+            return Err(e);
         }
-        return Err(e.into());
-    }
-
-    // Loop transition with optimistic concurrency on the service request.
-    let version: i64 = sr.get("version");
-    let updated = sqlx::query(
-        "UPDATE service_requests SET loop_state = $1, version = version + 1
-         WHERE id = $2 AND version = $3",
-    )
-    .bind(next_state.as_str())
-    .bind(body.service_request_id)
-    .bind(version)
-    .execute(&mut *tx)
-    .await?;
-    if updated.rows_affected() == 0 {
-        return Err(ApiError::conflict(
-            "version_conflict",
-            "service request was modified concurrently",
-        ));
-    }
-
-    audit::emit(
-        &mut *tx,
-        &ctx,
-        if is_amendment {
-            "result.amended"
-        } else {
-            "result.received"
-        },
-        &state.cell,
-        json!({ "observation_id": obs_id, "service_request_id": body.service_request_id }),
-        None,
-    )
-    .await
-    .map_err(ApiError::internal)?;
-
-    // Deterministic critical evaluation — never depends on AI availability.
-    let observed = Quantity {
-        value: body.value,
-        unit: body.unit.clone(),
+        Err(e) => return Err(e),
     };
-    let mut critical = false;
-    let mut unit_mismatch = false;
-    for rule in baseline_rules() {
-        let outcome = rule.evaluate(&body.code_loinc, &observed);
-        if matches!(outcome, RuleOutcome::NotApplicable) {
-            continue;
-        }
-        sqlx::query(
-            "INSERT INTO rule_evaluations (id, tenant_id, observation_id, rule_id, rule_version, outcome)
-             VALUES ($1,$2,$3,$4,$5,$6)",
-        )
-        .bind(Uuid::now_v7())
-        .bind(tenant_id)
-        .bind(obs_id)
-        .bind(&rule.rule_id)
-        .bind(&rule.version)
-        .bind(serde_json::to_value(&outcome).map_err(ApiError::internal)?)
-        .execute(&mut *tx)
-        .await?;
-        match outcome {
-            RuleOutcome::Critical { .. } => critical = true,
-            RuleOutcome::UnitMismatch { reason } => {
-                unit_mismatch = true;
-                // Unsafe comparison refused: record a data-quality issue
-                // instead of silently applying a threshold.
-                sqlx::query(
-                    "INSERT INTO data_quality_issues (id, tenant_id, resource_type, resource_id, issue)
-                     VALUES ($1,$2,'observation',$3,$4)",
-                )
-                .bind(Uuid::now_v7())
-                .bind(tenant_id)
-                .bind(obs_id)
-                .bind(&reason)
-                .execute(&mut *tx)
-                .await?;
-            }
-            _ => {}
-        }
+    if out.duplicate {
+        tx.rollback().await?;
+        return Ok(Json(json!({
+            "observation_id": out.observation_ids.first(),
+            "duplicate": true
+        })));
     }
-
-    if critical {
-        let alert_id = Uuid::now_v7();
-        sqlx::query(
-            "INSERT INTO alerts (id, tenant_id, patient_id, observation_id, severity, message)
-             VALUES ($1,$2,$3,$4,'critical','Critical laboratory result requires review')",
-        )
-        .bind(alert_id)
-        .bind(tenant_id)
-        .bind(patient_id)
-        .bind(obs_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "INSERT INTO follow_up_tasks (id, tenant_id, patient_id, service_request_id, description, priority, due_at)
-             VALUES ($1,$2,$3,$4,'Review critical laboratory result and document follow-up','high', now() + interval '1 hour')",
-        )
-        .bind(Uuid::now_v7())
-        .bind(tenant_id)
-        .bind(patient_id)
-        .bind(body.service_request_id)
-        .execute(&mut *tx)
-        .await?;
-        audit::emit(
-            &mut *tx,
-            &ctx,
-            "result.critical_flagged",
-            &state.cell,
-            json!({ "observation_id": obs_id, "alert_id": alert_id }),
-            None,
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        audit::emit(
-            &mut *tx,
-            &ctx,
-            "follow_up.created",
-            &state.cell,
-            json!({ "service_request_id": body.service_request_id }),
-            None,
-        )
-        .await
-        .map_err(ApiError::internal)?;
-    }
+    let obs_id = *out
+        .observation_ids
+        .first()
+        .ok_or_else(|| ApiError::internal("report issued without an observation"))?;
+    let critical = out.critical;
+    let unit_mismatch = out.unit_mismatch;
 
     // AI artifact request is recorded transactionally; generation happens
     // after commit so a slow/failed model never holds the clinical
@@ -410,19 +243,6 @@ pub async fn ingest_result(
     )
     .await
     .map_err(ApiError::internal)?;
-    super::risk::recalculate_after_change(
-        &mut tx,
-        &ctx,
-        &state,
-        tenant_id,
-        patient_id,
-        if is_amendment {
-            "result.amended"
-        } else {
-            "result.received"
-        },
-    )
-    .await?;
 
     tx.commit().await?;
 
@@ -455,10 +275,12 @@ pub async fn ingest_result(
 
     Ok(Json(json!({
         "observation_id": obs_id,
+        "diagnostic_report_id": out.report.id,
         "critical": critical,
         "unit_mismatch": unit_mismatch,
         "ai_artifact_id": artifact_id,
-        "loop_state": next_state.as_str(),
+        "loop_state": out.order.loop_state,
+        "order_status": out.order.order_status.as_str(),
         "duplicate": false
     })))
 }

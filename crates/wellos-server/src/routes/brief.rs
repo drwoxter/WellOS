@@ -167,7 +167,7 @@ pub(crate) async fn diagnostic_history(
                         WHERE re.observation_id = o.id
                           AND re.outcome->>'outcome' = 'critical') AS critical
          FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
-         WHERE o.tenant_id = $1 AND o.patient_id = $2
+         WHERE o.tenant_id = $1 AND o.patient_id = $2 AND o.value_num IS NOT NULL
          ORDER BY o.effective_at ASC, o.received_at ASC, o.id ASC",
     )
     .bind(tenant_id)
@@ -430,7 +430,7 @@ async fn recent_abnormal(
                             WHERE re.observation_id = o.id
                               AND re.outcome->>'outcome' = 'critical') AS critical
              FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
-             WHERE o.tenant_id = $1 AND o.patient_id = $2
+             WHERE o.tenant_id = $1 AND o.patient_id = $2 AND o.value_num IS NOT NULL
                AND NOT EXISTS (SELECT 1 FROM observations x WHERE x.amends = o.id)
                AND ($3::timestamptz IS NULL OR (o.effective_at, o.id) < ($3, $4::uuid))
              ORDER BY o.effective_at DESC, o.id DESC LIMIT $5",

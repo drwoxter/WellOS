@@ -282,7 +282,7 @@ impl DiagnosticResultSynthesisV1 {
         }
         check_list(&self.cited_sources, "cited_sources")?;
         check_subset(&self.cited_sources, &allowed, "cited_sources")?;
-        if !self.cited_sources.iter().any(|c| *c == bounds.report_ref) {
+        if !self.cited_sources.contains(&bounds.report_ref) {
             return Err("synthesis must cite the report it summarizes".into());
         }
         if self.limitations.is_empty() {
@@ -367,7 +367,7 @@ impl PatientResultExplanationV1 {
         }
         check_list(&self.cited_sources, "cited_sources")?;
         check_subset(&self.cited_sources, &allowed, "cited_sources")?;
-        if !self.cited_sources.iter().any(|c| *c == bounds.report_ref) {
+        if !self.cited_sources.contains(&bounds.report_ref) {
             return Err("explanation must cite the report".into());
         }
         if self.limitations.is_empty() {
@@ -420,7 +420,11 @@ mod tests {
             report_ref: "report:r1".into(),
             criticality: Interpretation::Critical,
             components: vec![("component:c1".into(), Interpretation::Critical)],
-            fact_refs: vec!["report:r1".into(), "component:c1".into(), "obs:prior".into()],
+            fact_refs: vec![
+                "report:r1".into(),
+                "component:c1".into(),
+                "obs:prior".into(),
+            ],
         };
         let out = DiagnosticResultSynthesisV1 {
             schema_version: RESULT_SYNTHESIS_SCHEMA.into(),

@@ -389,6 +389,7 @@ pub const CATALOG_KINDS: &[&str] = &[
     "accessibility_capability",
     "location",
     "transport_resource",
+    "diagnostic_orderable",
 ];
 
 pub fn is_catalog_kind(kind: &str) -> bool {

@@ -5,6 +5,7 @@ pub mod capacity;
 pub mod crypto;
 pub mod error;
 pub mod notify;
+pub mod objectstore;
 pub mod oidc;
 pub mod policy;
 pub mod ratelimit;
@@ -14,6 +15,8 @@ pub mod runtime;
 pub mod scheduling;
 #[cfg(feature = "dev-fixtures")]
 mod seed_access;
+#[cfg(feature = "dev-fixtures")]
+mod seed_diagnostics;
 #[cfg(feature = "dev-fixtures")]
 pub mod seeddata;
 pub mod state;

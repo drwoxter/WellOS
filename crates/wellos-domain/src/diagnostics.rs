@@ -522,17 +522,18 @@ pub fn interpret_component(
         return Interpretation::Critical;
     }
     match value {
-        ResultValue::Quantity { value, .. } => match reference_range.and_then(parse_reference_range)
-        {
-            Some((lo, hi)) => {
-                if lo.is_some_and(|lo| *value < lo) || hi.is_some_and(|hi| *value > hi) {
-                    Interpretation::Abnormal
-                } else {
-                    Interpretation::Normal
+        ResultValue::Quantity { value, .. } => {
+            match reference_range.and_then(parse_reference_range) {
+                Some((lo, hi)) => {
+                    if lo.is_some_and(|lo| *value < lo) || hi.is_some_and(|hi| *value > hi) {
+                        Interpretation::Abnormal
+                    } else {
+                        Interpretation::Normal
+                    }
                 }
+                None => Interpretation::Unknown,
             }
-            None => Interpretation::Unknown,
-        },
+        }
         ResultValue::Coded { code, .. } => match coded_rule {
             Some(rule) if rule.critical_codes.iter().any(|c| c == code) => Interpretation::Critical,
             Some(rule) if rule.abnormal_codes.iter().any(|c| c == code) => Interpretation::Abnormal,
@@ -637,7 +638,10 @@ impl SpecimenStatus {
             | (S::Processing, E::Rejected) => Some(S::Rejected),
             _ => None,
         };
-        next.ok_or(InvalidSpecimenEvent { from: self, event: e })
+        next.ok_or(InvalidSpecimenEvent {
+            from: self,
+            event: e,
+        })
     }
 
     pub fn as_str(self) -> &'static str {
@@ -840,6 +844,21 @@ fn default_duplicate_window() -> u32 {
     7
 }
 
+/// Fact keys are either bounded flags (`pregnancy_possible`, `paediatric`)
+/// or a `<source>:<code>` lookup into the patient facts the engine loads
+/// (`allergy:contrast`, `medication:apixaban`, `condition:z95.0`).
+pub fn is_valid_fact_key(key: &str) -> bool {
+    match key.split_once(':') {
+        Some((source, code)) => {
+            matches!(
+                source,
+                "allergy" | "medication" | "condition" | "sex" | "age_years"
+            ) && is_valid_code(code)
+        }
+        None => is_valid_code(key),
+    }
+}
+
 impl OrderableConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !is_valid_code(&self.category_code) {
@@ -891,14 +910,17 @@ impl OrderableConfig {
         let mut ids = BTreeSet::new();
         for r in &self.safety_rules {
             if !is_valid_code(&r.id) || !ids.insert(r.id.as_str()) {
-                return Err(format!("safety rule id {:?} is invalid or duplicated", r.id));
+                return Err(format!(
+                    "safety rule id {:?} is invalid or duplicated",
+                    r.id
+                ));
             }
             if r.text_en.trim().is_empty() || r.text_es.trim().is_empty() {
                 return Err(format!("safety rule {} needs EN and ES text", r.id));
             }
             match r.kind {
                 SafetyRuleKind::Fact | SafetyRuleKind::Prerequisite => {
-                    if r.fact_key.as_deref().is_none_or(|k| !is_valid_code(k)) {
+                    if r.fact_key.as_deref().is_none_or(|k| !is_valid_fact_key(k)) {
                         return Err(format!("safety rule {} needs a fact_key", r.id));
                     }
                 }
@@ -950,8 +972,7 @@ impl OrderableConfig {
     }
 
     pub fn needs_specimen(&self) -> bool {
-        self.requires_specimen
-            .unwrap_or(self.specimen.is_some())
+        self.requires_specimen.unwrap_or(self.specimen.is_some())
     }
 
     pub fn component(&self, code: &str) -> Option<&ComponentSpec> {
@@ -1130,6 +1151,7 @@ pub enum SafetyBlock {
     HardStops(Vec<String>),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finding(
     kind: FindingKind,
     severity: SafetySeverity,
@@ -1269,7 +1291,10 @@ pub fn evaluate_safety(input: &SafetyInput) -> SafetyEvaluation {
                     c,
                     Some(r),
                     format!("{} is redundant with {} in the same request", c.name_en, r),
-                    format!("{} es redundante con {} en la misma solicitud", c.name_es, r),
+                    format!(
+                        "{} es redundante con {} en la misma solicitud",
+                        c.name_es, r
+                    ),
                     vec![format!("catalog:{}", c.code), format!("catalog:{r}")],
                     false,
                 ));
@@ -1284,8 +1309,14 @@ pub fn evaluate_safety(input: &SafetyInput) -> SafetyEvaluation {
                     SafetySeverity::Warning,
                     c,
                     Some("fasting"),
-                    format!("{} requires {h} h fasting before specimen collection", c.name_en),
-                    format!("{} requiere {h} h de ayuno antes de la toma de muestra", c.name_es),
+                    format!(
+                        "{} requires {h} h fasting before specimen collection",
+                        c.name_en
+                    ),
+                    format!(
+                        "{} requiere {h} h de ayuno antes de la toma de muestra",
+                        c.name_es
+                    ),
                     vec![format!("catalog:{}", c.code)],
                     false,
                 ));
@@ -1329,7 +1360,11 @@ pub fn evaluate_safety(input: &SafetyInput) -> SafetyEvaluation {
                             } else {
                                 FindingKind::UnansweredQuestion
                             },
-                            if answered { r.severity } else { SafetySeverity::Warning },
+                            if answered {
+                                r.severity
+                            } else {
+                                SafetySeverity::Warning
+                            },
                             c,
                             Some(&r.id),
                             r.text_en.clone(),
@@ -1364,7 +1399,10 @@ pub fn evaluate_safety(input: &SafetyInput) -> SafetyEvaluation {
                             Some(&r.id),
                             r.text_en.clone(),
                             r.text_es.clone(),
-                            vec![format!("rule:{}:{}", c.code, r.id), format!("missing:{key}")],
+                            vec![
+                                format!("rule:{}:{}", c.code, r.id),
+                                format!("missing:{key}"),
+                            ],
                             false,
                         ));
                     }
@@ -1381,7 +1419,10 @@ pub fn evaluate_safety(input: &SafetyInput) -> SafetyEvaluation {
                 SafetySeverity::HardStop,
                 c,
                 None,
-                format!("{} is clinically timed but has no requested window", c.name_en),
+                format!(
+                    "{} is clinically timed but has no requested window",
+                    c.name_en
+                ),
                 format!(
                     "{} está programado clínicamente pero no tiene ventana solicitada",
                     c.name_es
@@ -1398,7 +1439,10 @@ pub fn evaluate_safety(input: &SafetyInput) -> SafetyEvaluation {
                     c,
                     Some("past"),
                     format!("{} requested window ends in the past", c.name_en),
-                    format!("{} tiene una ventana solicitada que termina en el pasado", c.name_es),
+                    format!(
+                        "{} tiene una ventana solicitada que termina en el pasado",
+                        c.name_es
+                    ),
                     vec![format!("catalog:{}", c.code)],
                     false,
                 ));
@@ -1499,7 +1543,10 @@ mod tests {
     #[test]
     fn report_chain_rules() {
         assert!(ReportStatus::can_be_replaced_by(None, ReportStatus::Final));
-        assert!(!ReportStatus::can_be_replaced_by(None, ReportStatus::Amended));
+        assert!(!ReportStatus::can_be_replaced_by(
+            None,
+            ReportStatus::Amended
+        ));
         assert!(ReportStatus::can_be_replaced_by(
             Some(ReportStatus::Preliminary),
             ReportStatus::Final
@@ -1528,8 +1575,14 @@ mod tests {
             parse_reference_range("-2.0 - 2.0"),
             Some((Some(Decimal::new(-20, 1)), Some(Decimal::new(20, 1))))
         );
-        assert_eq!(parse_reference_range("<200"), Some((None, Some(Decimal::new(200, 0)))));
-        assert_eq!(parse_reference_range("≥60"), Some((Some(Decimal::new(60, 0)), None)));
+        assert_eq!(
+            parse_reference_range("<200"),
+            Some((None, Some(Decimal::new(200, 0))))
+        );
+        assert_eq!(
+            parse_reference_range("≥60"),
+            Some((Some(Decimal::new(60, 0)), None))
+        );
         assert_eq!(parse_reference_range("negative"), None);
         let q = ResultValue::Quantity {
             value: Decimal::new(61, 1),
@@ -1543,7 +1596,10 @@ mod tests {
             interpret_component(&q, Some("3.5-5.1"), true, None),
             Interpretation::Critical
         );
-        assert_eq!(interpret_component(&q, None, false, None), Interpretation::Unknown);
+        assert_eq!(
+            interpret_component(&q, None, false, None),
+            Interpretation::Unknown
+        );
         let coded = ResultValue::Coded {
             code: "malignant".into(),
             system: "http://snomed.info/sct".into(),
@@ -1644,9 +1700,7 @@ mod tests {
         ));
         // Answering "yes, implant" turns the question into a hard stop.
         let mut answered = input.clone();
-        answered
-            .answers
-            .insert("mri_brain:implant".into(), true);
+        answered.answers.insert("mri_brain:implant".into(), true);
         let e = evaluate_safety(&answered);
         let stop = e
             .findings
@@ -1665,9 +1719,7 @@ mod tests {
             .is_ok());
         // Answering "no" resolves it.
         let mut resolved = input.clone();
-        resolved
-            .answers
-            .insert("mri_brain:implant".into(), false);
+        resolved.answers.insert("mri_brain:implant".into(), false);
         let r = evaluate_safety(&resolved);
         assert!(!r.findings.iter().any(|f| f.id.contains("implant")));
     }
@@ -1735,10 +1787,8 @@ mod tests {
         .validate()
         .is_err());
         assert!(ResultValue::Boolean { value: true }.validate().is_ok());
-        let v: ResultValue = serde_json::from_str(
-            r#"{"type":"quantity","value":"4.2","unit":"mmol/L"}"#,
-        )
-        .unwrap();
+        let v: ResultValue =
+            serde_json::from_str(r#"{"type":"quantity","value":"4.2","unit":"mmol/L"}"#).unwrap();
         assert_eq!(v.result_type(), ResultType::Quantity);
     }
 }

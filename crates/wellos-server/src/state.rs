@@ -356,6 +356,9 @@ pub struct AppState {
     pub auth: Arc<AuthConfig>,
     /// Typed runtime environment and provider selection.
     pub runtime: Arc<RuntimeConfig>,
+    /// Clinical document bytes (never PostgreSQL); `disabled` fails closed
+    /// with 503 on document routes.
+    pub object_store: Arc<dyn crate::objectstore::ObjectStore>,
 }
 
 impl AppState {
@@ -386,6 +389,10 @@ impl AppState {
         auth: AuthConfig,
         runtime: RuntimeConfig,
     ) -> Self {
+        let object_store = runtime
+            .object_store
+            .build()
+            .unwrap_or_else(|e| panic!("object store construction failed: {e}"));
         Self {
             pool,
             gateway,
@@ -394,6 +401,7 @@ impl AppState {
             cell: runtime.cell.clone(),
             auth: Arc::new(auth),
             runtime: Arc::new(runtime),
+            object_store,
         }
     }
 }

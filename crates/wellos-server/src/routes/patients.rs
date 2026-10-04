@@ -299,7 +299,7 @@ pub(crate) async fn chart_payload(
     let observations = sqlx::query(
         // Observation rows are append-only: supersession is derived from
         // the amendment relationship rather than a mutated status.
-        "SELECT id, code_loinc, value_num::text AS value_num, unit, status, effective_at,
+        "SELECT id, code_loinc, COALESCE(value_num::text, value_code_display, value_code, value_bool::text, value_datetime::text, value_text) AS value_num, COALESCE(unit, '') AS unit, status, effective_at,
                 EXISTS(SELECT 1 FROM observations o2
                        WHERE o2.tenant_id = observations.tenant_id AND o2.amends = observations.id)
                     AS superseded

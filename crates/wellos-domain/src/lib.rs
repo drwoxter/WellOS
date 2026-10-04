@@ -12,6 +12,7 @@ pub mod capacity;
 pub mod diagnostics;
 pub mod diagnostics_ai;
 pub mod events;
+pub mod fhir;
 pub mod ics;
 pub mod ids;
 pub mod matcher;

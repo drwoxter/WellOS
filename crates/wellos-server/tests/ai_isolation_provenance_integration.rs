@@ -130,6 +130,39 @@ struct RealLikeGateway {
 
 #[async_trait::async_trait]
 impl ModelGateway for RealLikeGateway {
+    async fn suggest_orders(
+        &self,
+        req: &dmind_gateway::diagnostics::OrderSuggestionRequest,
+    ) -> Result<
+        dmind_gateway::diagnostics::DiagnosticResponse<
+            wellos_domain::diagnostics_ai::DiagnosticOrderSuggestionV1,
+        >,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.suggest_orders(req).await
+    }
+    async fn synthesize_result(
+        &self,
+        req: &dmind_gateway::diagnostics::ResultSynthesisRequest,
+    ) -> Result<
+        dmind_gateway::diagnostics::DiagnosticResponse<
+            wellos_domain::diagnostics_ai::DiagnosticResultSynthesisV1,
+        >,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.synthesize_result(req).await
+    }
+    async fn explain_result_for_patient(
+        &self,
+        req: &dmind_gateway::diagnostics::PatientExplanationRequest,
+    ) -> Result<
+        dmind_gateway::diagnostics::DiagnosticResponse<
+            wellos_domain::diagnostics_ai::PatientResultExplanationV1,
+        >,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.explain_result_for_patient(req).await
+    }
     fn info(&self) -> ProviderInfo {
         real_model_info()
     }

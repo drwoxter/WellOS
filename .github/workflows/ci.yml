@@ -34,6 +34,7 @@ jobs:
       WELLOS_ALLOW_SYNTHETIC_SEED: "true"
       DMIND_MODEL_PROVIDER: fake
       WELLOS_SCRIBE_PROVIDER: fake
+      WELLOS_OBJECT_STORE: fixture
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -113,6 +114,7 @@ jobs:
       WELLOS_DEV_AUTH: "true"
       DMIND_MODEL_PROVIDER: fake
       WELLOS_SCRIBE_PROVIDER: fake
+      WELLOS_OBJECT_STORE: fixture
       WELLOS_BIND_ADDR: 127.0.0.1:8080
       CI: "true"
     steps:

@@ -41,9 +41,6 @@ use crate::diagnostics::{
     parse_explanation, parse_suggestion, parse_synthesis, DiagnosticResponse,
     OrderSuggestionRequest, PatientExplanationRequest, ResultSynthesisRequest,
 };
-use wellos_domain::diagnostics_ai::{
-    DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, PatientResultExplanationV1,
-};
 use crate::notes::{
     validate_note_draft, NoteDraftRequest, NoteDraftResponse, CLINICIAN_JUDGEMENT_SECTIONS,
     NOTE_DRAFT_TEMPLATE,
@@ -53,6 +50,9 @@ use crate::triage::{triage_input_hash, TriageRequest, TriageResponse};
 use crate::{
     input_hash, CapabilityStatus, GatewayError, GatewayResponse, ModelGateway, Operation,
     ProviderHealth, SummaryRequest, Usage,
+};
+use wellos_domain::diagnostics_ai::{
+    DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, PatientResultExplanationV1,
 };
 
 pub const PROVIDER_NAME: &str = "openai-compatible";
@@ -814,13 +814,15 @@ impl ModelGateway for OpenAiCompatibleModel {
             "candidates": req.candidates,
         });
         let (raw, usage) = self.complete(&system, &user).await?;
-        self.validated(parse_suggestion(&raw, req).map(|output| DiagnosticResponse {
-            output,
-            provider: self.info(),
-            prompt_version: ORDER_SUGGESTION_PROMPT_VERSION.into(),
-            input_hash: crate::hash_json(req),
-            usage,
-        }))
+        self.validated(
+            parse_suggestion(&raw, req).map(|output| DiagnosticResponse {
+                output,
+                provider: self.info(),
+                prompt_version: ORDER_SUGGESTION_PROMPT_VERSION.into(),
+                input_hash: crate::hash_json(req),
+                usage,
+            }),
+        )
     }
 
     async fn synthesize_result(
@@ -896,13 +898,15 @@ impl ModelGateway for OpenAiCompatibleModel {
             "facts": facts_json(&req.facts),
         });
         let (raw, usage) = self.complete(&system, &user).await?;
-        self.validated(parse_explanation(&raw, req).map(|output| DiagnosticResponse {
-            output,
-            provider: self.info(),
-            prompt_version: PATIENT_EXPLANATION_PROMPT_VERSION.into(),
-            input_hash: crate::hash_json(req),
-            usage,
-        }))
+        self.validated(
+            parse_explanation(&raw, req).map(|output| DiagnosticResponse {
+                output,
+                provider: self.info(),
+                prompt_version: PATIENT_EXPLANATION_PROMPT_VERSION.into(),
+                input_hash: crate::hash_json(req),
+                usage,
+            }),
+        )
     }
 }
 

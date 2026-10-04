@@ -19,9 +19,9 @@ use uuid::Uuid;
 use wellos_domain::ai::{Confidence, ProviderInfo};
 use wellos_domain::diagnostics::Interpretation;
 use wellos_domain::diagnostics_ai::{
-    ComponentStatement, DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1,
-    DuplicateWarning, ExplanationBounds, PatientResultExplanationV1, SuggestedOrderable,
-    SynthesisBounds, ORDER_SUGGESTION_SCHEMA, PATIENT_EXPLANATION_SCHEMA, RESULT_SYNTHESIS_SCHEMA,
+    ComponentStatement, DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, DuplicateWarning,
+    ExplanationBounds, PatientResultExplanationV1, SuggestedOrderable, SynthesisBounds,
+    ORDER_SUGGESTION_SCHEMA, PATIENT_EXPLANATION_SCHEMA, RESULT_SYNTHESIS_SCHEMA,
 };
 
 use crate::access::AccessResponse;
@@ -60,10 +60,14 @@ fn check_facts(facts: &[(String, String)]) -> Result<(), GatewayError> {
     }
     for (r, s) in facts {
         if r.trim().is_empty() || r.chars().count() > 120 {
-            return Err(GatewayError::InvalidOutput("fact reference is invalid".into()));
+            return Err(GatewayError::InvalidOutput(
+                "fact reference is invalid".into(),
+            ));
         }
         if s.chars().count() > 2_000 {
-            return Err(GatewayError::InvalidOutput("fact statement is oversized".into()));
+            return Err(GatewayError::InvalidOutput(
+                "fact statement is oversized".into(),
+            ));
         }
     }
     Ok(())
@@ -145,7 +149,11 @@ impl OrderSuggestionRequest {
         self.facts
             .iter()
             .map(|(r, _)| r.clone())
-            .chain(self.candidates.iter().map(|c| format!("catalog:{}", c.code)))
+            .chain(
+                self.candidates
+                    .iter()
+                    .map(|c| format!("catalog:{}", c.code)),
+            )
             .collect()
     }
 }
@@ -156,7 +164,10 @@ pub fn parse_suggestion(
 ) -> Result<DiagnosticOrderSuggestionV1, GatewayError> {
     let mut raw = raw.clone();
     if let Some(obj) = raw.as_object_mut() {
-        obj.insert("schema_version".into(), Value::from(ORDER_SUGGESTION_SCHEMA));
+        obj.insert(
+            "schema_version".into(),
+            Value::from(ORDER_SUGGESTION_SCHEMA),
+        );
     }
     let out: DiagnosticOrderSuggestionV1 = serde_json::from_value(raw)
         .map_err(|e| GatewayError::InvalidOutput(format!("suggestion schema: {e}")))?;
@@ -249,7 +260,8 @@ pub fn deterministic_suggestion(
     let mut missing_information = Vec::new();
     if req.facts.is_empty() {
         missing_information.push(if spanish {
-            "No hay evidencia de la consulta disponible; documente el motivo de consulta.".to_string()
+            "No hay evidencia de la consulta disponible; documente el motivo de consulta."
+                .to_string()
         } else {
             "No consultation evidence is available; document the presenting problem.".to_string()
         });
@@ -370,7 +382,10 @@ pub fn parse_synthesis(
 ) -> Result<DiagnosticResultSynthesisV1, GatewayError> {
     let mut raw = raw.clone();
     if let Some(obj) = raw.as_object_mut() {
-        obj.insert("schema_version".into(), Value::from(RESULT_SYNTHESIS_SCHEMA));
+        obj.insert(
+            "schema_version".into(),
+            Value::from(RESULT_SYNTHESIS_SCHEMA),
+        );
     }
     let out: DiagnosticResultSynthesisV1 = serde_json::from_value(raw)
         .map_err(|e| GatewayError::InvalidOutput(format!("synthesis schema: {e}")))?;
@@ -410,11 +425,7 @@ pub fn deterministic_synthesis(
             } else {
                 format!("Prior value {v} ({r}).")
             };
-            changes.push(if spanish {
-                format!("{}: {} → {}", c.display, v, c.value_text)
-            } else {
-                format!("{}: {} → {}", c.display, v, c.value_text)
-            });
+            changes.push(format!("{}: {} → {}", c.display, v, c.value_text));
             s
         });
         let statement = if spanish {
@@ -546,7 +557,9 @@ impl PatientExplanationRequest {
         check_template(&self.template, PATIENT_EXPLANATION_TEMPLATE)?;
         check_facts(&self.facts)?;
         if !self.report_ref.starts_with("report:") || self.report_version < 1 {
-            return Err(GatewayError::InvalidOutput("report binding is invalid".into()));
+            return Err(GatewayError::InvalidOutput(
+                "report binding is invalid".into(),
+            ));
         }
         if self.review_summary.trim().is_empty() {
             return Err(GatewayError::PolicyDenied(
@@ -574,7 +587,10 @@ pub fn parse_explanation(
 ) -> Result<PatientResultExplanationV1, GatewayError> {
     let mut raw = raw.clone();
     if let Some(obj) = raw.as_object_mut() {
-        obj.insert("schema_version".into(), Value::from(PATIENT_EXPLANATION_SCHEMA));
+        obj.insert(
+            "schema_version".into(),
+            Value::from(PATIENT_EXPLANATION_SCHEMA),
+        );
         obj.insert("report_ref".into(), Value::from(req.report_ref.clone()));
         obj.insert("report_version".into(), Value::from(req.report_version));
     }
@@ -689,7 +705,10 @@ mod tests {
         };
         let out = deterministic_suggestion(&req, provider()).unwrap().output;
         assert_eq!(out.suggestions.len(), 1);
-        assert_eq!(out.suggestions[0].orderable_id, req.candidates[0].orderable_id);
+        assert_eq!(
+            out.suggestions[0].orderable_id,
+            req.candidates[0].orderable_id
+        );
         assert!(out.suggestions[0]
             .cited_sources
             .contains(&"note:assessment".to_string()));

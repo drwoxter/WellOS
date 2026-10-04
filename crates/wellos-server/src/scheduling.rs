@@ -2315,6 +2315,7 @@ pub async fn confirm_offer(
         input.reschedule_of.is_some(),
     )
     .await?;
+    crate::routes::diagnostics::on_appointment_confirmed(tx, ctx, state, &appt).await?;
     Ok(appt)
 }
 
@@ -2681,6 +2682,7 @@ pub async fn close_appointment(
             crate::recovery::start_event(tx, ctx, state, event_id).await?;
         }
     }
+    crate::routes::diagnostics::on_appointment_closed(tx, ctx, state, a, t, next).await?;
     lock_appointment(tx, a.id).await
 }
 

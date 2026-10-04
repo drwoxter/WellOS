@@ -38,7 +38,7 @@ use crate::state::AppState;
 use crate::state::AuthConfig;
 use crate::{capacity, notify, recovery, transport};
 
-type Tx<'a> = Transaction<'a, Postgres>;
+pub(crate) type Tx<'a> = Transaction<'a, Postgres>;
 
 /// Identifiers the access fixtures are built on top of.
 pub(crate) struct AccessFixtureInput {
@@ -76,13 +76,13 @@ pub(crate) struct AccessFixtures {
     pub ai_degraded_request: Uuid,
 }
 
-fn body<T: DeserializeOwned>(v: Value) -> anyhow::Result<T> {
+pub(crate) fn body<T: DeserializeOwned>(v: Value) -> anyhow::Result<T> {
     Ok(serde_json::from_value(v)?)
 }
 
 /// Staff fixture identity: the same shape the HTTP layer builds after
 /// authentication, with tenant-wide administrative and scheduling roles.
-fn staff_ctx(tenant: Uuid, user: Uuid, facility: Uuid, purpose: Purpose) -> AuthContext {
+pub(crate) fn staff_ctx(tenant: Uuid, user: Uuid, facility: Uuid, purpose: Purpose) -> AuthContext {
     AuthContext {
         user_id: user,
         tenant_id: tenant,
@@ -139,7 +139,7 @@ pub(crate) fn fixture_state(pool: PgPool, runtime: &RuntimeConfig) -> AppState {
     )
 }
 
-async fn insert_user(
+pub(crate) async fn insert_user(
     tx: &mut Tx<'_>,
     tenant: Uuid,
     username: &str,
@@ -234,7 +234,12 @@ type CatalogSpec = (
     Value,
 );
 
-fn service(duration: i32, modalities: &[&str], required: &[&str], extra: Value) -> Value {
+pub(crate) fn service(
+    duration: i32,
+    modalities: &[&str],
+    required: &[&str],
+    extra: Value,
+) -> Value {
     let mut v = json!({
         "duration_minutes": duration,
         "modality_codes": modalities,
@@ -1022,23 +1027,23 @@ async fn install_catalogs(
     Ok(())
 }
 
-struct ResourceSpec<'a> {
-    facility: Uuid,
-    rtype: &'a str,
-    name: &'a str,
-    user: Option<Uuid>,
-    profession: Option<&'a str>,
-    specialties: &'a [&'a str],
-    languages: &'a [&'a str],
-    accessibility: &'a [&'a str],
-    capacity: i32,
-    time_zone: &'a str,
-    services: Vec<Value>,
+pub(crate) struct ResourceSpec<'a> {
+    pub facility: Uuid,
+    pub rtype: &'a str,
+    pub name: &'a str,
+    pub user: Option<Uuid>,
+    pub profession: Option<&'a str>,
+    pub specialties: &'a [&'a str],
+    pub languages: &'a [&'a str],
+    pub accessibility: &'a [&'a str],
+    pub capacity: i32,
+    pub time_zone: &'a str,
+    pub services: Vec<Value>,
     /// (weekday, start, end, kind, capacity)
-    rules: Vec<(u8, &'a str, &'a str, &'a str, Option<i32>)>,
+    pub rules: Vec<(u8, &'a str, &'a str, &'a str, Option<i32>)>,
 }
 
-fn svc(code: &str) -> Value {
+pub(crate) fn svc(code: &str) -> Value {
     json!({ "service_code": code, "modality_codes": [] })
 }
 
@@ -1046,7 +1051,7 @@ fn svc_mod(code: &str, modalities: &[&str]) -> Value {
     json!({ "service_code": code, "modality_codes": modalities })
 }
 
-fn weekdays<'a>(
+pub(crate) fn weekdays<'a>(
     days: &[u8],
     start: &'a str,
     end: &'a str,
@@ -1057,7 +1062,7 @@ fn weekdays<'a>(
         .collect()
 }
 
-async fn create_resource(
+pub(crate) async fn create_resource(
     tx: &mut Tx<'_>,
     ctx: &AuthContext,
     state: &AppState,
