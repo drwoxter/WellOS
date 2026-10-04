@@ -78,6 +78,9 @@ CREATE TABLE diagnostic_order_groups (
     -- dMind suggestion the clinician looked at (never the author of the order).
     suggestion_artifact_id uuid REFERENCES ai_artifacts(id),
     idempotency_key        text,
+    -- Fingerprint of the confirmed payload: a replayed key with a different
+    -- payload is a conflict, never a silent replay.
+    request_hash           text,
     version                bigint NOT NULL DEFAULT 1,
     created_at             timestamptz NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, idempotency_key)
@@ -188,6 +191,7 @@ CREATE TABLE diagnostic_reports (
     source_system          text NOT NULL,
     external_report_id     text,
     idempotency_key        text NOT NULL,
+    payload_hash           text,
     change_reason          text,
     created_by             uuid REFERENCES users(id),
     created_at             timestamptz NOT NULL DEFAULT now(),

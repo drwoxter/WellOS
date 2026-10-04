@@ -111,6 +111,7 @@ struct Series {
     latest_value: Option<Decimal>,
     latest_range: Option<String>,
     pending: Vec<Value>,
+    pending_refs: Vec<String>,
 }
 
 impl Series {
@@ -125,6 +126,7 @@ impl Series {
             latest_value: None,
             latest_range: None,
             pending: Vec::new(),
+            pending_refs: Vec::new(),
         }
     }
 }
@@ -252,6 +254,9 @@ pub(crate) async fn diagnostic_history(
         let entry = groups
             .entry(code)
             .or_insert_with(|| Series::new(r.get("display"), String::new()));
+        entry
+            .pending_refs
+            .push(format!("service_request:{}", r.get::<Uuid, _>("id")));
         entry.pending.push(json!({
             "id": r.get::<Uuid,_>("id"),
             "display": r.get::<String,_>("display"),
@@ -281,6 +286,7 @@ pub(crate) async fn diagnostic_history(
             result_count: s.values.len() + s.incomparable,
             incomparable_count: s.incomparable,
             pending_count: s.pending.len(),
+            pending_refs: s.pending_refs.clone(),
         });
         tests.push(json!({
             "code": code,

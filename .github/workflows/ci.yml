@@ -57,6 +57,8 @@ jobs:
         run: cargo run -p wellos-server --bin seed --features dev-fixtures
       - name: Pre-0015 upgrade migration gate (0001..0014 schema + legacy visits -> 0015)
         run: cargo test -p wellos-server --test upgrade_migration_integration
+      - name: Pre-0016 upgrade migration gate (0001..0015 schema + legacy laboratory orders -> 0016)
+        run: cargo test -p wellos-server --test upgrade_migration_0016_integration
       - name: Integration tests
         run: cargo test --workspace --test '*'
 

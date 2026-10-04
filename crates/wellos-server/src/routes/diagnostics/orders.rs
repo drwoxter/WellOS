@@ -992,6 +992,43 @@ async fn record_generation_failure(
 // Confirmation
 // ---------------------------------------------------------------------------
 
+/// Canonical SHA-256 of everything a confirmation decides, so that a
+/// replayed idempotency key is honoured only for the identical payload.
+fn confirm_fingerprint(body: &ConfirmBody) -> String {
+    use sha2::Digest;
+    let c = &body.composition;
+    let mut acknowledged = body.acknowledged_ids.clone();
+    acknowledged.sort();
+    acknowledged.dedup();
+    let items: Vec<Value> = c
+        .items
+        .iter()
+        .map(|i| {
+            json!({
+                "orderable_id": i.orderable_id,
+                "fulfilment_mode": i.fulfilment_mode,
+                "priority": i.priority,
+                "requested_window_start": i.requested_window_start,
+                "requested_window_end": i.requested_window_end,
+            })
+        })
+        .collect();
+    let canonical = json!({
+        "items": items,
+        "answers": c.answers,
+        "performing_facility_id": c.performing_facility_id,
+        "priority": c.priority,
+        "safety_evaluation_id": body.safety_evaluation_id,
+        "acknowledged_ids": acknowledged,
+        "override_reason": body.override_reason,
+        "clinical_indication": body.clinical_indication,
+        "clinical_question": body.clinical_question,
+        "suggestion_artifact_id": body.suggestion_artifact_id,
+        "schedule": body.schedule,
+    });
+    hex::encode(sha2::Sha256::digest(canonical.to_string().as_bytes()))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ConfirmBody {
     #[serde(flatten)]
@@ -1103,9 +1140,10 @@ pub async fn confirm(
     require_order_context(&e, &ctx)?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
 
+    let request_hash = confirm_fingerprint(&body);
     if let Some(key) = &idempotency_key {
-        if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM diagnostic_order_groups
+        if let Some(existing) = sqlx::query(
+            "SELECT id, request_hash FROM diagnostic_order_groups
              WHERE tenant_id = $1 AND idempotency_key = $2 AND requester_id = $3 AND encounter_id = $4",
         )
         .bind(e.tenant_id)
@@ -1115,7 +1153,13 @@ pub async fn confirm(
         .fetch_optional(&mut *tx)
         .await?
         {
-            let out = group_json(&mut tx, e.tenant_id, existing, true).await?;
+            if existing.get::<Option<String>, _>("request_hash").as_deref() != Some(&*request_hash) {
+                return Err(ApiError::conflict(
+                    "idempotency_conflict",
+                    "this idempotency key was used with a different payload",
+                ));
+            }
+            let out = group_json(&mut tx, e.tenant_id, existing.get("id"), true).await?;
             tx.commit().await?;
             return Ok(Json(json!({ "group": out })));
         }
@@ -1282,8 +1326,8 @@ pub async fn confirm(
     sqlx::query(
         "INSERT INTO diagnostic_order_groups
          (id, tenant_id, patient_id, encounter_id, requester_id, clinical_indication, clinical_question,
-          priority, safety_evaluation_id, suggestion_artifact_id, idempotency_key)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+          priority, safety_evaluation_id, suggestion_artifact_id, idempotency_key, request_hash)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
     )
     .bind(group_id)
     .bind(e.tenant_id)
@@ -1296,6 +1340,7 @@ pub async fn confirm(
     .bind(body.safety_evaluation_id)
     .bind(body.suggestion_artifact_id)
     .bind(&idempotency_key)
+    .bind(&request_hash)
     .execute(&mut *tx)
     .await?;
 
@@ -1735,6 +1780,7 @@ pub async fn transition(
     if t == OrderTransition::Start
         && o.order_status == OrderStatus::Accepted
         && requested_mode.is_none()
+        && o.fulfilment_mode.requires_appointment()
     {
         return Err(ApiError::conflict(
             "fulfilment_mode_required",
@@ -1909,7 +1955,7 @@ pub async fn schedule(
             constraints: ConstraintsInput {
                 service_code: Some(service_code),
                 facility_ids: Some(vec![facility_id]),
-                modality_codes: row.modality_code.clone().map(|m| vec![m]),
+                modality_codes: None,
                 earliest: body.earliest.or(row.requested_window_start),
                 latest: body.latest.or(row.requested_window_end),
                 ..ConstraintsInput::default()

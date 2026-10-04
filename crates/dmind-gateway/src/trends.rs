@@ -46,6 +46,9 @@ pub struct SeriesFacts {
     pub incomparable_count: usize,
     /// Requests ordered but without a result yet.
     pub pending_count: usize,
+    /// `service_request:<id>` references of the pending requests.
+    #[serde(default)]
+    pub pending_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,7 +106,7 @@ pub fn analyze(series: &[SeriesFacts], language: &str) -> TrendAnalysis {
                             s.display, s.pending_count
                         ),
                     },
-                    facts: Vec::new(),
+                    facts: s.pending_refs.clone(),
                 });
             }
             continue;
@@ -219,7 +222,24 @@ mod tests {
             result_count: 2,
             incomparable_count: 0,
             pending_count: 1,
+            pending_refs: vec!["service_request:p".into()],
         }
+    }
+
+    #[test]
+    fn pending_only_series_cites_the_pending_requests() {
+        let mut facts = glucose(Direction::Insufficient, None);
+        facts.result_count = 0;
+        facts.observation_refs.clear();
+        let out = analyze(&[facts], "es");
+        assert_eq!(out.statements.len(), 1);
+        assert_eq!(
+            out.statements[0].facts,
+            vec!["service_request:p".to_string()]
+        );
+        assert!(out.statements[0]
+            .text
+            .contains("1 solicitud(es) pendiente(s)"));
     }
 
     #[test]
@@ -268,13 +288,13 @@ mod tests {
     }
 
     #[test]
-    fn pending_only_series_is_reported_without_facts() {
+    fn pending_only_series_is_reported_citing_only_the_pending_requests() {
         let mut s = glucose(Direction::Insufficient, None);
         s.result_count = 0;
         s.observation_refs.clear();
         let a = analyze(&[s], "en");
         assert_eq!(a.statements.len(), 1);
         assert!(a.statements[0].text.contains("no recorded results"));
-        assert!(a.statements[0].facts.is_empty());
+        assert_eq!(a.statements[0].facts, vec!["service_request:p".to_string()]);
     }
 }

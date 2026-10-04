@@ -155,15 +155,18 @@ pub async fn list(
         .await?;
         released.push(released_report_json(&mut conn, &r, rel, false).await?);
     }
-    // Results the patient has seen before whose updated version is still with
-    // the professionals: visible as a status, never as content.
+    // Completed orders whose report (first version or an update to one the
+    // patient has already seen) is still with the professionals: visible as a
+    // status, never as content.
     let under_review = sqlx::query(
         "SELECT DISTINCT sr.id AS service_request_id, sr.display
-         FROM result_release_decisions d
-         JOIN service_requests sr ON sr.id = d.service_request_id
-         WHERE d.tenant_id = $1 AND d.patient_id = $2 AND d.decision = 'release' AND d.superseded_at IS NOT NULL
+         FROM service_requests sr
+         JOIN diagnostic_reports r ON r.service_request_id = sr.id
+         WHERE sr.tenant_id = $1 AND sr.patient_id = $2 AND sr.order_status = 'completed'
+           AND r.status IN ('preliminary','final','amended','corrected')
            AND NOT EXISTS (SELECT 1 FROM result_release_decisions c
-                           WHERE c.service_request_id = sr.id AND c.superseded_at IS NULL)
+                           WHERE c.service_request_id = sr.id AND c.decision = 'release'
+                             AND c.superseded_at IS NULL)
          ORDER BY sr.display",
     )
     .bind(g.tenant_id)

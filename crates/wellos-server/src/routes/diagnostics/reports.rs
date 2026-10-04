@@ -95,6 +95,7 @@ pub struct ReportRow {
     pub source_system: String,
     pub external_report_id: Option<String>,
     pub idempotency_key: String,
+    pub payload_hash: Option<String>,
     pub change_reason: Option<String>,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
@@ -103,7 +104,7 @@ pub struct ReportRow {
 pub const REPORT_COLUMNS: &str = "r.id, r.tenant_id, r.patient_id, r.service_request_id, r.status, r.version, r.replaces,
     r.category_code, r.conclusion, r.conclusion_codes, r.criticality, r.criticality_rules, r.performer_id,
     r.performing_facility_id, r.performing_service_code, r.signed_by, r.signed_at, r.issued_at, r.effective_at,
-    r.source_system, r.external_report_id, r.idempotency_key, r.change_reason, r.created_by, r.created_at";
+    r.source_system, r.external_report_id, r.idempotency_key, r.payload_hash, r.change_reason, r.created_by, r.created_at";
 
 pub fn report_from_row(r: &PgRow) -> Result<ReportRow, ApiError> {
     let status: String = r.get("status");
@@ -133,6 +134,7 @@ pub fn report_from_row(r: &PgRow) -> Result<ReportRow, ApiError> {
         source_system: r.get("source_system"),
         external_report_id: r.get("external_report_id"),
         idempotency_key: r.get("idempotency_key"),
+        payload_hash: r.get("payload_hash"),
         change_reason: r.get("change_reason"),
         created_by: r.get("created_by"),
         created_at: r.get("created_at"),
@@ -441,6 +443,44 @@ pub struct IssueInput {
     pub legacy_observation_key: bool,
 }
 
+/// Canonical SHA-256 of a delivery so a replayed idempotency key is
+/// honoured only for the identical payload.
+fn issue_fingerprint(input: &IssueInput) -> String {
+    use sha2::Digest;
+    let components: Vec<Value> = input
+        .components
+        .iter()
+        .map(|c| {
+            json!({
+                "code": c.code,
+                "system": c.system,
+                "display": c.display,
+                "value": c.value,
+                "reference_range": c.reference_range,
+                "effective_at": c.effective_at,
+                "amends_observation_id": c.amends_observation_id,
+            })
+        })
+        .collect();
+    let codes: Vec<Value> = input
+        .conclusion_codes
+        .iter()
+        .map(|c| json!({ "system": c.system, "code": c.code, "display": c.display }))
+        .collect();
+    let canonical = json!({
+        "status": input.status.as_str(),
+        "components": components,
+        "conclusion": input.conclusion,
+        "conclusion_codes": codes,
+        "change_reason": input.change_reason,
+        "source_system": input.source_system,
+        "effective_at": input.effective_at,
+        "external_report_id": input.external_report_id,
+        "sign": input.sign,
+    });
+    hex::encode(sha2::Sha256::digest(canonical.to_string().as_bytes()))
+}
+
 #[derive(Debug, Clone)]
 pub struct IssueOutcome {
     pub report: ReportRow,
@@ -543,9 +583,13 @@ pub async fn issue_in(
     .bind(&input.idempotency_key)
     .fetch_optional(&mut *tx)
     .await?;
+    let payload_hash = issue_fingerprint(&input);
     if let Some(row) = existing {
         let r = report_from_row(&row)?;
-        if r.service_request_id != o.id || r.status != input.status {
+        if r.service_request_id != o.id
+            || r.status != input.status
+            || r.payload_hash.as_deref() != Some(&*payload_hash)
+        {
             return Err(ApiError::conflict(
                 "idempotency_key_reuse",
                 "idempotency_key was already used for a different delivery",
@@ -849,9 +893,9 @@ pub async fn issue_in(
          (id, tenant_id, patient_id, service_request_id, status, version, replaces, category_code, conclusion,
           conclusion_codes, criticality, criticality_rules, performer_id, performing_facility_id,
           performing_service_code, signed_by, signed_at, effective_at, source_system, external_report_id,
-          idempotency_key, change_reason, created_by)
+          idempotency_key, change_reason, created_by, payload_hash)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                 CASE WHEN $16::uuid IS NULL THEN NULL ELSE now() END,$17,$18,$19,$20,$21,$22)",
+                 CASE WHEN $16::uuid IS NULL THEN NULL ELSE now() END,$17,$18,$19,$20,$21,$22,$23)",
     )
     .bind(report_id)
     .bind(o.tenant_id)
@@ -882,6 +926,7 @@ pub async fn issue_in(
     .bind(&input.idempotency_key)
     .bind(&change_reason)
     .bind(ctx.user_id)
+    .bind(&payload_hash)
     .execute(&mut *tx)
     .await;
     if let Err(e) = inserted {
@@ -1541,7 +1586,9 @@ pub async fn report_detail_json(conn: &mut PgConnection, r: &ReportRow) -> Resul
             .map(component_json)
             .collect(),
     );
-    v["replaced_by"] = json!(replaced_by(conn, r.id).await?);
+    let successor = replaced_by(conn, r.id).await?;
+    v["replaced_by"] = json!(successor);
+    v["reviewable"] = json!(r.status.is_reviewable() && successor.is_none());
     v["reviews"] = Value::Array(reviews_json(conn, r.id).await?);
     v["release_decisions"] = Value::Array(releases_json(conn, r.id).await?);
     v["synthesis"] = Value::Array(artifacts_json(conn, r.id, "diagnostic_result_synthesis").await?);
@@ -1575,6 +1622,9 @@ pub async fn list_for_order_json(
                 .map(component_json)
                 .collect(),
         );
+        let successor = replaced_by(conn, r.id).await?;
+        v["replaced_by"] = json!(successor);
+        v["reviewable"] = json!(r.status.is_reviewable() && successor.is_none());
         v["reviews"] = Value::Array(reviews_json(conn, r.id).await?);
         v["release_decisions"] = Value::Array(releases_json(conn, r.id).await?);
         out.push(v);

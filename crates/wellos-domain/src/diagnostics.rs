@@ -847,6 +847,18 @@ fn default_duplicate_window() -> u32 {
 /// Fact keys are either bounded flags (`pregnancy_possible`, `paediatric`)
 /// or a `<source>:<code>` lookup into the patient facts the engine loads
 /// (`allergy:contrast`, `medication:apixaban`, `condition:z95.0`).
+/// Result component codes are external terminology codes (LOINC `2823-3`,
+/// SNOMED, local codes): ASCII letters, digits and `.`, `-`, `_`, `:` only,
+/// no whitespace, at most 64 characters.
+pub fn is_valid_component_code(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+}
+
 pub fn is_valid_fact_key(key: &str) -> bool {
     match key.split_once(':') {
         Some((source, code)) => {
@@ -889,8 +901,8 @@ impl OrderableConfig {
         }
         let mut seen = BTreeSet::new();
         for c in &self.components {
-            if c.code.trim().is_empty() || c.code.chars().count() > 64 {
-                return Err("component code is empty or oversized".into());
+            if !is_valid_component_code(&c.code) {
+                return Err(format!("component code {:?} must be a stable code", c.code));
             }
             if c.display.trim().is_empty() || c.display.chars().count() > 200 {
                 return Err("component display is empty or oversized".into());
