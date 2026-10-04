@@ -54,6 +54,8 @@ jobs:
         run: cargo run -p wellos-server --bin migrate
       - name: Seed synthetic data (dev-fixtures, test environment)
         run: cargo run -p wellos-server --bin seed --features dev-fixtures
+      - name: Pre-0015 upgrade migration gate (0001..0014 schema + legacy visits -> 0015)
+        run: cargo test -p wellos-server --test upgrade_migration_integration
       - name: Integration tests
         run: cargo test --workspace --test '*'
 
@@ -82,6 +84,71 @@ jobs:
         run: npm run test
       - name: Build
         run: npm run build
+
+  e2e:
+    name: Playwright E2E (staff + patient journeys, ES, a11y, 390 px)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wellos
+          POSTGRES_PASSWORD: wellos_dev
+          POSTGRES_DB: wellos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wellos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://wellos:wellos_dev@localhost:5432/wellos
+      # Explicit synthetic test environment: dev-fixtures build, fake AI and
+      # scribe providers, development sign-in. No external provider is
+      # configured, so no network call leaves the runner.
+      WELLOS_ENV: test
+      WELLOS_ALLOW_SYNTHETIC_SEED: "true"
+      WELLOS_DEV_AUTH: "true"
+      DMIND_MODEL_PROVIDER: fake
+      WELLOS_SCRIBE_PROVIDER: fake
+      WELLOS_BIND_ADDR: 127.0.0.1:8080
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install web dependencies
+        working-directory: apps/web
+        run: npm ci --no-audit --no-fund
+      - name: Install Playwright Chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+      - name: Build API server (dev-fixtures, test environment)
+        run: cargo build -p wellos-server --features dev-fixtures
+      - name: Migrations from empty database
+        run: cargo run -p wellos-server --bin migrate
+      - name: Seed synthetic fixtures
+        run: cargo run -p wellos-server --bin seed --features dev-fixtures
+      - name: Playwright (desktop + mobile-390 projects)
+        working-directory: apps/web
+        run: npm run test:e2e
+      - name: Upload Playwright report and traces (failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          retention-days: 7
+          if-no-files-found: ignore
 
   security:
     name: Dependency audit and secret scan
