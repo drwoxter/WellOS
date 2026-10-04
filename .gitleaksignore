@@ -1,3 +1,6 @@
 # False positive: browser localStorage item name ("wellos.cockpit.v1"), not a credential.
 # The identifier was renamed in e5a28f9; this pins the historical commit only.
 d5e528724d628bc74a84bef7f04019b4e46dfb4a:apps/web/lib/cockpit.ts:generic-api-key:22
+# False positive: synthetic diagnostics fixture scenario label ("alba-hba1c-duplicate"), not a credential.
+# The field was renamed to `scenario` afterwards; this pins the historical commit only.
+1ea2442e6ff38ce5104dc49785534d2dd13fb09c:crates/wellos-server/src/seed_diagnostics.rs:generic-api-key:1447
