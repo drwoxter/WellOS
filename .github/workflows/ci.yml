@@ -151,7 +151,7 @@ jobs:
           if-no-files-found: ignore
 
   security:
-    name: Dependency audit and secret scan
+    name: Dependency audits
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -159,8 +159,6 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: Rust dependency audit
         uses: rustsec/audit-check@v2
         with:
@@ -168,9 +166,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Web dependency audit
+      - name: Web production dependency audit (must be clean)
         working-directory: apps/web
-        run: npm audit --audit-level=high
+        run: npm audit --omit=dev --audit-level=high
+      - name: Web complete dependency audit (single documented exception, see docs/security/dependency-risk-acceptances.md)
+        working-directory: apps/web
+        run: node scripts/check-npm-audit.mjs
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@v2
         env:
