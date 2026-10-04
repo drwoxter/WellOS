@@ -24,7 +24,7 @@ use wellos_domain::access::{
     OfferTransition, ServiceConfig, Urgency, WeeklyWindow,
 };
 use wellos_domain::matcher::{
-    AvailabilityRule, BookingPlan, Candidate, ExistingBooking, FacilityFact, Interval,
+    AvailabilityRule, BookingPlan, Candidate, ClosedDates, ExistingBooking, FacilityFact, Interval,
     PatientFacts, PolicyFacts, ResourceException, ResourceFact, ResourceServiceFact,
 };
 use wellos_domain::triage::{VisitStatus, VisitTransition};
@@ -615,9 +615,34 @@ pub async fn load_facility_facts(
     .bind(only)
     .fetch_all(&mut *conn)
     .await?;
+    // Active operational closures: facility-specific rows apply to their
+    // facility, tenant-wide rows (NULL facility) to every facility.
+    let closures = sqlx::query(
+        "SELECT facility_id, starts_on, ends_on FROM operational_calendar_events
+         WHERE tenant_id = $1 AND active AND kind = 'closure'
+           AND ends_on >= CURRENT_DATE - 2
+           AND (facility_id IS NULL OR $2::uuid[] IS NULL OR facility_id = ANY($2))
+         ORDER BY starts_on, id",
+    )
+    .bind(tenant_id)
+    .bind(only)
+    .fetch_all(&mut *conn)
+    .await?;
     Ok(rows
         .iter()
         .map(|r| {
+            let facility_id: Uuid = r.get("id");
+            let closed_dates = closures
+                .iter()
+                .filter(|c| {
+                    c.get::<Option<Uuid>, _>("facility_id")
+                        .is_none_or(|f| f == facility_id)
+                })
+                .map(|c| ClosedDates {
+                    starts_on: c.get("starts_on"),
+                    ends_on: c.get("ends_on"),
+                })
+                .collect();
             let hours: Option<Value> = r.get("opening_hours");
             let opening_hours = hours
                 .and_then(|v| serde_json::from_value::<Vec<OpeningHour>>(v).ok())
@@ -630,13 +655,14 @@ pub async fn load_facility_facts(
                 })
                 .collect();
             FacilityFact {
-                facility_id: r.get("id"),
+                facility_id,
                 time_zone: r
                     .get::<Option<String>, _>("time_zone")
                     .unwrap_or_else(|| "UTC".into()),
                 opening_hours,
                 latitude: r.get("latitude"),
                 longitude: r.get("longitude"),
+                closed_dates,
             }
         })
         .collect())
@@ -981,6 +1007,152 @@ pub async fn load_policy_facts(
         demand_by_date,
         cancellation_gaps: gaps,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Facility closures (hard constraint)
+// ---------------------------------------------------------------------------
+
+/// Overlap of an operational closure's local date range with an instant
+/// range, evaluated in PostgreSQL with the facility's IANA zone (falling
+/// back to the tenant zone). Closed days run from local midnight to the
+/// next local midnight, so DST days are covered exactly.
+const CLOSURE_RANGE_SQL: &str = "tstzrange(
+        (e.starts_on::timestamp) AT TIME ZONE COALESCE(fs.time_zone, $5),
+        ((e.ends_on + 1)::timestamp) AT TIME ZONE COALESCE(fs.time_zone, $5), '[)')";
+
+pub fn facility_closed() -> ApiError {
+    ApiError::conflict(
+        "facility_closed",
+        "the facility is closed on this date; this option is no longer available",
+    )
+}
+
+/// The active closure (facility-specific or tenant-wide) covering any part
+/// of `[starts_at, ends_at)` at `facility_id`, if one exists.
+pub async fn active_closure_over(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    facility_id: Uuid,
+    starts_at: DateTime<Utc>,
+    ends_at: DateTime<Utc>,
+    default_time_zone: &str,
+) -> Result<Option<Uuid>, ApiError> {
+    let sql = format!(
+        "SELECT e.id FROM operational_calendar_events e
+         LEFT JOIN facility_scheduling fs ON fs.facility_id = $2
+         WHERE e.tenant_id = $1 AND e.active AND e.kind = 'closure'
+           AND (e.facility_id IS NULL OR e.facility_id = $2)
+           AND {CLOSURE_RANGE_SQL} && tstzrange($3, $4, '[)')
+         ORDER BY e.starts_on, e.id LIMIT 1"
+    );
+    Ok(sqlx::query_scalar(&sql)
+        .bind(tenant_id)
+        .bind(facility_id)
+        .bind(starts_at)
+        .bind(ends_at)
+        .bind(default_time_zone)
+        .fetch_optional(&mut *conn)
+        .await?)
+}
+
+/// Refuse a hold or confirmation whose slot falls on a closed facility day.
+pub async fn ensure_facility_open(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    facility_id: Uuid,
+    starts_at: DateTime<Utc>,
+    ends_at: DateTime<Utc>,
+    default_time_zone: &str,
+) -> Result<(), ApiError> {
+    match active_closure_over(
+        conn,
+        tenant_id,
+        facility_id,
+        starts_at,
+        ends_at,
+        default_time_zone,
+    )
+    .await?
+    {
+        Some(_) => Err(facility_closed()),
+        None => Ok(()),
+    }
+}
+
+/// Live offers whose slot falls inside a closure's local dates
+/// (`facility_id = None` means tenant-wide).
+pub async fn offers_in_closure(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    facility_id: Option<Uuid>,
+    starts_on: NaiveDate,
+    ends_on: NaiveDate,
+    default_time_zone: &str,
+) -> Result<Vec<Uuid>, ApiError> {
+    let sql = format!(
+        "SELECT o.id FROM appointment_offers o
+         LEFT JOIN facility_scheduling fs ON fs.facility_id = o.facility_id
+         CROSS JOIN (SELECT $3::date AS starts_on, $4::date AS ends_on) e
+         WHERE o.tenant_id = $1 AND o.status IN ('offered', 'held')
+           AND ($2::uuid IS NULL OR o.facility_id = $2)
+           AND tstzrange(o.starts_at, o.ends_at, '[)') && {CLOSURE_RANGE_SQL}
+         ORDER BY o.starts_at, o.id"
+    );
+    Ok(sqlx::query_scalar(&sql)
+        .bind(tenant_id)
+        .bind(facility_id)
+        .bind(starts_on)
+        .bind(ends_on)
+        .bind(default_time_zone)
+        .fetch_all(&mut *conn)
+        .await?)
+}
+
+/// Confirmed appointments inside a closure's local dates. They are never
+/// cancelled automatically: staff decide, appointment by appointment.
+pub async fn appointments_in_closure(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    facility_id: Option<Uuid>,
+    starts_on: NaiveDate,
+    ends_on: NaiveDate,
+    default_time_zone: &str,
+) -> Result<Vec<AppointmentRow>, ApiError> {
+    let sql = format!(
+        "SELECT a.* FROM appointments a
+         LEFT JOIN facility_scheduling fs ON fs.facility_id = a.facility_id
+         CROSS JOIN (SELECT $3::date AS starts_on, $4::date AS ends_on) e
+         WHERE a.tenant_id = $1 AND a.status = 'confirmed'
+           AND ($2::uuid IS NULL OR a.facility_id = $2)
+           AND tstzrange(a.starts_at, a.ends_at, '[)') && {CLOSURE_RANGE_SQL}
+         ORDER BY a.starts_at, a.id LIMIT 500"
+    );
+    sqlx::query(&sql)
+        .bind(tenant_id)
+        .bind(facility_id)
+        .bind(starts_on)
+        .bind(ends_on)
+        .bind(default_time_zone)
+        .fetch_all(&mut *conn)
+        .await?
+        .iter()
+        .map(appointment_from_row)
+        .collect()
+}
+
+/// Revoke an offer whose facility turned out to be closed, outside the
+/// failed hold/accept transaction so the revocation survives its rollback.
+pub async fn revoke_offer_after_closure(state: &AppState, ctx: &AuthContext, offer_id: Uuid) {
+    let Ok(mut tx) = state.pool.begin().await else {
+        return;
+    };
+    if revoke_offer_for_resource(&mut tx, ctx, state, offer_id, "facility_closed")
+        .await
+        .is_ok()
+    {
+        let _ = tx.commit().await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1491,6 +1663,15 @@ pub async fn hold_offer(
             "this offer has expired",
         ));
     }
+    ensure_facility_open(
+        tx,
+        o.tenant_id,
+        o.facility_id,
+        o.starts_at,
+        o.ends_at,
+        &policy.time_zone,
+    )
+    .await?;
     let expires = Utc::now() + Duration::minutes(policy.hold_minutes as i64);
     let hold_until = expires.min(o.offer_expires_at);
     let placed = book_plans(
@@ -1784,6 +1965,15 @@ pub async fn confirm_offer(
             "this option is no longer in the future",
         ));
     }
+    ensure_facility_open(
+        tx,
+        o.tenant_id,
+        o.facility_id,
+        o.starts_at,
+        o.ends_at,
+        &policy.time_zone,
+    )
+    .await?;
     let appointment_id = Uuid::now_v7();
     let primary = o
         .resources
@@ -2242,6 +2432,15 @@ pub async fn direct_appointment_for_visit(
             .await?;
     let time_zone = facility_tz.unwrap_or_else(|| policy.time_zone.clone());
     let ends_at = starts_at + Duration::minutes(service.config.duration_minutes.max(5) as i64);
+    ensure_facility_open(
+        tx,
+        ctx.tenant_id,
+        facility_id,
+        starts_at,
+        ends_at,
+        &policy.time_zone,
+    )
+    .await?;
     let modality = service
         .config
         .modality_codes

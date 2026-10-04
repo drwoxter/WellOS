@@ -88,6 +88,15 @@ pub struct ResourceServiceFact {
     pub modality_codes: Vec<String>,
 }
 
+/// Inclusive range of facility-local calendar dates on which the facility
+/// is closed (an operational-calendar `closure`, facility-specific or
+/// tenant-wide).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClosedDates {
+    pub starts_on: NaiveDate,
+    pub ends_on: NaiveDate,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FacilityFact {
     pub facility_id: Uuid,
@@ -95,6 +104,33 @@ pub struct FacilityFact {
     pub opening_hours: Vec<WeeklyWindow>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// Closed local dates; a hard constraint, not a demand factor.
+    #[serde(default)]
+    pub closed_dates: Vec<ClosedDates>,
+}
+
+/// UTC intervals covered by a facility's closed local dates. Each closed day
+/// runs from local midnight to the next local midnight in the facility's
+/// IANA zone, so a 23- or 25-hour DST day is covered exactly.
+pub fn facility_closed_intervals(f: &FacilityFact) -> Vec<Interval> {
+    let tz = parse_tz(&f.time_zone);
+    f.closed_dates
+        .iter()
+        .filter(|c| c.ends_on >= c.starts_on)
+        .map(|c| {
+            Interval::new(
+                local_to_utc(tz, c.starts_on, NaiveTime::MIN),
+                local_to_utc(tz, c.ends_on + Duration::days(1), NaiveTime::MIN),
+            )
+        })
+        .collect()
+}
+
+/// Whether `interval` touches a closed date of the facility.
+pub fn facility_closed_during(f: &FacilityFact, interval: &Interval) -> bool {
+    facility_closed_intervals(f)
+        .iter()
+        .any(|c| c.overlaps(interval))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -320,6 +356,15 @@ fn resource_capacity_on(
     facility: Option<&FacilityFact>,
     date: NaiveDate,
 ) -> Vec<(Interval, i32)> {
+    resource_capacity_on_inner(res, facility, date, true)
+}
+
+fn resource_capacity_on_inner(
+    res: &ResourceFact,
+    facility: Option<&FacilityFact>,
+    date: NaiveDate,
+    honor_closures: bool,
+) -> Vec<(Interval, i32)> {
     let tz = parse_tz(&res.time_zone);
     let weekday = date.weekday().number_from_monday() as u8;
     let applies = |r: &AvailabilityRule| {
@@ -359,6 +404,14 @@ fn resource_capacity_on(
                 .into_iter()
                 .flat_map(|(i, c)| intersect(&[i], &hours).into_iter().map(move |x| (x, c)))
                 .collect();
+        }
+        if honor_closures {
+            for cut in facility_closed_intervals(f) {
+                open = open
+                    .into_iter()
+                    .flat_map(|(i, c)| subtract(vec![i], &cut).into_iter().map(move |x| (x, c)))
+                    .collect();
+            }
         }
     }
     for ex in &res.exceptions {
@@ -416,6 +469,14 @@ pub fn planned_slots_on(
             .map(|(i, c)| ((i.end - i.start).num_minutes() / minutes) as i32 * (*c).max(1))
             .sum()
     };
+    // Planned slots are the facility's normal opening capacity: operational
+    // closures reach the forecast through the calendar capacity multiplier,
+    // so a closed day still shows the capacity it takes away.
+    let opening_hours = facility.map(|f| FacilityFact {
+        closed_dates: Vec::new(),
+        ..f.clone()
+    });
+    let facility = opening_hours.as_ref();
     let with = count(resource_capacity_on(res, facility, date));
     let unaffected = ResourceFact {
         exceptions: res
@@ -470,6 +531,11 @@ fn required_resource_slot(
                 for ex in &res.exceptions {
                     if ex.kind != "extra_capacity" {
                         cur = subtract(cur, &Interval::new(ex.start, ex.end));
+                    }
+                }
+                if let Some(f) = facility {
+                    for cut in facility_closed_intervals(f) {
+                        cur = subtract(cur, &cut);
                     }
                 }
                 cur.into_iter().map(move |x| (x, capacity))
@@ -648,7 +714,14 @@ pub fn find_candidates(facts: &MatchFacts) -> MatchOutput {
         let last = window_end.with_timezone(&tz).date_naive() + Duration::days(1);
         let mut per_resource = 0usize;
         while date <= last && raw.len() < MAX_RAW_SLOTS {
-            for (open, capacity) in resource_capacity_on(res, facility, date) {
+            let open_today = resource_capacity_on(res, facility, date);
+            if open_today.is_empty()
+                && facility.is_some_and(|f| !f.closed_dates.is_empty())
+                && !resource_capacity_on_inner(res, facility, date, false).is_empty()
+            {
+                reject(&mut rejected, "facility_closed");
+            }
+            for (open, capacity) in open_today {
                 let mut slot_start = open.start;
                 while slot_start + occupancy <= open.end {
                     let booking = Interval::new(slot_start, slot_start + occupancy);
@@ -1079,6 +1152,7 @@ mod tests {
                 opening_hours: vec![],
                 latitude: Some(38.9067),
                 longitude: Some(1.4206),
+                closed_dates: vec![],
             }],
             resources: vec![ResourceFact {
                 resource_id: doc,
@@ -1336,5 +1410,171 @@ mod tests {
         let e = travel_estimate((38.9067, 1.4206), (38.98, 1.30));
         assert_eq!(e.provenance, TRAVEL_ESTIMATE_PROVENANCE.to_string());
         assert!(e.distance_km > 10.0 && e.distance_km < 15.0);
+    }
+
+    fn closed(y: i32, m: u32, d: u32) -> ClosedDates {
+        let day = NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        ClosedDates {
+            starts_on: day,
+            ends_on: day,
+        }
+    }
+
+    fn local_dates(out: &MatchOutput, tz: &str) -> Vec<NaiveDate> {
+        let tz = parse_tz(tz);
+        out.candidates
+            .iter()
+            .map(|c| c.starts_at.with_timezone(&tz).date_naive())
+            .collect()
+    }
+
+    #[test]
+    fn facility_closure_is_a_hard_constraint_on_the_closed_local_date() {
+        let mut facts = base_facts();
+        facts.policy.max_candidates = 20;
+        let open = find_candidates(&facts);
+        let tuesday = NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
+        assert!(local_dates(&open, "Europe/Madrid").contains(&tuesday));
+
+        facts.facilities[0].closed_dates = vec![closed(2026, 3, 24)];
+        let out = find_candidates(&facts);
+        let dates = local_dates(&out, "Europe/Madrid");
+        assert!(!dates.is_empty());
+        assert!(
+            !dates.contains(&tuesday),
+            "closed day still offered: {dates:?}"
+        );
+        assert!(dates.contains(&NaiveDate::from_ymd_opt(2026, 3, 25).unwrap()));
+        assert!(dates.contains(&NaiveDate::from_ymd_opt(2026, 3, 26).unwrap()));
+        assert!(out.rejected.get("facility_closed").copied().unwrap_or(0) > 0);
+        // The demand multiplier is untouched: closure is not a score factor.
+        assert!(out
+            .candidates
+            .iter()
+            .all(|c| c.factors.iter().all(|f| f.code != "facility_closed")));
+    }
+
+    #[test]
+    fn facility_closure_covers_the_whole_local_day_across_dst() {
+        let madrid = parse_tz("Europe/Madrid");
+        let spring = FacilityFact {
+            closed_dates: vec![closed(2026, 3, 29)],
+            ..base_facts().facilities[0].clone()
+        };
+        let [i] = facility_closed_intervals(&spring).try_into().unwrap();
+        assert_eq!(i.start, t("2026-03-28T23:00:00Z"));
+        assert_eq!(i.end, t("2026-03-29T22:00:00Z"));
+        assert_eq!((i.end - i.start).num_hours(), 23);
+        let fall = FacilityFact {
+            closed_dates: vec![closed(2026, 10, 25)],
+            ..spring.clone()
+        };
+        let [i] = facility_closed_intervals(&fall).try_into().unwrap();
+        assert_eq!((i.end - i.start).num_hours(), 25);
+        assert_eq!(i.start.with_timezone(&madrid).time(), NaiveTime::MIN);
+        assert_eq!(i.end.with_timezone(&madrid).time(), NaiveTime::MIN);
+
+        // A resource open every day: the DST Sunday itself is excluded, the
+        // days around it are not.
+        let mut facts = base_facts();
+        facts.now = t("2026-03-27T05:00:00Z");
+        facts.policy.horizon_days = 5;
+        facts.policy.max_candidates = 20;
+        facts.resources[0].rules = (1..=7)
+            .map(|wd| AvailabilityRule {
+                weekday: wd,
+                start: time(9, 0),
+                end: time(11, 0),
+                kind: "available".into(),
+                capacity: None,
+                effective_from: None,
+                effective_to: None,
+            })
+            .collect();
+        facts.facilities[0].closed_dates = vec![closed(2026, 3, 29)];
+        let out = find_candidates(&facts);
+        let dates = local_dates(&out, "Europe/Madrid");
+        assert!(dates.contains(&NaiveDate::from_ymd_opt(2026, 3, 28).unwrap()));
+        assert!(!dates.contains(&NaiveDate::from_ymd_opt(2026, 3, 29).unwrap()));
+        assert!(dates.contains(&NaiveDate::from_ymd_opt(2026, 3, 30).unwrap()));
+        for c in &out.candidates {
+            assert!((9..11).contains(&local_hour("Europe/Madrid", c.starts_at)));
+        }
+    }
+
+    #[test]
+    fn closure_dates_are_facility_local_not_utc() {
+        // Auckland (UTC+13 in March): 20:00Z on the 24th is 09:00 local on
+        // the 25th, so a closure dated the 25th removes it and one dated the
+        // 24th does not.
+        let mut facts = base_facts();
+        facts.now = t("2026-03-23T20:00:00Z");
+        facts.policy.max_candidates = 20;
+        facts.facilities[0].time_zone = "Pacific/Auckland".into();
+        facts.resources[0].time_zone = "Pacific/Auckland".into();
+        facts.patient.time_zone = "Pacific/Auckland".into();
+        let slot = t("2026-03-24T20:00:00Z");
+        let has_slot = |facts: &MatchFacts| {
+            find_candidates(facts)
+                .candidates
+                .iter()
+                .any(|c| c.starts_at == slot)
+        };
+        assert!(has_slot(&facts));
+        facts.facilities[0].closed_dates = vec![closed(2026, 3, 24)];
+        assert!(
+            has_slot(&facts),
+            "UTC-date closure must not remove a local 25th slot"
+        );
+        facts.facilities[0].closed_dates = vec![closed(2026, 3, 25)];
+        assert!(!has_slot(&facts));
+    }
+
+    #[test]
+    fn closure_at_one_facility_leaves_another_facility_schedulable() {
+        let mut facts = base_facts();
+        facts.policy.max_candidates = 20;
+        let other_fac = Uuid::from_u128(7);
+        facts.facilities.push(FacilityFact {
+            facility_id: other_fac,
+            closed_dates: vec![],
+            ..facts.facilities[0].clone()
+        });
+        facts.resources.push(ResourceFact {
+            resource_id: Uuid::from_u128(8),
+            facility_id: other_fac,
+            name: "Dr Elsewhere".into(),
+            user_id: Some(Uuid::from_u128(80)),
+            ..facts.resources[0].clone()
+        });
+        // Close the first facility for the whole window.
+        facts.facilities[0].closed_dates = vec![ClosedDates {
+            starts_on: NaiveDate::from_ymd_opt(2026, 3, 20).unwrap(),
+            ends_on: NaiveDate::from_ymd_opt(2026, 4, 5).unwrap(),
+        }];
+        let out = find_candidates(&facts);
+        assert!(!out.candidates.is_empty());
+        assert!(out.candidates.iter().all(|c| c.facility_id == other_fac));
+        assert!(out.rejected.get("facility_closed").copied().unwrap_or(0) > 0);
+
+        // Required companion resources at the closed facility are closed too.
+        let mut req = base_facts();
+        req.policy.max_candidates = 20;
+        req.request.service.required_resource_types = vec!["professional".into(), "room".into()];
+        req.resources.push(ResourceFact {
+            resource_id: Uuid::from_u128(9),
+            resource_type_code: "room".into(),
+            name: "Room".into(),
+            user_id: None,
+            services: vec![],
+            rules: vec![],
+            ..req.resources[0].clone()
+        });
+        assert!(!find_candidates(&req).candidates.is_empty());
+        req.facilities[0].closed_dates = vec![closed(2026, 3, 24)];
+        let out = find_candidates(&req);
+        let tuesday = NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
+        assert!(!local_dates(&out, "Europe/Madrid").contains(&tuesday));
+        assert!(!out.candidates.is_empty());
     }
 }

@@ -95,6 +95,23 @@ minus facility closures from the operational calendar. Local times are
 projected to UTC per day, so DST transitions keep local wall time
 (`dst_transition_keeps_local_wall_time`).
 
+An operational-calendar `closure` (facility-specific, or tenant-wide when
+`facility_id` is null) is a **hard constraint**, not a demand factor. Its
+`starts_on..ends_on` are local dates in each facility's IANA zone, covered
+from local midnight to the next local midnight, so a 23- or 25-hour DST day
+is closed exactly (`closure_dates_are_facility_local_not_utc`,
+`closure_covers_the_whole_local_day_across_dst`). The matcher removes every
+candidate at a closed facility and accounts it as `facility_closed`; hold,
+confirmation and direct staff booking re-check active closures inside their
+transaction, so an offer generated before a closure was created is refused
+with `facility_closed` and revoked (its hold released). Creating a closure
+revokes affected live offers and holds immediately; confirmed appointments
+are **never** cancelled automatically — they are returned as
+`conflicting_appointment_ids` and listed by
+`GET /api/v1/scheduling/calendar/{id}/conflicts` for a human decision.
+Deactivating the closure restores availability on the next matcher run
+(`access_closure_integration`).
+
 Double booking is prevented at database level:
 
 ```sql
@@ -296,7 +313,9 @@ Inputs: historical demand per service/facility/day, confirmed appointments,
 cancellations and lead time, no-shows, resource exceptions, weekday and
 month, and the tenant `operational_calendar_events` (`holiday`,
 `school_break`, `local_event`, `seasonal_period`, `closure`, each with demand
-and capacity multipliers). Spain/Ibiza appear only in synthetic fixtures.
+and capacity multipliers; a `closure` forecasts zero capacity and is also the
+hard scheduling constraint described in §3). Spain/Ibiza appear only in
+synthetic fixtures.
 Outputs per day: expected demand, planned capacity, gap/surplus, confidence
 and contributing factors, or `insufficient_history` when evidence is
 inadequate (`insufficient_history_is_explicit`). Forecasts recommend; they

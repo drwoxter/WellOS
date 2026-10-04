@@ -2808,19 +2808,114 @@ pub async fn create_calendar_event_in(
     .bind(ctx.user_id)
     .execute(&mut **tx)
     .await?;
+    // A closure is a hard constraint: live offers and holds inside it are
+    // revoked now; confirmed appointments are kept and surfaced to staff.
+    let mut revoked_offers: Vec<Uuid> = Vec::new();
+    let mut conflicting: Vec<Uuid> = Vec::new();
+    if kind == "closure" {
+        let policy = scheduling::load_policy(tx, ctx.tenant_id).await?;
+        revoked_offers = scheduling::offers_in_closure(
+            tx,
+            ctx.tenant_id,
+            body.facility_id,
+            body.starts_on,
+            body.ends_on,
+            &policy.time_zone,
+        )
+        .await?;
+        for offer_id in &revoked_offers {
+            scheduling::revoke_offer_for_resource(tx, ctx, state, *offer_id, "facility_closed")
+                .await?;
+        }
+        conflicting = scheduling::appointments_in_closure(
+            tx,
+            ctx.tenant_id,
+            body.facility_id,
+            body.starts_on,
+            body.ends_on,
+            &policy.time_zone,
+        )
+        .await?
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
+    }
     emit(
         tx,
         ctx,
         state,
         "scheduling.calendar_event.recorded",
-        json!({ "event_id": id, "kind": kind, "facility_id": body.facility_id }),
+        json!({ "event_id": id, "kind": kind, "facility_id": body.facility_id,
+                "revoked_offers": revoked_offers.len(),
+                "conflicting_appointments": conflicting.len() }),
     )
     .await?;
     let row = sqlx::query("SELECT * FROM operational_calendar_events WHERE id = $1")
         .bind(id)
         .fetch_one(&mut **tx)
         .await?;
-    Ok(calendar_json(&row))
+    let mut out = calendar_json(&row);
+    if kind == "closure" {
+        out["revoked_offer_ids"] = json!(revoked_offers);
+        out["conflicting_appointment_ids"] = json!(conflicting);
+    }
+    Ok(out)
+}
+
+/// Confirmed appointments that fall inside an active closure. The closure
+/// never cancels them: each one is a scheduling conflict for a human to
+/// resolve (reschedule, cancel with a reason, or deactivate the closure).
+pub async fn closure_conflicts(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let row =
+        sqlx::query("SELECT * FROM operational_calendar_events WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(ctx.tenant_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+    let facility_id: Option<Uuid> = row.get("facility_id");
+    let allowed = guard(
+        &state,
+        &ctx,
+        actions::SCHEDULING_READ,
+        "operational_calendar_event",
+        Some(ResourceCtx {
+            tenant_id: ctx.tenant_id,
+            patient_id: None,
+            facility_id,
+        }),
+    )
+    .await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    let kind: String = row.get("kind");
+    let active: bool = row.get("active");
+    let mut items: Vec<Value> = Vec::new();
+    if kind == "closure" && active {
+        let policy = scheduling::load_policy(&mut conn, ctx.tenant_id).await?;
+        items = scheduling::appointments_in_closure(
+            &mut conn,
+            ctx.tenant_id,
+            facility_id,
+            row.get("starts_on"),
+            row.get("ends_on"),
+            &policy.time_zone,
+        )
+        .await?
+        .iter()
+        .map(scheduling::appointment_json)
+        .collect();
+        scheduling::attach_patient_summaries(&mut *conn, ctx.tenant_id, &mut items, true).await?;
+    }
+    Ok(Json(json!({
+        "event": calendar_json(&row),
+        "items": items,
+        "requires_human_decision": !items.is_empty(),
+    })))
 }
 
 pub async fn deactivate_calendar_event(

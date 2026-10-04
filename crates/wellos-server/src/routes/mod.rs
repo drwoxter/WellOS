@@ -310,6 +310,10 @@ fn access_admin_routes() -> Router<AppState> {
             post(access_admin::deactivate_calendar_event),
         )
         .route(
+            "/api/v1/scheduling/calendar/:id/conflicts",
+            get(access_admin::closure_conflicts),
+        )
+        .route(
             "/api/v1/scheduling/worker/tick",
             post(access_admin::worker_tick),
         )

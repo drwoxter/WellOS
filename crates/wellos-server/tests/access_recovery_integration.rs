@@ -1562,7 +1562,9 @@ async fn capacity_forecast_reports_insufficient_history_then_seasonal_pressure()
             .find(|d| d.weekday().number_from_monday() <= 5)
             .unwrap()
     };
-    let closure_day = working_day(horizon_start + Duration::days(3));
+    // Late in the horizon: a closure is a hard scheduling constraint, and the
+    // recovery tests in this binary book a few days from now.
+    let closure_day = working_day(horizon_start + Duration::days(9));
     let (st, closure) = call(
         &state,
         "POST",
@@ -1784,6 +1786,21 @@ async fn capacity_forecast_reports_insufficient_history_then_seasonal_pressure()
         st == StatusCode::NOT_FOUND || st == StatusCode::FORBIDDEN,
         "{st}"
     );
+
+    // The closure is a hard scheduling constraint: lift it so later suites
+    // against the same database can still book on that day.
+    let (st, v) = call(
+        &state,
+        "POST",
+        &format!(
+            "/api/v1/scheduling/calendar/{}/deactivate",
+            s(&closure["id"])
+        ),
+        ADMIN,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
 }
 
 async fn accessibility_code(state: &AppState) -> String {

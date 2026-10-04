@@ -3037,6 +3037,11 @@ pub async fn hold_offer_for(
             scheduling::record_race_lost(state, ctx, o.id, "hold").await;
             return Err(e);
         }
+        Err(e) if e.code == "facility_closed" => {
+            drop(tx);
+            scheduling::revoke_offer_after_closure(state, ctx, o.id).await;
+            return Err(e);
+        }
         Err(e) => return Err(e),
     };
     tx.commit().await?;
@@ -3281,6 +3286,11 @@ pub async fn accept_offer_for(
         Err(e) if e.code == "slot_taken" => {
             drop(tx);
             scheduling::record_race_lost(state, ctx, o.id, "accept").await;
+            return Err(e);
+        }
+        Err(e) if e.code == "facility_closed" => {
+            drop(tx);
+            scheduling::revoke_offer_after_closure(state, ctx, o.id).await;
             return Err(e);
         }
         Err(e) => return Err(e),
