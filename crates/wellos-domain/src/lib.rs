@@ -9,6 +9,8 @@ pub mod access;
 pub mod access_ai;
 pub mod ai;
 pub mod capacity;
+pub mod diagnostics;
+pub mod diagnostics_ai;
 pub mod events;
 pub mod ics;
 pub mod ids;
