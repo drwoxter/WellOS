@@ -61,3 +61,43 @@ test("results page has no serious accessibility violations", async ({
   await page.getByLabel("Criticality").waitFor();
   await expectNoSeriousViolations(page);
 });
+
+test("scheduling console has no serious accessibility violations", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /Sign in as reg\.rivera/ }).click();
+  await page.goto("/scheduling");
+  await page.getByLabel("Search patient").waitFor();
+  await expectNoSeriousViolations(page);
+  await page.getByRole("tab", { name: "Waitlist recovery" }).click();
+  await page.getByText("Cancellation events").waitFor();
+  await expectNoSeriousViolations(page);
+});
+
+test("catalog administration has no serious accessibility violations", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /Sign in as admin\.silva/ }).click();
+  await page.goto("/scheduling/catalog");
+  await page.getByTestId("catalog-table").waitFor();
+  await page.getByTestId("add-entry").click();
+  await page.getByTestId("catalog-editor").waitFor();
+  await expectNoSeriousViolations(page);
+});
+
+test("patient self-service has no serious accessibility violations", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /Sign in as rep\.alba/ }).click();
+  await page.getByTestId("appointments-section").waitFor();
+  await expectNoSeriousViolations(page);
+  await page.getByTestId("find-best-appointment").click();
+  await page.getByLabel("Service", { exact: true }).waitFor();
+  await expectNoSeriousViolations(page);
+  await page.getByRole("tab", { name: "Preferences" }).click();
+  await page.getByTestId("preferences-form").waitFor();
+  await expectNoSeriousViolations(page);
+});

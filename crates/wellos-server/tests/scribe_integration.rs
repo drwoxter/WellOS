@@ -774,6 +774,42 @@ impl dmind_gateway::ModelGateway for GatedGateway {
         self.release.notified().await;
         self.inner.draft_note(req).await
     }
+    async fn interpret_access_intent(
+        &self,
+        req: &dmind_gateway::access::AccessIntentRequest,
+    ) -> Result<
+        dmind_gateway::access::AccessResponse<wellos_domain::access_ai::AccessIntentV1>,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.interpret_access_intent(req).await
+    }
+    async fn rank_appointments(
+        &self,
+        req: &dmind_gateway::access::RankingRequest,
+    ) -> Result<
+        dmind_gateway::access::AccessResponse<wellos_domain::access_ai::AppointmentRankingV1>,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.rank_appointments(req).await
+    }
+    async fn rank_cancellation_recovery(
+        &self,
+        req: &dmind_gateway::access::RecoveryRankingRequest,
+    ) -> Result<
+        dmind_gateway::access::AccessResponse<wellos_domain::access_ai::CancellationRecoveryV1>,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.rank_cancellation_recovery(req).await
+    }
+    async fn explain_capacity(
+        &self,
+        req: &dmind_gateway::access::CapacityExplanationRequest,
+    ) -> Result<
+        dmind_gateway::access::AccessResponse<wellos_domain::access_ai::CapacityExplanationV1>,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.explain_capacity(req).await
+    }
 }
 
 /// A diagnosis recorded while the model is structuring the transcript: the

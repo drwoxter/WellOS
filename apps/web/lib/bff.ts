@@ -130,7 +130,7 @@ export async function proxyToApi(
   }
   const headers: Record<string, string> = {
     Authorization: `Bearer ${session}`,
-    "Content-Type": "application/json",
+    "Content-Type": req.headers.get("content-type") ?? "application/json",
   };
   for (const name of FORWARDED_HEADERS) {
     const value = req.headers.get(name);
@@ -151,8 +151,15 @@ export async function proxyToApi(
     return apiUnavailable();
   }
   const body = await res.text();
+  const responseHeaders: Record<string, string> = {
+    "Content-Type": res.headers.get("content-type") ?? "application/json",
+  };
+  const disposition = res.headers.get("content-disposition");
+  if (disposition) responseHeaders["Content-Disposition"] = disposition;
+  const retryAfter = res.headers.get("retry-after");
+  if (retryAfter) responseHeaders["Retry-After"] = retryAfter;
   return new NextResponse(body, {
     status: res.status,
-    headers: { "Content-Type": "application/json" },
+    headers: responseHeaders,
   });
 }

@@ -169,6 +169,50 @@ deterministic rate-limit tests via an injected window clock. The real
 adapters are validated against a controlled local HTTP server only — no
 live vendor has been exercised from this repository.
 
+dMind Access v1 — intelligent scheduling, patient self-service and governed
+access agents (`docs/architecture/dmind-access.md`): authoritative
+`appointments` distinct from operational `visits` (confirmation creates or
+updates the linked scheduled visit in the same transaction; holds and offers
+never do; existing scheduled visits migrated once, idempotently, by
+migration `0015`); tenant-configurable, versioned, bilingual catalogs for
+services, specialties, professions, modalities, resource types,
+accessibility capabilities, locations and transport resources (no closed
+enums; a new specialty is data, never a permission); first-class
+schedulable resources (professionals, teams, rooms, chairs, equipment,
+telehealth, home-visit teams, vehicles, ambulances, tenant-defined) with
+weekly rules, breaks, exceptions, leave, facility hours, IANA time zones,
+DST-safe projection, capacity > 1 and a PostgreSQL exclusion constraint
+against overlapping holds/bookings; explicit versioned state machines for
+access requests, offers, appointments, waitlist entries, recovery events and
+transport; deterministic `access-matcher.v1` (feasible candidates only,
+persisted score decomposition, source facts and facts hash; no-show history
+is supportive-only); four governed dMind operations (`access-intent.v1`,
+`appointment-ranking.v1`, `cancellation-recovery.v1`,
+`capacity-explanation.v1`) on the existing gateway/`aigov` path with
+Access-specific reuse scopes, one bounded ranking call per run, permutation
+and floor validation, and deterministic fallback when AI is disabled or
+degraded; bounded RFC 5545 busy-time import storing only busy intervals,
+per-appointment `.ics` export and device free-busy sync under
+`scheduling_calendar` consent; staff-issued, revocable `patient_access_grants`
+(`self`, `parent_guardian`, `authorized_proxy`) driving `/api/v1/me/...` and
+the mobile-first `/my/appointments`; consented waitlist with deterministic
+eligibility, fair ordering, time-limited offers, atomic acceptance,
+automatic cascade and reasoned staff overrides; durable, idempotent
+notifications with a PostgreSQL-locked worker, bounded retries, dead-letter,
+quiet hours, in-app delivery and disabled-by-default SMTP / signed webhook
+adapters; explainable `capacity-forecast.v1` with tenant operational
+calendars and explicit `insufficient_history`; consent-controlled
+location/transport coordination with AES-256-GCM encryption (fail-closed in
+deployed environments), short-lived live location and human-only emergency
+transport; `/scheduling` console (day/week lanes, filters, pending
+requests, ranked options with reasons, holds, cancellations, waitlist,
+capacity, transport, overrides) around the three-step "Find the best
+appointment" flow and the `/scheduling/catalog` administration screen;
+least-privilege Access actions; integration, domain, component, Playwright,
+keyboard, accessibility, 390px and Spanish coverage. Hazards H-23–H-33
+recorded. Not clinically validated; ranking and forecast quality are
+unmeasured on real populations.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
@@ -177,10 +221,10 @@ live vendor has been exercised from this repository.
 2. **Care-team management and patient-facing notification**: a general
    care-team management UI on top of the assignment model, periodic
    assignment review, extending consequential permissions (e.g. patient
-   notification) to care-team members beyond the encounter practitioner, and
-   a real appointment book (slots, calendars, reminders) with escalation
-   timers and re-triage for waiting patients. Until then, notification is
-   physician-only and alerts are internal without escalation.
+   notification) to care-team members beyond the encounter practitioner,
+   plus escalation timers and re-triage for waiting patients on top of the
+   appointment book delivered by dMind Access v1. Until then, notification
+   is physician-only and alerts are internal without escalation.
 3. **PostgreSQL row-level security** as a second tenant-isolation layer, plus
    audit hash-chaining for tamper evidence.
 4. **Outbox dispatcher + NATS JetStream**: publish outbox rows, consumer
@@ -212,12 +256,14 @@ live vendor has been exercised from this repository.
 12. **Backup/restore automation** and load smoke tests in CI against a
     disposable environment.
 
-13. **dMind Access** (planned, not started): typed gateway operations for
-    access-intent interpretation, clinical resource matching, appointment
-    ranking, seasonal capacity forecasting, cancellation recovery, attendance
-    support and transport coordination, on configurable versioned catalogs
-    for specialties, professions, services, locations and resource types —
-    no closed enums. No code, routes or UI exist for these yet.
+13. **dMind Access v2**: SMS/push delivery adapters behind the existing
+    signed webhook contract, e-mail delivery receipts, self-service grant
+    requests with a staff verification queue, external calendar OAuth
+    (CalDAV/Google/Microsoft) only once a privacy review exists, routing
+    provider for travel estimates (currently `haversine-urban-estimate.v1`),
+    bias audits of the supportive no-show factor and forecast accuracy
+    evaluation on real (consented) populations, HSM/KMS custody for the
+    location keyring.
 14. **Care Operations** (planned, not started).
 
 ## Later

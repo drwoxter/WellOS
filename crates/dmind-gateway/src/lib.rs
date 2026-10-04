@@ -14,6 +14,7 @@
 //!   with the `dev-fixtures` feature and never a fallback for a failed
 //!   real call.
 
+pub mod access;
 #[cfg(any(feature = "dev-fixtures", test))]
 pub mod fake;
 pub mod notes;
@@ -36,8 +37,15 @@ pub use notes::{NoteDraftRequest, NoteDraftResponse};
 pub const FIXTURE_MODEL: &str = "dmind-fake";
 pub const FIXTURE_MODEL_VERSION: &str = "0.1.0";
 pub const FIXTURE_ROUTE: &str = "local-fake";
+pub use access::{
+    AccessIntentRequest, AccessResponse, CapacityExplanationRequest, RankingRequest,
+    RecoveryRankingRequest,
+};
 pub use risk::{RiskSummaryRequest, RiskSummaryResponse};
 pub use triage::{TriageRequest, TriageResponse};
+use wellos_domain::access_ai::{
+    AccessIntentV1, AppointmentRankingV1, CancellationRecoveryV1, CapacityExplanationV1,
+};
 
 /// Token accounting reported by a provider, when it reports any. Stored on
 /// the artifact for cost governance; never contains content.
@@ -228,6 +236,10 @@ pub enum Operation {
     TriageProposal,
     RiskSummary,
     NoteDraft,
+    AccessIntent,
+    AppointmentRanking,
+    CancellationRecovery,
+    CapacityExplanation,
 }
 
 #[async_trait]
@@ -265,6 +277,36 @@ pub trait ModelGateway: Send + Sync {
     /// segments it restates; the caller binds the result to the encounter
     /// and note version and gates it behind per-section clinician review.
     async fn draft_note(&self, req: &NoteDraftRequest) -> Result<NoteDraftResponse, GatewayError>;
+
+    /// A1 `access-intent.v1`: structures a scheduling request into catalog
+    /// codes and preferences. It never assesses urgency; the deterministic
+    /// red-flag floor is applied on top of whatever it returns.
+    async fn interpret_access_intent(
+        &self,
+        req: &AccessIntentRequest,
+    ) -> Result<AccessResponse<AccessIntentV1>, GatewayError>;
+
+    /// A1 `appointment-ranking.v1`: reorders and explains candidates the
+    /// deterministic matcher already validated. A permutation, never a new
+    /// or dropped candidate.
+    async fn rank_appointments(
+        &self,
+        req: &RankingRequest,
+    ) -> Result<AccessResponse<AppointmentRankingV1>, GatewayError>;
+
+    /// A1 `cancellation-recovery.v1`: orders eligible waitlist entries for a
+    /// freed slot within the deterministic urgency and fairness floors.
+    async fn rank_cancellation_recovery(
+        &self,
+        req: &RecoveryRankingRequest,
+    ) -> Result<AccessResponse<CancellationRecoveryV1>, GatewayError>;
+
+    /// A1 `capacity-explanation.v1`: explains a deterministic forecast and
+    /// its pressure days; every recommendation requires human confirmation.
+    async fn explain_capacity(
+        &self,
+        req: &CapacityExplanationRequest,
+    ) -> Result<AccessResponse<CapacityExplanationV1>, GatewayError>;
 }
 
 /// Gateway installed when `DMIND_MODEL_PROVIDER=disabled` or when the
@@ -333,6 +375,34 @@ impl ModelGateway for DisabledGateway {
     }
 
     async fn draft_note(&self, _req: &NoteDraftRequest) -> Result<NoteDraftResponse, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn interpret_access_intent(
+        &self,
+        _req: &AccessIntentRequest,
+    ) -> Result<AccessResponse<AccessIntentV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn rank_appointments(
+        &self,
+        _req: &RankingRequest,
+    ) -> Result<AccessResponse<AppointmentRankingV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn rank_cancellation_recovery(
+        &self,
+        _req: &RecoveryRankingRequest,
+    ) -> Result<AccessResponse<CancellationRecoveryV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn explain_capacity(
+        &self,
+        _req: &CapacityExplanationRequest,
+    ) -> Result<AccessResponse<CapacityExplanationV1>, GatewayError> {
         Err(self.err())
     }
 }

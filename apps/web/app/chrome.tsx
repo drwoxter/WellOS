@@ -7,6 +7,7 @@ import { useSession } from "@/lib/session";
 import { canReadWorklist, canSearchPatients } from "@/lib/clinical";
 import { canReadVisits } from "@/lib/visits";
 import { canReadRisk } from "@/lib/risk";
+import { hasSchedulingConsoleAccess } from "@/lib/access";
 import { confirmLeaveUnsaved } from "@/lib/unsaved-guard";
 
 /** Sign-out confirmed against unsaved documentation before the session is
@@ -67,10 +68,17 @@ function NavLinks() {
   const { lang, meta } = useSession();
   const pathname = usePathname();
   const roles = meta?.user.roles ?? [];
+  const sched = meta?.scheduling_capabilities;
   const links = [
     { href: "/dashboard", label: t(lang, "navHome") },
+    ...(sched?.self_service
+      ? [{ href: "/my/appointments", label: t(lang, "navMyAppointments") }]
+      : []),
     ...(canSearchPatients(roles)
       ? [{ href: "/patients", label: t(lang, "navPatients") }]
+      : []),
+    ...(hasSchedulingConsoleAccess(sched)
+      ? [{ href: "/scheduling", label: t(lang, "navScheduling") }]
       : []),
     ...(canReadVisits(roles)
       ? [{ href: "/access", label: t(lang, "navAccess") }]

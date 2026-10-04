@@ -9,7 +9,11 @@ written for the intended clinical use.
 ## Assets
 
 Patient records (future PHI), audit trail integrity, AI artifacts and their
-provenance, credentials/tokens, tenant isolation guarantees.
+provenance, credentials/tokens, tenant isolation guarantees, scheduling
+integrity (one patient per slot, one slot per resource), patient-access
+grants, personal-calendar busy intervals, retained addresses and live
+transport locations, notification outbox contents, notification adapter
+secrets (SMTP password, webhook signing secret), location encryption keys.
 
 ## STRIDE summary
 
@@ -48,6 +52,33 @@ and token-exchange errors (all rejected; no provider tokens in responses,
 cookies or URLs), rate-limit exhaustion incl. parallel requests and
 unavailable store (denied with Retry-After / fail-closed).
 
+## dMind Access (scheduling, self-service, calendars, transport)
+
+Additional trust boundaries introduced by Access v1 (see
+`docs/architecture/dmind-access.md` and hazards H-23 to H-33):
+
+| Threat | Vector | Mitigations (implemented) | Planned |
+| --- | --- | --- | --- |
+| Spoofing a patient or representative | Browser-supplied `patient_id`; claim by name/birth date/MRN; expired/revoked grant | `/api/v1/me/...` derives the patient set from active `patient_access_grants` of the authenticated OIDC subject only; grants are staff-issued (`patient_grant.manage`), audited, time-boxed and revocable; the selected patient must be in the grant set or the response is the generic `not_found` | Self-service grant requests with staff verification queue |
+| Tampering with bookings | Concurrent holds/acceptances, stale versions, replayed requests | `resource_bookings` exclusion constraint; every booking/transition in one transaction with row locks; optimistic `version` (`409 stale_version`); `Idempotency-Key` with body hash (`409 idempotency_conflict`); hold bound to the principal who placed it | — |
+| Tampering with AI output | Model adds/removes candidates, demotes urgent patients, dispatches transport | Typed Access operations validate that rankings are permutations of supplied candidate ids and that recovery orders cover every entry once; deterministic urgency/waiting floors applied after ranking; no AI operation has a write path to bookings, waitlists or transport; emergency transport requires a human with `transport.coordinate` | — |
+| Information disclosure (calendar) | Raw `.ics` retained; titles/attendees stored; staff reading busy time | In-memory parse with hard bounds; only busy intervals + tz + hash persisted; `scheduling_calendar` consent; staff see only the matcher's rejection reason, never intervals; disconnect deletes derived data; connect/sync/disconnect audited | — |
+| Information disclosure (location) | Addresses/coordinates in clear; unauthorised reads; stale live trails | AES-256-GCM with configured keyring (`WELLOS_LOCATION_ENCRYPTION_KEYS`), fail-closed in staging/production; `scheduling_location` / `transport_coordination` consents; reads limited to `transport.coordinate` on the specific episode and audited; live positions only while `scheduled`/`en_route`/`picked_up`, purged after `WELLOS_LIVE_LOCATION_TTL_SECS`; transport personnel have logistics-only permissions (no chart) | HSM/KMS-backed key custody |
+| Information disclosure (notifications) | PHI in subjects, logs, webhook bodies | Subjects and webhook payloads carry ids, kind, time and locale only; bodies are rendered server-side per channel; logs never include recipient content; SMTP requires TLS (`starttls`/`implicit`, `none` refused outside development) and the webhook is HMAC-SHA256 signed (`x-wellos-signature` over `timestamp.body`), HTTPS, host-allowlisted, no redirects | — |
+| Denial of service | Calendar bombs; matcher abuse; notification storms; worker duplication | ICS bounds (1 MB / 2 000 events / 400 occurrences / 5 000 intervals / 180 days / 200 000 lines); `scheduling` rate-limit family (`WELLOS_RATE_SCHEDULING_PER_MIN`); bounded candidate sets and one model call per ranking; durable notifications claimed with `FOR UPDATE SKIP LOCKED`, bounded retries and dead-letter; hold expiry and offer caps (`MAX_OFFERS_PER_EVENT`) | — |
+| Elevation of privilege | Catalog/specialty as permission; representative reading charts; transport operator reading clinical data | Catalog membership grants nothing; authorization is the functional-role matrix (`catalog.*`, `resource.manage`, `scheduling.*`, `patient.self_service`, `patient_grant.manage`, `waitlist.manage`, `transport.coordinate`, `capacity.review`, `notification.read`) plus facility and care-team relationships; `patient_representative` and `transport_coordinator` have no chart/result/note/risk permissions; purpose-of-use enforced on every Access route | — |
+
+Abuse cases exercised by tests: self-service without a grant / with a revoked
+grant / for a sibling patient (404), concurrent acceptance of one slot or one
+waitlist offer (exactly one wins), a required room shared by two
+professionals (never double booked), red-flag text (forced to clinical
+triage; matching blocked), dMind disabled/degraded (deterministic order,
+booking unaffected), rankings that are not permutations (rejected), staff
+override without reason or outside scope (rejected), notification retry and
+dead-letter, transport without consent or without an encryption key in a
+deployed environment (refused), emergency transport without a human
+coordinator (refused), malformed/oversized ICS (bounded, nothing stored).
+
 ## Residual risk: rate limiting
 
 Fixed windows allow a boundary burst of up to twice the per-minute limit.
@@ -67,6 +98,15 @@ unusual break-glass volume; detection relies on the mandatory post-hoc
 review queue. An authorized emergency user within the rate limit can read
 any same-tenant patient record; the compensating controls are the immutable
 event trail and privacy-role review.
+
+## Residual risk: dMind Access
+
+The exclusion constraint protects single resources; combined multi-resource
+feasibility, patient busy time and travel are checked transactionally. Live
+location purge and notification delivery depend on the scheduling worker
+being alive (runbook alert). Delivery receipts from e-mail providers are not
+consumed. Representative verification is a staff process outside the
+system. Key custody for location encryption is a deployment concern.
 
 ## Assumptions
 

@@ -1,15 +1,23 @@
 pub mod aigov;
 pub mod audit;
 pub mod auth;
+pub mod capacity;
+pub mod crypto;
 pub mod error;
+pub mod notify;
 pub mod oidc;
 pub mod policy;
 pub mod ratelimit;
+pub mod recovery;
 pub mod routes;
 pub mod runtime;
+pub mod scheduling;
+#[cfg(feature = "dev-fixtures")]
+mod seed_access;
 #[cfg(feature = "dev-fixtures")]
 pub mod seeddata;
 pub mod state;
+pub mod transport;
 
 use axum::Router;
 use state::AppState;

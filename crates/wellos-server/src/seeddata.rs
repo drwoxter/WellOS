@@ -8,6 +8,8 @@
 
 use crate::routes::visits::single_row_vital_facts;
 use crate::runtime::RuntimeConfig;
+use crate::seed_access;
+use chrono::{DateTime, Utc};
 use dmind_gateway::triage::TRIAGE_TEMPLATE;
 use dmind_gateway::{ModelGateway, SummaryRequest, TriageRequest};
 use rand::RngCore;
@@ -206,12 +208,16 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
     let mut dr_garcia_id = None;
     let mut nurse_kim_id = None;
     let mut reg_rivera_id = None;
+    let mut admin_silva_id = None;
+    let mut pharm_osei_id = None;
     for (username, display, role, is_service) in users {
         let uid = Uuid::now_v7();
         match *username {
             "svc.lab-adapter" => lab_adapter_id = Some(uid),
             "dr.garcia" => dr_garcia_id = Some(uid),
             "nurse.kim" => nurse_kim_id = Some(uid),
+            "admin.silva" => admin_silva_id = Some(uid),
+            "pharm.osei" => pharm_osei_id = Some(uid),
             "reg.rivera" => reg_rivera_id = Some(uid),
             _ => {}
         }
@@ -413,9 +419,12 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
         .await?;
     }
 
+    let dr_garcia = dr_garcia_id.expect("dr.garcia seeded");
+    crate::scheduling::install_baseline_catalog(&mut tx, tenant_a, dr_garcia).await?;
+    crate::scheduling::install_baseline_catalog(&mut tx, tenant_b, dr_b).await?;
+
     // Demo clinical states: enough synthetic loops to show the workspace in
     // every workflow stage without hand-driving the lab adapter first.
-    let dr_garcia = dr_garcia_id.expect("dr.garcia seeded");
     let demo = seed_demo_states(&mut tx, tenant_a, facility_a, patient_a, dr_garcia).await?;
 
     // Service queues exist for every facility so arrivals always route
@@ -442,7 +451,7 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
             .await?;
         }
     }
-    seed_access_triage(
+    let access_seeded = seed_access_triage(
         &mut tx,
         AccessSeed {
             tenant: tenant_a,
@@ -471,6 +480,39 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
     )
     .await?;
 
+    // dMind Access: catalogs, resources, availability, appointments (incl.
+    // the legacy scheduled visits linked above), grants, waitlist, transport
+    // and capacity fixtures, all through the production write paths.
+    let access_state = seed_access::fixture_state(pool.clone(), runtime);
+    let access_fixtures = seed_access::seed(
+        &mut tx,
+        &access_state,
+        seed_access::AccessFixtureInput {
+            tenant: tenant_a,
+            facility: facility_a,
+            annex: facility_a2,
+            tenant_b,
+            facility_b,
+            admin: admin_silva_id.expect("admin.silva seeded"),
+            registration: reg_rivera_id.expect("reg.rivera seeded"),
+            dr_garcia,
+            nurse_kim: nurse_kim_id.expect("nurse.kim seeded"),
+            pharmacist: pharm_osei_id,
+            alba: patient_a,
+            anexa: patient_a2,
+            carlos: demo.carlos,
+            marta: demo.marta,
+            jonas: demo.jonas,
+            sofia: access_seeded.sofia,
+            diego: access_seeded.diego,
+            carlos_scheduled_visit: access_seeded.carlos_scheduled_visit,
+            anexa_scheduled_visit: access_seeded.anexa_scheduled_visit,
+            carlos_scheduled_at: access_seeded.carlos_scheduled_at,
+            anexa_scheduled_at: access_seeded.anexa_scheduled_at,
+        },
+    )
+    .await?;
+
     // Every seeded dMind artifact is a deterministic fixture and is marked
     // as such so no view can mistake it for a real model execution.
     sqlx::query(
@@ -482,6 +524,11 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
     .await?;
 
     tx.commit().await?;
+
+    // Matcher runs in the three AI states plus the first notification tick
+    // need their own (committed) transactions; each re-marks its artifacts
+    // synthetic before committing.
+    seed_access::after_commit(pool, runtime, &access_fixtures).await?;
     Ok(Some(Seeded {
         tenant_a,
         tenant_b,
@@ -1113,13 +1160,28 @@ async fn queue_id(
     .await?)
 }
 
+/// Identifiers the scheduling fixtures build on: the extra patients created
+/// here and the two legacy scheduled visits that get linked to authoritative
+/// appointments through the production helper.
+pub(crate) struct AccessTriageSeeded {
+    pub sofia: Uuid,
+    pub diego: Uuid,
+    pub carlos_scheduled_visit: Uuid,
+    pub anexa_scheduled_visit: Uuid,
+    pub carlos_scheduled_at: DateTime<Utc>,
+    pub anexa_scheduled_at: DateTime<Utc>,
+}
+
 /// Patient-access demo states: a scheduled appointment, a remote appointment
 /// at the annex, a walk-in awaiting triage, an urgent arrival with an open
 /// queue alert, a triage in progress with a dMind proposal awaiting review, a
 /// patient ready for consultation with an accepted proposal and a directed
 /// alert to the treating physician, the in-progress consultation linked to
 /// Alba's draft encounter, and one cancelled visit for history.
-async fn seed_access_triage(tx: &mut PgConnection, s: AccessSeed) -> anyhow::Result<()> {
+async fn seed_access_triage(
+    tx: &mut PgConnection,
+    s: AccessSeed,
+) -> anyhow::Result<AccessTriageSeeded> {
     let now = chrono::Utc::now();
     let general = queue_id(tx, s.tenant, s.facility, "general_medicine").await?;
     let emergency = queue_id(tx, s.tenant, s.facility, "emergency").await?;
@@ -1697,7 +1759,14 @@ async fn seed_access_triage(tx: &mut PgConnection, s: AccessSeed) -> anyhow::Res
         created_by: s.registration,
     };
     insert_visit(tx, s.tenant, &cancelled).await?;
-    Ok(())
+    Ok(AccessTriageSeeded {
+        sofia,
+        diego,
+        carlos_scheduled_visit: scheduled.id,
+        anexa_scheduled_visit: remote.id,
+        carlos_scheduled_at: scheduled.scheduled_at.expect("scheduled visit has a time"),
+        anexa_scheduled_at: remote.scheduled_at.expect("remote visit has a time"),
+    })
 }
 
 /// Persist a deterministic dMind triage proposal for a seeded visit, bound

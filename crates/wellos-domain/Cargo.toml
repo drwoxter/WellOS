@@ -11,3 +11,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 rust_decimal = { workspace = true }
+chrono-tz = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

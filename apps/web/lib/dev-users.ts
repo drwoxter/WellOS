@@ -51,7 +51,9 @@ export async function fetchDevUsers(): Promise<DevUsersResponse | null> {
 
 /** Role-appropriate landing route after sign-in. */
 export function homeForRoles(roles: string[]): string {
+  if (roles.includes("patient_representative")) return "/my/appointments";
   if (roles.includes("registration_staff")) return "/access";
+  if (roles.includes("transport_coordinator")) return "/scheduling";
   return "/dashboard";
 }
 
@@ -66,6 +68,8 @@ const ROLE_LABELS: Record<string, TKey> = {
   security_auditor: "roleSecurityAuditor",
   research_user: "roleResearch",
   break_glass_authorized: "roleBreakGlass",
+  patient_representative: "rolePatientRepresentative",
+  transport_coordinator: "roleTransportCoordinator",
 };
 
 /** Human-readable role list; unknown roles fall back to their identifier. */

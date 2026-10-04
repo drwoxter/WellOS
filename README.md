@@ -87,6 +87,9 @@ credentials or placeholder controls are rendered.
 | --- | --- |
 | `/dashboard` | Consultation cockpit: prominent **Start consultation** (patient search → create or resume), role-aware widgets for patients ready for consultation (start/resume), alerts for you, the triage queue and today's appointments/arrivals, plus draft consultations, patients needing attention, critical/pending results, pending tasks and recent dMind activity (show/hide, reorder, density; layout-only browser storage) |
 | `/access` | Access board: today's appointments and arrivals, walk-in / urgent / remote registration, mark arrived, cancel, no-show; Triage, Ready and Closed tabs by role |
+| `/scheduling` | Scheduling console: prominent **Find the best appointment** (need and constraints → best valid options with reasons → hold and confirm), day/week resource lanes with service / specialty / profession / facility / modality filters, pending access requests, active holds, confirmed appointments, cancellations and unfilled capacity, waitlist recovery with reasoned overrides, capacity-pressure panel with evidence and uncertainty, transport coordination; states that ranking is deterministic when dMind is disabled or degraded and marks synthetic providers |
+| `/scheduling/catalog`, `/scheduling/resources` | Catalog and resource administration: add or deactivate services, specialties, professions, modalities, resource types, accessibility capabilities, locations and transport resources at runtime (bilingual names, synonyms, hierarchy, external codings, effective dates, facility mapping, history); schedulable resources, availability rules and exceptions |
+| `/my/appointments` | Patient / representative self-service (mobile-first, EN/ES): choose the dependant, request an appointment in plain language, answer missing questions, see ranked valid options with a short explanation, hold and confirm, reschedule or cancel within policy, join / pause / leave the waitlist, availability and notification preferences, calendar busy-time import and `.ics` download, accessibility and transport requests, history |
 | `/visits/[id]/triage` | Triage workspace: safety header, previous vitals, structured concerns, red flags, vital signs, deterministic safety floor, dMind triage proposal (assistive), priority, requested service, named professional, handoff summary, complete |
 | `/patients` | Patient directory: search by name or identifier, register a patient |
 | `/patients/[id]` | Patient workspace: demographics, allergies/alerts, tabs, clinical timeline, recent vital trends, today's visit (arrive / triage / start), start/resume consultation, order laboratory test |
@@ -115,7 +118,21 @@ appointment, a walk-in awaiting triage, an urgent arrival with an open
 emergency-queue alert, a walk-in mid-triage with a pending dMind proposal, a
 patient ready for consultation assigned to Dr. García with an open alert, the
 in-consultation visit behind Alba's draft encounter and a cancelled
-appointment from yesterday. `make reset` restores all demo states.
+appointment from yesterday. For dMind Access it seeds tenant catalogs across
+primary care, medical and surgical specialties, paediatrics, obstetrics,
+mental health, dentistry, nursing and midwifery, physiotherapy, pharmacy,
+laboratory and imaging, home care, telehealth, emergency and transport;
+professionals, rooms, a dental chair, imaging equipment, a telehealth
+channel, a home-visit team and an accessible vehicle across two facilities in
+different time zones with recurring availability, breaks, leave and
+exceptions; a tenant operational calendar with summer pressure, holidays and
+local events; patients with different availability, accessibility and
+language needs and imported calendar conflicts; confirmed appointments, a
+cancellation with waitlist recovery, reminder and no-show scenarios, a
+parent/guardian (**rep.ortiz**) managing two dependants, a patient
+(**rep.alba**) with a `self` grant, a transport coordinator
+(**transport.ruiz**) and a transport request. `make reset` restores all demo
+states.
 
 Development tokens work only against seeded synthetic users, only when
 `WELLOS_ENV=development|test` **and** `WELLOS_DEV_AUTH=true`, and only on a
@@ -211,6 +228,30 @@ boundaries, structured-output contract and failure recovery.
 See `docs/architecture/patient-access-and-triage.md` for the visit state
 machine, the safety rules, the care-team versus system-role distinction and
 internal alert routing.
+
+### Scheduling and patient self-service demo (staff → patient)
+
+1. Sign in as **Reg. Rivera** and open **Scheduling**. Use **Find the best
+   appointment**: pick the patient, describe the need (dMind interprets it
+   into constraints when enabled; the structured form always works), review
+   the ranked valid options — every option comes from the deterministic
+   `access-matcher.v1`, dMind may only reorder and explain them — then
+   **Hold** and **Confirm**. The confirmed appointment appears on the
+   `/access` arrivals board as its linked scheduled visit.
+2. Cancel a confirmed appointment: the freed slot is offered to the eligible,
+   consented waitlist in deterministic fair order (dMind ranking stays within
+   the urgency and waiting-time floors), with time-limited offers that cascade
+   on decline or expiry. Staff can inspect the ranking and override with a
+   reason.
+3. Sign in as **rep.alba** (patient) or **rep.ortiz** (parent / guardian):
+   `/my/appointments` shows only the patients the active grant covers.
+   Request, hold, confirm, reschedule, cancel, join the waitlist, import a
+   calendar busy-time file, download the `.ics` and read why an option was
+   recommended.
+
+See `docs/architecture/dmind-access.md` for the appointment/visit boundary,
+the state machines, the matcher, the governed Access operations and the
+privacy boundaries of calendars, location and transport.
 
 ### Patient 360 and explainable risk demo
 
@@ -351,10 +392,22 @@ npm run test:e2e   # browser tests (Playwright; requires Postgres, seeds mutated
   certification are made or implied.
 - Not production-deployable: no TLS termination, HA, or backup automation here.
 - The workspace UI covers the diagnostic-result loop, patient access and
-  triage, and consultation documentation; a real appointment book (slots,
-  calendars, reminders), patient-facing notifications, orders beyond the two
-  seeded laboratory tests, and care-team based notification permissions are
-  future work.
+  triage, scheduling and patient self-service, and consultation
+  documentation; orders beyond the two seeded laboratory tests and
+  care-team based notification permissions are future work.
+- dMind Access is assistive: `access-intent.v1`, `appointment-ranking.v1`,
+  `cancellation-recovery.v1` and `capacity-explanation.v1` interpret, reorder
+  and explain; the deterministic matcher, waitlist eligibility, urgency and
+  fairness floors, booking integrity and human confirmation remain
+  authoritative, and emergency transport is never dispatched automatically.
+  When AI is disabled or degraded, scheduling continues with deterministic
+  ranking and says so. Ranking and forecast quality are not validated on real
+  populations; the no-show factor only adds supportive reminders.
+- Scheduling notifications are in-app by default; SMTP and the signed
+  webhook adapter are disabled until configured. Retained addresses and live
+  coordinates require the AES-256-GCM location keyring in staging/production
+  (fail-closed). Travel estimates use `haversine-urban-estimate.v1`, not a
+  routing provider.
 - Triage uses an internal four-level operational priority with deterministic
   safety rules; it is not a validated triage scale (Manchester/ESI/CTAS) and
   the dMind triage proposal is assistive only. Internal alerts stay inside

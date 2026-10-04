@@ -132,6 +132,52 @@ Seed is idempotent-ish for demos but intended for empty databases; to reset:
 - **Force AI degradation (tests)**: the fake provider exposes
   `set_unavailable(true)`; in integration tests only.
 
+### dMind Access (scheduling)
+
+- **Scheduling worker**: every replica runs an in-process worker every
+  `WELLOS_SCHEDULING_WORKER_INTERVAL_SECS` (default 30; `0` disables it,
+  e.g. when an external scheduler calls
+  `POST /api/v1/scheduling/worker/tick` with `scheduling.manage`). One pass
+  releases expired holds, expires offers and cascades cancellation-recovery
+  events, schedules reminders from each tenant's `reminder_lead_hours`,
+  claims up to `WELLOS_NOTIFICATION_BATCH_SIZE` due notifications with
+  `FOR UPDATE SKIP LOCKED` and purges expired live locations. Multiple
+  replicas are safe; a pass logs a PHI-free report at `debug`.
+- **Notification delivery**: in-app is always on. External adapters are
+  off by default — `WELLOS_SMTP_ENABLED=true` requires host, port, TLS
+  (`starttls` or `implicit`; `none` is refused outside development), from,
+  username and password; `WELLOS_PUSH_WEBHOOK_ENABLED=true` requires an
+  HTTPS URL, `WELLOS_PUSH_WEBHOOK_ALLOWED_HOSTS` and a signing secret
+  (`x-wellos-signature` = HMAC-SHA256 over `timestamp.body`). Failures retry
+  with bounded backoff (`WELLOS_NOTIFICATION_MAX_ATTEMPTS`,
+  `WELLOS_NOTIFICATION_BACKOFF_SECS`, `WELLOS_NOTIFICATION_MAX_BACKOFF_SECS`)
+  and then move to `status='dead'` with a `notification.dead_lettered` audit
+  record. Monitor:
+  `SELECT tenant_id, kind, count(*) FROM notifications WHERE status = 'dead' GROUP BY 1, 2;`
+  and alert when `min(scheduled_for)` of `status='pending'` rows is older
+  than a few worker intervals (worker lag). Dead rows are re-queued by
+  setting `status='pending', attempts=0` after the cause is fixed.
+- **Location / transport encryption**: in staging/production the transport
+  and location features refuse to retain addresses or live coordinates
+  unless `WELLOS_LOCATION_ENCRYPTION_KEYS` (`<key-id>:<base64 32-byte
+  key>,...`) and `WELLOS_LOCATION_ENCRYPTION_ACTIVE_KEY` are set. Rotate by
+  adding a new key, switching the active id and restarting; old ids stay in
+  the ring until every row encrypted under them has expired or been
+  rewritten. Live positions expire after `WELLOS_LIVE_LOCATION_TTL_SECS`
+  (default 900, max 14400) and are purged by the worker.
+- **Catalog administration**: new services, specialties, professions,
+  modalities, resource types, accessibility capabilities, locations and
+  transport resources are data (`POST /api/v1/catalog`, or
+  `/scheduling/catalog` for a clinical administrator); no deployment is
+  needed. Deactivate instead of deleting; history is kept in
+  `catalog_entry_history`.
+- **Scheduling policy per tenant**: `GET/PUT /api/v1/scheduling/policy`
+  controls hold minutes, offer expiry, cancellation window, confirmation
+  deadline, reminder lead hours, quiet hours and the ranking candidate cap.
+- **Legacy visits**: migration `0015` converted every existing scheduled
+  visit into a confirmed appointment once (idempotent, no deletions); the
+  rollback statements are documented at the end of the migration file.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -148,6 +194,11 @@ Seed is idempotent-ish for demos but intended for empty databases; to reset:
 | 403 responses | Role, scope, or purpose-of-use does not permit the action — see `policy.rs`; denials are audited |
 | 404 for a resource you expect | Nonexistent — or belongs to another tenant (cross-tenant probes are indistinguishable by design) |
 | 409 on transitions | Stale `version` — refetch the service request |
+| `409 slot_taken` | Another hold or booking won the race for that resource/time; offer another option (expected under concurrency) |
+| `409 stale_version` / `409 idempotency_conflict` | Scheduling write with an outdated `version`, or an `Idempotency-Key` reused with a different body — refetch and retry |
+| `409 offer_expired` / offer status `expired` | Hold or offer lapsed before confirmation (hold lapses are recorded as `hold_lapsed`); run the matcher again |
+| `503 encryption_unavailable` | Transport/location retention attempted in staging/production without `WELLOS_LOCATION_ENCRYPTION_*` — configure the keyring; the rest of scheduling keeps working |
+| Notifications stuck in `pending` | Worker disabled (`WELLOS_SCHEDULING_WORKER_INTERVAL_SECS=0`) with no external tick, or adapter failing — check `notification_deliveries` and the warn logs (ids only) |
 | AI artifact `unavailable` | Expected degradation path; clinical flow continues |
 
 ## Logging

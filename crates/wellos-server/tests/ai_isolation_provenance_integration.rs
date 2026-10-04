@@ -184,6 +184,54 @@ impl ModelGateway for RealLikeGateway {
         r.prompt_version = self.prompt_version(Operation::NoteDraft);
         Ok(r)
     }
+    async fn interpret_access_intent(
+        &self,
+        req: &dmind_gateway::access::AccessIntentRequest,
+    ) -> Result<
+        dmind_gateway::access::AccessResponse<wellos_domain::access_ai::AccessIntentV1>,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.interpret_access_intent(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::AccessIntent);
+        Ok(r)
+    }
+    async fn rank_appointments(
+        &self,
+        req: &dmind_gateway::access::RankingRequest,
+    ) -> Result<
+        dmind_gateway::access::AccessResponse<wellos_domain::access_ai::AppointmentRankingV1>,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.rank_appointments(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::AppointmentRanking);
+        Ok(r)
+    }
+    async fn rank_cancellation_recovery(
+        &self,
+        req: &dmind_gateway::access::RecoveryRankingRequest,
+    ) -> Result<
+        dmind_gateway::access::AccessResponse<wellos_domain::access_ai::CancellationRecoveryV1>,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.rank_cancellation_recovery(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::CancellationRecovery);
+        Ok(r)
+    }
+    async fn explain_capacity(
+        &self,
+        req: &dmind_gateway::access::CapacityExplanationRequest,
+    ) -> Result<
+        dmind_gateway::access::AccessResponse<wellos_domain::access_ai::CapacityExplanationV1>,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.explain_capacity(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::CapacityExplanation);
+        Ok(r)
+    }
 }
 
 struct RealLikeTranscription {

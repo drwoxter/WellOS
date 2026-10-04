@@ -54,6 +54,23 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::from_runtime(pool, gateway, scribe, auth, runtime);
 
+    if let Some(interval) = state.runtime.notifications.worker_interval {
+        let worker_state = state.clone();
+        let worker_id = format!("{}:{}", hostname(), std::process::id());
+        tracing::info!(interval_secs = interval.as_secs(), %worker_id, "scheduling worker enabled");
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match wellos_server::notify::scheduling_tick(&worker_state, &worker_id).await {
+                    Ok(report) => tracing::debug!(%report, "scheduling tick"),
+                    Err(e) => tracing::warn!(code = e.code, "scheduling tick failed"),
+                }
+            }
+        });
+    }
+
     let app = wellos_server::app(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!(%bind_addr, "wellos-server listening");
@@ -65,4 +82,11 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| "wellos".into())
 }
