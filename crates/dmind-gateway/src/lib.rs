@@ -15,6 +15,7 @@
 //!   real call.
 
 pub mod access;
+pub mod diagnostics;
 #[cfg(any(feature = "dev-fixtures", test))]
 pub mod fake;
 pub mod notes;
@@ -41,7 +42,13 @@ pub use access::{
     AccessIntentRequest, AccessResponse, CapacityExplanationRequest, RankingRequest,
     RecoveryRankingRequest,
 };
+pub use diagnostics::{
+    DiagnosticResponse, OrderSuggestionRequest, PatientExplanationRequest, ResultSynthesisRequest,
+};
 pub use risk::{RiskSummaryRequest, RiskSummaryResponse};
+use wellos_domain::diagnostics_ai::{
+    DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, PatientResultExplanationV1,
+};
 pub use triage::{TriageRequest, TriageResponse};
 use wellos_domain::access_ai::{
     AccessIntentV1, AppointmentRankingV1, CancellationRecoveryV1, CapacityExplanationV1,
@@ -240,6 +247,9 @@ pub enum Operation {
     AppointmentRanking,
     CancellationRecovery,
     CapacityExplanation,
+    DiagnosticOrderSuggestion,
+    DiagnosticResultSynthesis,
+    PatientResultExplanation,
 }
 
 #[async_trait]
@@ -307,6 +317,27 @@ pub trait ModelGateway: Send + Sync {
         &self,
         req: &CapacityExplanationRequest,
     ) -> Result<AccessResponse<CapacityExplanationV1>, GatewayError>;
+
+    /// A2 `diagnostic-order-suggestion.v1`: suggests orderables from the
+    /// bounded candidate list; the clinician composes and confirms the order.
+    async fn suggest_orders(
+        &self,
+        req: &OrderSuggestionRequest,
+    ) -> Result<DiagnosticResponse<DiagnosticOrderSuggestionV1>, GatewayError>;
+
+    /// A1 `diagnostic-result-synthesis.v1`: summarizes a report against
+    /// prior results without changing its deterministic interpretation.
+    async fn synthesize_result(
+        &self,
+        req: &ResultSynthesisRequest,
+    ) -> Result<DiagnosticResponse<DiagnosticResultSynthesisV1>, GatewayError>;
+
+    /// A1 `patient-result-explanation.v1`: EN/ES draft of a reviewed report
+    /// for clinician approval before release.
+    async fn explain_result_for_patient(
+        &self,
+        req: &PatientExplanationRequest,
+    ) -> Result<DiagnosticResponse<PatientResultExplanationV1>, GatewayError>;
 }
 
 /// Gateway installed when `DMIND_MODEL_PROVIDER=disabled` or when the
@@ -403,6 +434,27 @@ impl ModelGateway for DisabledGateway {
         &self,
         _req: &CapacityExplanationRequest,
     ) -> Result<AccessResponse<CapacityExplanationV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn suggest_orders(
+        &self,
+        _req: &OrderSuggestionRequest,
+    ) -> Result<DiagnosticResponse<DiagnosticOrderSuggestionV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn synthesize_result(
+        &self,
+        _req: &ResultSynthesisRequest,
+    ) -> Result<DiagnosticResponse<DiagnosticResultSynthesisV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn explain_result_for_patient(
+        &self,
+        _req: &PatientExplanationRequest,
+    ) -> Result<DiagnosticResponse<PatientResultExplanationV1>, GatewayError> {
         Err(self.err())
     }
 }

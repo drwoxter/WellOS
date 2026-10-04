@@ -37,6 +37,13 @@ use crate::access::{
     parse_capacity, parse_intent, parse_ranking, parse_recovery, AccessIntentRequest,
     AccessResponse, CapacityExplanationRequest, RankingRequest, RecoveryRankingRequest,
 };
+use crate::diagnostics::{
+    parse_explanation, parse_suggestion, parse_synthesis, DiagnosticResponse,
+    OrderSuggestionRequest, PatientExplanationRequest, ResultSynthesisRequest,
+};
+use wellos_domain::diagnostics_ai::{
+    DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, PatientResultExplanationV1,
+};
 use crate::notes::{
     validate_note_draft, NoteDraftRequest, NoteDraftResponse, CLINICIAN_JUDGEMENT_SECTIONS,
     NOTE_DRAFT_TEMPLATE,
@@ -57,6 +64,9 @@ pub const ACCESS_INTENT_PROMPT_VERSION: &str = "access-intent-openai.v2";
 pub const APPOINTMENT_RANKING_PROMPT_VERSION: &str = "appointment-ranking-openai.v1";
 pub const CANCELLATION_RECOVERY_PROMPT_VERSION: &str = "cancellation-recovery-openai.v1";
 pub const CAPACITY_EXPLANATION_PROMPT_VERSION: &str = "capacity-explanation-openai.v1";
+pub const ORDER_SUGGESTION_PROMPT_VERSION: &str = "diagnostic-order-suggestion-openai.v1";
+pub const RESULT_SYNTHESIS_PROMPT_VERSION: &str = "diagnostic-result-synthesis-openai.v1";
+pub const PATIENT_EXPLANATION_PROMPT_VERSION: &str = "patient-result-explanation-openai.v1";
 
 /// How long after the last failure the capability keeps reporting
 /// `degraded` when no call has succeeded since.
@@ -486,6 +496,9 @@ impl ModelGateway for OpenAiCompatibleModel {
             Operation::AppointmentRanking => APPOINTMENT_RANKING_PROMPT_VERSION,
             Operation::CancellationRecovery => CANCELLATION_RECOVERY_PROMPT_VERSION,
             Operation::CapacityExplanation => CAPACITY_EXPLANATION_PROMPT_VERSION,
+            Operation::DiagnosticOrderSuggestion => ORDER_SUGGESTION_PROMPT_VERSION,
+            Operation::DiagnosticResultSynthesis => RESULT_SYNTHESIS_PROMPT_VERSION,
+            Operation::PatientResultExplanation => PATIENT_EXPLANATION_PROMPT_VERSION,
         }
         .into()
     }
@@ -767,6 +780,126 @@ impl ModelGateway for OpenAiCompatibleModel {
             output,
             provider: self.info(),
             prompt_version: CAPACITY_EXPLANATION_PROMPT_VERSION.into(),
+            input_hash: crate::hash_json(req),
+            usage,
+        }))
+    }
+
+    async fn suggest_orders(
+        &self,
+        req: &OrderSuggestionRequest,
+    ) -> Result<DiagnosticResponse<DiagnosticOrderSuggestionV1>, GatewayError> {
+        req.check()?;
+        let system = format!(
+            "{COMMON_RULES} Task: from the supplied consultation evidence, suggest which of the \
+             supplied diagnostic orderables a clinician may want to consider. Use only the \
+             orderable_id values in candidates; never invent a test, never state a diagnosis, never \
+             set a final urgency (proposed_timing is advisory: routine|urgent|timed) and never claim \
+             an order was placed. Each suggestion must cite the evidence references that support \
+             it (\"note:*\", \"obs:*\", \"order:*\", \"brief:*\", \"vital:*\", \"diagnosis:*\" from \
+             facts, or \"catalog:<code>\" for a candidate). Flag candidates marked recent_or_pending \
+             in duplicate_warnings. Ask for missing information instead of guessing. {} Output \
+             schema: {{\"suggestions\": [{{\"orderable_id\": uuid, \"rationale\": string, \
+             \"cited_sources\": string[], \"proposed_timing\": \"routine\"|\"urgent\"|\"timed\"|null, \
+             \"preparation_note\": string|null}}] (at most 5), \"duplicate_warnings\": \
+             [{{\"orderable_id\": uuid, \"reason\": string, \"cited_sources\": string[]}}], \
+             \"missing_information\": string[], \"cited_sources\": string[], \"confidence\": \
+             \"low\"|\"medium\"|\"high\", \"limitations\": string[] (non-empty)}}.",
+            language_instruction(&req.language)
+        );
+        let user = json!({
+            "template": req.template,
+            "language": req.language,
+            "facts": facts_json(&req.facts),
+            "candidates": req.candidates,
+        });
+        let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(parse_suggestion(&raw, req).map(|output| DiagnosticResponse {
+            output,
+            provider: self.info(),
+            prompt_version: ORDER_SUGGESTION_PROMPT_VERSION.into(),
+            input_hash: crate::hash_json(req),
+            usage,
+        }))
+    }
+
+    async fn synthesize_result(
+        &self,
+        req: &ResultSynthesisRequest,
+    ) -> Result<DiagnosticResponse<DiagnosticResultSynthesisV1>, GatewayError> {
+        req.check()?;
+        let system = format!(
+            "{COMMON_RULES} Task: summarize one diagnostic report for the reviewing clinician, \
+             comparing each component with its prior value when supplied. The report's criticality \
+             and each component's interpretation were computed deterministically and are \
+             authoritative: echo them exactly, never upgrade or downgrade them. Never diagnose, \
+             never recommend treatment, never state that review or notification is complete. \
+             Point out changes, contradictions between components or with prior results, and \
+             missing information. Cite only supplied references; the report reference must be \
+             cited. {} Output schema: {{\"report_ref\": string, \"summary\": string, \"criticality\": \
+             \"normal\"|\"abnormal\"|\"critical\"|\"unknown\", \"components\": [{{\"component_ref\": \
+             string, \"interpretation\": same enum, \"statement\": string, \"change_from_prior\": \
+             string|null, \"cited_sources\": string[]}}], \"changes\": string[], \"contradictions\": \
+             string[], \"missing_information\": string[], \"cited_sources\": string[], \
+             \"confidence\": \"low\"|\"medium\"|\"high\", \"limitations\": string[] (non-empty)}}.",
+            language_instruction(&req.language)
+        );
+        let user = json!({
+            "template": req.template,
+            "language": req.language,
+            "report": {
+                "reference": req.report_ref,
+                "display": req.report_display,
+                "status": req.report_status,
+                "criticality": req.criticality,
+                "conclusion": req.conclusion,
+                "components": req.components,
+            },
+            "facts": facts_json(&req.facts),
+        });
+        let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(parse_synthesis(&raw, req).map(|output| DiagnosticResponse {
+            output,
+            provider: self.info(),
+            prompt_version: RESULT_SYNTHESIS_PROMPT_VERSION.into(),
+            input_hash: crate::hash_json(req),
+            usage,
+        }))
+    }
+
+    async fn explain_result_for_patient(
+        &self,
+        req: &PatientExplanationRequest,
+    ) -> Result<DiagnosticResponse<PatientResultExplanationV1>, GatewayError> {
+        req.check()?;
+        let system = format!(
+            "{COMMON_RULES} Task: draft a plain-language explanation of a diagnostic report that a \
+             clinician has already reviewed, for the patient, in both English (explanation_en, \
+             next_steps_en) and Spanish (explanation_es, next_steps_es). Stay consistent with the \
+             reviewer's assessment. Never diagnose, never reassure beyond what the review states, \
+             never say a result is normal unless the deterministic criticality is \"normal\", never \
+             give treatment or medication advice, never say the result was released or sent. Tell \
+             the patient their clinician will discuss next steps. Cite only supplied references and \
+             always cite the report. Output schema: {{\"explanation_en\": string, \"explanation_es\": \
+             string, \"next_steps_en\": string, \"next_steps_es\": string, \"cited_sources\": string[], \
+             \"confidence\": \"low\"|\"medium\"|\"high\", \"limitations\": string[] (non-empty)}}."
+        );
+        let user = json!({
+            "template": req.template,
+            "report": {
+                "reference": req.report_ref,
+                "version": req.report_version,
+                "display": req.report_display,
+                "criticality": req.criticality,
+            },
+            "review_summary": req.review_summary,
+            "facts": facts_json(&req.facts),
+        });
+        let (raw, usage) = self.complete(&system, &user).await?;
+        self.validated(parse_explanation(&raw, req).map(|output| DiagnosticResponse {
+            output,
+            provider: self.info(),
+            prompt_version: PATIENT_EXPLANATION_PROMPT_VERSION.into(),
             input_hash: crate::hash_json(req),
             usage,
         }))

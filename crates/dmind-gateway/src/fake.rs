@@ -12,6 +12,10 @@ use crate::access::{
     self, AccessIntentRequest, AccessResponse, CapacityExplanationRequest, RankingRequest,
     RecoveryRankingRequest,
 };
+use crate::diagnostics::{
+    self, DiagnosticResponse, OrderSuggestionRequest, PatientExplanationRequest,
+    ResultSynthesisRequest,
+};
 use crate::notes::{self, NoteDraftRequest, NoteDraftResponse};
 use crate::risk::{self, RiskSummaryRequest, RiskSummaryResponse};
 use crate::triage::{self, TriageRequest, TriageResponse};
@@ -25,6 +29,9 @@ use wellos_domain::access_ai::{
     AccessIntentV1, AppointmentRankingV1, CancellationRecoveryV1, CapacityExplanationV1,
 };
 use wellos_domain::ai::{ProviderInfo, ResultSummaryV1};
+use wellos_domain::diagnostics_ai::{
+    DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, PatientResultExplanationV1,
+};
 
 pub const FAKE_MODEL: &str = crate::FIXTURE_MODEL;
 pub const FAKE_MODEL_VERSION: &str = crate::FIXTURE_MODEL_VERSION;
@@ -101,6 +108,15 @@ impl ModelGateway for FakeProvider {
             }
             Operation::CapacityExplanation => {
                 access::CAPACITY_EXPLANATION_DETERMINISTIC_PROMPT_VERSION
+            }
+            Operation::DiagnosticOrderSuggestion => {
+                diagnostics::ORDER_SUGGESTION_DETERMINISTIC_PROMPT_VERSION
+            }
+            Operation::DiagnosticResultSynthesis => {
+                diagnostics::RESULT_SYNTHESIS_DETERMINISTIC_PROMPT_VERSION
+            }
+            Operation::PatientResultExplanation => {
+                diagnostics::PATIENT_EXPLANATION_DETERMINISTIC_PROMPT_VERSION
             }
         }
         .into()
@@ -221,6 +237,30 @@ impl ModelGateway for FakeProvider {
     ) -> Result<AccessResponse<CapacityExplanationV1>, GatewayError> {
         self.ensure_available()?;
         access::deterministic_capacity(req, self.info())
+    }
+
+    async fn suggest_orders(
+        &self,
+        req: &OrderSuggestionRequest,
+    ) -> Result<DiagnosticResponse<DiagnosticOrderSuggestionV1>, GatewayError> {
+        self.ensure_available()?;
+        diagnostics::deterministic_suggestion(req, self.info())
+    }
+
+    async fn synthesize_result(
+        &self,
+        req: &ResultSynthesisRequest,
+    ) -> Result<DiagnosticResponse<DiagnosticResultSynthesisV1>, GatewayError> {
+        self.ensure_available()?;
+        diagnostics::deterministic_synthesis(req, self.info())
+    }
+
+    async fn explain_result_for_patient(
+        &self,
+        req: &PatientExplanationRequest,
+    ) -> Result<DiagnosticResponse<PatientResultExplanationV1>, GatewayError> {
+        self.ensure_available()?;
+        diagnostics::deterministic_explanation(req, self.info())
     }
 }
 
