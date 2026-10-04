@@ -1554,7 +1554,15 @@ async fn capacity_forecast_reports_insufficient_history_then_seasonal_pressure()
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{season}");
-    let closure_day = horizon_start + Duration::days(3);
+    // Closure and leave land on facility working days (the seeded facility
+    // opens Monday to Friday), so the test is stable whatever today's weekday.
+    let working_day = |from: NaiveDate| {
+        (0..7)
+            .map(|i| from + Duration::days(i))
+            .find(|d| d.weekday().number_from_monday() <= 5)
+            .unwrap()
+    };
+    let closure_day = working_day(horizon_start + Duration::days(3));
     let (st, closure) = call(
         &state,
         "POST",
@@ -1571,7 +1579,7 @@ async fn capacity_forecast_reports_insufficient_history_then_seasonal_pressure()
     .await;
     assert_eq!(st, StatusCode::OK, "{closure}");
     // Professional on leave for one horizon day.
-    let leave_day = horizon_start + Duration::days(5);
+    let leave_day = working_day(closure_day + Duration::days(1));
     let (st, res) = call(
         &state,
         "GET",

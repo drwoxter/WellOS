@@ -394,18 +394,23 @@ async fn golden_path_request_match_hold_accept_visit_ics_cancel() {
         "patient name must not leak: {ics}"
     );
 
-    // The slot is inside the policy notice window: staff need an override
-    // reason, and the reason is mandatory.
-    let (st, denied) = call(
-        &state,
-        "POST",
-        &format!("/api/v1/appointments/{aid}/cancel"),
-        REG,
-        Some(json!({ "version": acc["version"], "reason_code": "patient_request" })),
-    )
-    .await;
-    assert_eq!(st, StatusCode::CONFLICT, "{denied}");
-    assert_eq!(code(&denied), "override_required");
+    // Inside the tenant's 24 h patient window staff act on the patient's
+    // behalf and must give an override reason. Whether the top-ranked slot
+    // falls inside that window depends on the clock (facility hours are
+    // Monday-Friday; gap-fill may rank a later slot first), so only assert
+    // the refusal when the policy actually applies.
+    if starts_at - Utc::now() < Duration::hours(24) {
+        let (st, denied) = call(
+            &state,
+            "POST",
+            &format!("/api/v1/appointments/{aid}/cancel"),
+            REG,
+            Some(json!({ "version": acc["version"], "reason_code": "patient_request" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{denied}");
+        assert_eq!(code(&denied), "override_required");
+    }
 
     // Cancel with an override reason; the visit follows in the same transaction.
     let (st, cancelled) = call(
