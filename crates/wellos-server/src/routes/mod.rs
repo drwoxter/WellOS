@@ -166,6 +166,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/worklist", get(loops::worklist))
         .route("/api/v1/worklist/summary", get(loops::worklist_summary))
         .route("/api/v1/dashboard/cockpit", get(dashboard::cockpit))
+        .route(
+            "/api/v1/me/dashboard-preferences",
+            get(dashboard::get_preferences).put(dashboard::put_preferences),
+        )
         .route("/api/v1/visits", post(visits::create).get(visits::list))
         .route("/api/v1/visits/:id", get(visits::detail))
         .route("/api/v1/visits/:id/arrive", post(visits::arrive))

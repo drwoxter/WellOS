@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppShell } from "../chrome";
 import { t } from "@/lib/i18n";
 import type { Lang, TKey } from "@/lib/i18n";
-import { apiFetch, useSession } from "@/lib/session";
+import { ApiRequestError, apiFetch, useSession } from "@/lib/session";
 import {
   canActClinically,
   canReadWorklist,
@@ -18,17 +18,29 @@ import {
 } from "@/lib/clinical";
 import {
   availableWidgets,
+  clearLegacyLocalConfig,
   defaultConfig,
-  loadConfig,
+  loadPreferences,
   move,
-  saveConfig,
+  moveBefore,
+  parseLayout,
+  readLegacyLocalConfig,
+  sameConfig,
+  savePreferences,
   setDensity,
+  setSize,
+  sizeOf,
   toggleHidden,
+  topPriorities,
   visibleWidgets,
 } from "@/lib/cockpit";
-import type { CockpitConfig, CockpitWidget } from "@/lib/cockpit";
-import { canReadVisits } from "@/lib/visits";
+import type { CockpitConfig, CockpitWidget, Priority } from "@/lib/cockpit";
+import { greetingKey } from "@/lib/home";
+import { canReadVisits, visitStatusLabel } from "@/lib/visits";
 import type { InternalAlert, VisitItem } from "@/lib/visits";
+import { Icon } from "@/components/ui/icons";
+import { EmptyState, Pill, StatTile } from "@/components/ui/primitives";
+import type { Tone } from "@/components/ui/primitives";
 import { AlertsPanel } from "../access/alerts-panel";
 import { VisitCard, useVisitActions } from "../access/visit-card";
 
@@ -114,7 +126,6 @@ type PatientHit = {
   can_start_encounter: boolean;
   open_consultation_id?: string | null;
 };
-
 const WIDGET_TITLE: Record<CockpitWidget, TKey> = {
   ready: "widgetReady",
   alerts: "internalAlerts",
@@ -290,124 +301,316 @@ function StartConsultation({ lang }: { lang: Lang }) {
   );
 }
 
+const PRIORITY_LABEL: Record<Priority["key"], TKey> = {
+  critical: "prioCritical",
+  alerts: "prioAlerts",
+  ready: "prioReady",
+  triage: "prioTriage",
+  overdue: "prioOverdue",
+  review: "prioReview",
+  attention: "prioAttention",
+  drafts: "prioDrafts",
+};
+
+/** The three things that matter most right now, readable without scrolling.
+ *  Counts come straight from the worklist, cockpit, visit and alert feeds the
+ *  role may read; nothing is estimated. */
+function PriorityStrip({
+  lang,
+  priorities,
+}: {
+  lang: Lang;
+  priorities: Priority[];
+}) {
+  return (
+    <section className="priority-strip" aria-labelledby="prio-h">
+      <h2 id="prio-h" className="sr-only">
+        {t(lang, "prioritiesTitle")}
+      </h2>
+      {priorities.length === 0 ? (
+        <div className="priority-tile all-clear" role="status">
+          <span className="priority-icon" aria-hidden="true">
+            <Icon.Check />
+          </span>
+          <span className="priority-body">
+            <strong>{t(lang, "prioAllClear")}</strong>
+            <span className="muted">{t(lang, "prioAllClearHelp")}</span>
+          </span>
+        </div>
+      ) : (
+        <ol className="priority-list">
+          {priorities.map((p, i) => (
+            <li key={p.key}>
+              <a
+                className={`priority-tile ${p.tone}`}
+                href={p.href}
+                data-testid={`priority-${p.key}`}
+              >
+                <span className="priority-rank" aria-hidden="true">
+                  {i + 1}
+                </span>
+                <span className="priority-count">{p.count}</span>
+                <span className="priority-body">
+                  <strong>{t(lang, PRIORITY_LABEL[p.key])}</strong>
+                </span>
+                <span className="priority-go" aria-hidden="true">
+                  <Icon.ArrowRight />
+                </span>
+              </a>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+const ARRIVAL_TONE: Record<string, Tone> = {
+  urgent: "critical",
+  walk_in: "warn",
+  scheduled: "neutral",
+  remote: "teal",
+};
+const ARRIVAL_SHORT: Record<string, TKey> = {
+  urgent: "arrivalUrgentShort",
+  walk_in: "arrivalWalkInShort",
+  scheduled: "arrivalScheduledShort",
+  remote: "arrivalRemoteShort",
+};
+const EXPECTED_STATUSES: readonly string[] = [
+  "in_consultation",
+  "ready_for_consultation",
+  "triage_in_progress",
+  "arrived",
+  "scheduled",
+];
+
+/** Everyone expected today, urgent and ready first, with the arrival kind
+ *  spelled out so scheduled, urgent and walk-in patients are never confused. */
+function ExpectedToday({
+  lang,
+  visits,
+  limit,
+}: {
+  lang: Lang;
+  visits: VisitItem[];
+  limit: number;
+}) {
+  const rows = visits
+    .filter((v) => EXPECTED_STATUSES.includes(v.status))
+    .sort((a, b) => {
+      const urgency = (v: VisitItem) =>
+        (v.arrival_kind === "urgent" ? 0 : 2) +
+        (v.status === "ready_for_consultation" ? 0 : 1);
+      const ua = urgency(a);
+      const ub = urgency(b);
+      if (ua !== ub) return ua - ub;
+      return (a.scheduled_at ?? a.arrived_at ?? "").localeCompare(
+        b.scheduled_at ?? b.arrived_at ?? "",
+      );
+    });
+  return (
+    <section className="card expected-today" aria-labelledby="expected-h">
+      <div className="card-head">
+        <h2 id="expected-h">
+          <Icon.Calendar /> {t(lang, "expectedToday")}{" "}
+          {rows.length > 0 ? (
+            <span className="badge neutral">{rows.length}</span>
+          ) : null}
+        </h2>
+        <Link href="/access" className="navlink">
+          {t(lang, "openAccessBoard")}
+        </Link>
+      </div>
+      {rows.length === 0 ? (
+        <EmptyState inline title={t(lang, "noExpectedToday")} />
+      ) : (
+        <ul className="expected-list">
+          {rows.slice(0, limit).map((v) => (
+            <li key={v.id} className={`expected-row kind-${v.arrival_kind}`}>
+              <span className="expected-when">
+                {v.scheduled_at
+                  ? formatDateTime(lang, v.scheduled_at).split(" ").pop()
+                  : v.wait_minutes !== null
+                    ? `${v.wait_minutes} min`
+                    : "—"}
+              </span>
+              <span className="expected-who">
+                <strong>{patientName(v.patient)}</strong>
+                <span className="muted">
+                  {v.reason ?? v.service} · {visitStatusLabel(lang, v.status)}
+                </span>
+              </span>
+              <Pill
+                tone={ARRIVAL_TONE[v.arrival_kind] ?? "neutral"}
+                icon={v.arrival_kind === "urgent"}
+              >
+                {t(
+                  lang,
+                  ARRIVAL_SHORT[v.arrival_kind] ?? "arrivalScheduledShort",
+                )}
+              </Pill>
+              {v.encounter_id && v.capabilities.can_resume_consultation ? (
+                <Link
+                  className="navlink"
+                  href={`/encounters/${v.encounter_id}`}
+                >
+                  {t(lang, "resumeConsultation")}
+                </Link>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 /** One-line count of where today's patients are in the access flow. */
 function FlowStrip({ lang, visits }: { lang: Lang; visits: VisitItem[] }) {
   const count = (...statuses: string[]) =>
     visits.filter((v) => statuses.includes(v.status)).length;
-  const steps: { key: TKey; n: number; tone: string }[] = [
-    { key: "flowScheduled", n: count("scheduled"), tone: "" },
-    { key: "flowWaiting", n: count("arrived"), tone: " warn" },
-    { key: "flowInTriage", n: count("triage_in_progress"), tone: "" },
-    { key: "flowReady", n: count("ready_for_consultation"), tone: " ok" },
-    { key: "flowInConsultation", n: count("in_consultation"), tone: "" },
+  const steps: { key: TKey; n: number; tone: Tone }[] = [
+    { key: "flowScheduled", n: count("scheduled"), tone: "neutral" },
+    { key: "flowWaiting", n: count("arrived"), tone: "warn" },
+    { key: "flowInTriage", n: count("triage_in_progress"), tone: "neutral" },
+    { key: "flowReady", n: count("ready_for_consultation"), tone: "ok" },
+    { key: "flowInConsultation", n: count("in_consultation"), tone: "teal" },
   ];
   return (
-    <section className="card" aria-labelledby="flow-h">
+    <section className="card flow-strip" aria-labelledby="flow-h">
       <h2 id="flow-h">{t(lang, "flowTitle")}</h2>
-      <div className="cards-grid">
+      <div className="flow-tiles">
         {steps.map((s) => (
-          <div key={s.key} className={`stat-card${s.n > 0 ? s.tone : ""}`}>
-            <span className="num">{s.n}</span>
-            <span className="label">{t(lang, s.key)}</span>
-          </div>
+          <StatTile
+            key={s.key}
+            value={s.n}
+            label={t(lang, s.key)}
+            tone={s.n > 0 ? s.tone : "neutral"}
+          />
         ))}
       </div>
     </section>
   );
 }
 
-function Customizer({
+type SaveStatus =
+  | { kind: "idle" }
+  | { kind: "saving" }
+  | { kind: "saved" }
+  | { kind: "conflict" }
+  | { kind: "failed" };
+
+/** Edit-mode panel: hidden widgets, density, restore, save and cancel. The
+ *  layout on screen is the live preview; nothing is stored until Save. */
+function EditPanel({
   lang,
-  config,
+  draft,
   available,
+  dirty,
+  status,
   onChange,
   onRestore,
+  onSave,
+  onCancel,
 }: {
   lang: Lang;
-  config: CockpitConfig;
+  draft: CockpitConfig;
   available: CockpitWidget[];
+  dirty: boolean;
+  status: SaveStatus;
   onChange: (c: CockpitConfig) => void;
   onRestore: () => void;
+  onSave: () => void;
+  onCancel: () => void;
 }) {
-  const rows = config.order.filter((w) => available.includes(w));
+  const hidden = draft.order.filter(
+    (w) => available.includes(w) && draft.hidden.includes(w),
+  );
   return (
-    <div className="card customizer" aria-labelledby="customize-h">
-      <h2 id="customize-h">{t(lang, "customizeDashboard")}</h2>
-      <ul className="brief-list">
-        {rows.map((w, i) => {
-          const hidden = config.hidden.includes(w);
-          const title = t(lang, WIDGET_TITLE[w]);
-          return (
-            <li key={w} className="recording-row">
-              <span className="grow">
-                {title}
-                {hidden ? (
-                  <>
-                    {" "}
-                    <span className="badge neutral">
-                      {t(lang, "hideWidget")}
-                    </span>
-                  </>
-                ) : null}
-              </span>
-              <button
-                type="button"
-                className="tertiary"
-                aria-label={`${t(lang, "moveUp")}: ${title}`}
-                disabled={i === 0}
-                onClick={() => onChange(move(config, w, -1))}
-              >
-                ↑
-              </button>
-              <button
-                type="button"
-                className="tertiary"
-                aria-label={`${t(lang, "moveDown")}: ${title}`}
-                disabled={i === rows.length - 1}
-                onClick={() => onChange(move(config, w, 1))}
-              >
-                ↓
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                aria-pressed={!hidden}
-                aria-label={`${hidden ? t(lang, "showWidget") : t(lang, "hideWidget")}: ${title}`}
-                onClick={() => onChange(toggleHidden(config, w))}
-              >
-                {hidden ? t(lang, "showWidget") : t(lang, "hideWidget")}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-      <fieldset className="density-choice">
-        <legend>{t(lang, "density")}</legend>
-        <label>
-          <input
-            type="radio"
-            name="density"
-            checked={config.density === "compact"}
-            onChange={() => onChange(setDensity(config, "compact"))}
-          />{" "}
-          {t(lang, "densityCompact")}
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="density"
-            checked={config.density === "expanded"}
-            onChange={() => onChange(setDensity(config, "expanded"))}
-          />{" "}
-          {t(lang, "densityExpanded")}
-        </label>
-      </fieldset>
-      <p className="recording-row">
-        <button type="button" className="secondary" onClick={onRestore}>
+    <div
+      className="card edit-panel tone-teal"
+      id="customizer"
+      aria-labelledby="customize-h"
+      role="region"
+    >
+      <div className="card-head">
+        <h2 id="customize-h">
+          <Icon.Settings /> {t(lang, "customizeDashboard")}
+        </h2>
+        <p className="muted edit-hint" role="status">
+          {status.kind === "saving"
+            ? t(lang, "loading")
+            : status.kind === "failed"
+              ? t(lang, "cockpitSaveFailed")
+              : dirty
+                ? t(lang, "cockpitPreview")
+                : t(lang, "layoutStoredLocally")}
+        </p>
+      </div>
+      <div className="edit-panel-body">
+        <div>
+          <h3>{t(lang, "cockpitHidden")}</h3>
+          {hidden.length === 0 ? (
+            <p className="muted">{t(lang, "cockpitNoHidden")}</p>
+          ) : (
+            <div className="chip-group">
+              {hidden.map((w) => {
+                const title = t(lang, WIDGET_TITLE[w]);
+                return (
+                  <button
+                    key={w}
+                    type="button"
+                    className="chip"
+                    aria-label={`${t(lang, "showWidget")}: ${title}`}
+                    onClick={() => onChange(toggleHidden(draft, w))}
+                  >
+                    <Icon.Eye /> {title}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <fieldset className="density-choice">
+          <legend>{t(lang, "density")}</legend>
+          <label>
+            <input
+              type="radio"
+              name="density"
+              checked={draft.density === "compact"}
+              onChange={() => onChange(setDensity(draft, "compact"))}
+            />{" "}
+            {t(lang, "densityCompact")}
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="density"
+              checked={draft.density === "expanded"}
+              onChange={() => onChange(setDensity(draft, "expanded"))}
+            />{" "}
+            {t(lang, "densityExpanded")}
+          </label>
+        </fieldset>
+      </div>
+      <div className="edit-actions">
+        <button type="button" className="tertiary" onClick={onRestore}>
           {t(lang, "restoreDefaults")}
         </button>
-        <span className="muted">{t(lang, "layoutStoredLocally")}</span>
-      </p>
+        <span className="grow" />
+        <button type="button" className="secondary" onClick={onCancel}>
+          {t(lang, "cockpitCancel")}
+        </button>
+        <button
+          type="button"
+          className="primary"
+          disabled={status.kind === "saving"}
+          onClick={onSave}
+        >
+          {t(lang, "cockpitSave")}
+        </button>
+      </div>
     </div>
   );
 }
@@ -421,29 +624,69 @@ function DashboardContent() {
   const [alerts, setAlerts] = useState<InternalAlert[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<CockpitConfig | null>(null);
-  const [customizing, setCustomizing] = useState(false);
+  const [version, setVersion] = useState(0);
+  const [draft, setDraft] = useState<CockpitConfig | null>(null);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>({ kind: "idle" });
+  const [dragging, setDragging] = useState<CockpitWidget | null>(null);
+  const [dropTarget, setDropTarget] = useState<CockpitWidget | null>(null);
 
   const roles = meta?.user.roles ?? null;
   const worklistUser = roles ? canReadWorklist(roles) : false;
   const visitUser = roles ? canReadVisits(roles) : false;
   const clinician = meta ? canActClinically(meta.facilities) : false;
+  const hasCockpit = worklistUser || visitUser;
   const rolesKey = roles?.join(",") ?? "";
 
+  // Server is the source of truth for the layout. A valid legacy
+  // browser-only layout is migrated once (first load with nothing stored)
+  // and the browser copy is dropped afterwards.
   useEffect(() => {
-    if (!roles) return;
-    setConfig(
-      loadConfig(
-        typeof window === "undefined" ? null : window.localStorage,
-        roles,
-      ),
-    );
+    if (!roles || !authenticated) return;
+    const fallback = defaultConfig(roles);
+    if (!hasCockpit) {
+      setConfig(fallback);
+      return;
+    }
+    let cancelled = false;
+    const storage = typeof window === "undefined" ? null : window.localStorage;
+    (async () => {
+      try {
+        const prefs = await loadPreferences();
+        if (cancelled) return;
+        if (prefs.layout) {
+          setConfig(parseLayout(prefs.layout, fallback));
+          setVersion(prefs.version ?? 0);
+        } else {
+          const legacy = readLegacyLocalConfig(storage);
+          if (legacy) {
+            try {
+              const saved = await savePreferences(legacy, 0);
+              if (cancelled) return;
+              setConfig(parseLayout(saved.layout, fallback));
+              setVersion(saved.version ?? 1);
+            } catch {
+              if (cancelled) return;
+              setConfig(legacy);
+              setVersion(0);
+            }
+          } else {
+            setConfig(fallback);
+            setVersion(prefs.version ?? 0);
+          }
+        }
+        clearLegacyLocalConfig(storage);
+      } catch {
+        if (!cancelled) {
+          setConfig(fallback);
+          setVersion(0);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rolesKey]);
-
-  const updateConfig = useCallback((c: CockpitConfig) => {
-    setConfig(c);
-    saveConfig(typeof window === "undefined" ? null : window.localStorage, c);
-  }, []);
+  }, [rolesKey, authenticated, hasCockpit]);
 
   const load = useCallback(async () => {
     setError(null);
@@ -480,8 +723,8 @@ function DashboardContent() {
   }, [worklistUser, visitUser]);
 
   useEffect(() => {
-    if (authenticated && (worklistUser || visitUser)) void load();
-  }, [authenticated, worklistUser, visitUser, load]);
+    if (authenticated && hasCockpit) void load();
+  }, [authenticated, hasCockpit, load]);
 
   const visitActions = useVisitActions(lang, load);
 
@@ -489,10 +732,49 @@ function DashboardContent() {
     () => availableWidgets(visitUser, worklistUser),
     [visitUser, worklistUser],
   );
+  const shown = draft ?? config;
   const visible = useMemo(
-    () => (config ? visibleWidgets(config, available) : []),
-    [config, available],
+    () => (shown ? visibleWidgets(shown, available) : []),
+    [shown, available],
   );
+  const editing = draft !== null;
+
+  const reloadLayout = useCallback(async () => {
+    if (!roles) return;
+    const fallback = defaultConfig(roles);
+    const prefs = await loadPreferences();
+    setConfig(prefs.layout ? parseLayout(prefs.layout, fallback) : fallback);
+    setVersion(prefs.version ?? 0);
+  }, [roles]);
+
+  const save = useCallback(async () => {
+    if (!draft || !config) return;
+    if (sameConfig(draft, config)) {
+      setDraft(null);
+      setSaveStatus({ kind: "idle" });
+      return;
+    }
+    setSaveStatus({ kind: "saving" });
+    try {
+      const saved = await savePreferences(draft, version);
+      setConfig(parseLayout(saved.layout, draft));
+      setVersion(saved.version);
+      setDraft(null);
+      setSaveStatus({ kind: "saved" });
+    } catch (e) {
+      if (e instanceof ApiRequestError && e.status === 409) {
+        try {
+          await reloadLayout();
+        } catch {
+          // Keep whatever we have; the user can retry.
+        }
+        setDraft(null);
+        setSaveStatus({ kind: "conflict" });
+      } else {
+        setSaveStatus({ kind: "failed" });
+      }
+    }
+  }, [draft, config, version, reloadLayout]);
 
   if (error) {
     return (
@@ -521,13 +803,17 @@ function DashboardContent() {
   if (
     !roles ||
     !config ||
+    !shown ||
     (worklistUser && (!summary || !items || !cockpit)) ||
     (visitUser && (!visits || !alerts))
   ) {
     return (
-      <p className="muted" role="status">
-        {t(lang, "loading")}
-      </p>
+      <div className="cockpit-skeleton" role="status" aria-live="polite">
+        <span className="sr-only">{t(lang, "loading")}</span>
+        <div className="skeleton" style={{ height: "4.5rem" }} />
+        <div className="skeleton" style={{ height: "10rem" }} />
+        <div className="skeleton" style={{ height: "14rem" }} />
+      </div>
     );
   }
 
@@ -548,10 +834,41 @@ function DashboardContent() {
     quickActions.push({ href: "/access", key: "navAccess" });
   }
 
-  const compact = config.density === "compact";
+  const compact = shown.density === "compact";
   const limit = compact ? 3 : 6;
   const priority = items?.slice(0, limit) ?? [];
 
+  const priorities = topPriorities({
+    criticalOpen: summary?.critical_open,
+    awaitingReview: summary?.awaiting_review,
+    ready: visits?.filter(
+      (v) =>
+        v.status === "ready_for_consultation" &&
+        (v.capabilities.can_start_consultation ||
+          v.capabilities.can_resume_consultation),
+    ).length,
+    waitingTriage: visits?.filter(
+      (v) => v.status === "arrived" && v.capabilities.can_triage,
+    ).length,
+    highAlerts: alerts?.filter(
+      (a) =>
+        a.status === "open" &&
+        (a.priority === "high" || a.priority === "critical"),
+    ).length,
+    overdueTasks: cockpit?.pending_tasks.filter((x) => x.status === "overdue")
+      .length,
+    attention: cockpit?.attention.length,
+    drafts: cockpit?.draft_consultations.length,
+  });
+
+  const hour = new Date().getHours();
+  const facilityName =
+    meta && meta.facilities.length === 1 ? meta.facilities[0].name : null;
+
+  function updateDraft(c: CockpitConfig) {
+    setDraft(c);
+    if (saveStatus.kind !== "saving") setSaveStatus({ kind: "idle" });
+  }
   function visitWidget(w: "ready" | "triage" | "access") {
     if (!visits) return null;
     const title = t(lang, WIDGET_TITLE[w]);
@@ -887,17 +1204,198 @@ function DashboardContent() {
     }
   }
 
+  const editable = shown.order.filter(
+    (w) => available.includes(w) && !shown.hidden.includes(w),
+  );
+
+  function cell(w: CockpitWidget) {
+    const title = t(lang, WIDGET_TITLE[w]);
+    const size = sizeOf(shown!, w);
+    const idx = editable.indexOf(w);
+    return (
+      <div
+        key={w}
+        className={[
+          "cockpit-cell",
+          `size-${size}`,
+          editing ? "editing" : "",
+          dragging === w ? "dragging" : "",
+          dropTarget === w && dragging !== w ? "drop-target" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        draggable={editing || undefined}
+        onDragStart={
+          editing
+            ? (e) => {
+                e.dataTransfer.setData("text/plain", w);
+                e.dataTransfer.effectAllowed = "move";
+                setDragging(w);
+              }
+            : undefined
+        }
+        onDragOver={
+          editing
+            ? (e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                if (dropTarget !== w) setDropTarget(w);
+              }
+            : undefined
+        }
+        onDragLeave={
+          editing
+            ? () => {
+                if (dropTarget === w) setDropTarget(null);
+              }
+            : undefined
+        }
+        onDrop={
+          editing
+            ? (e) => {
+                e.preventDefault();
+                const from =
+                  (e.dataTransfer.getData("text/plain") as CockpitWidget) ||
+                  dragging;
+                if (from && from !== w && draft) {
+                  updateDraft(moveBefore(draft, from, w));
+                }
+                setDragging(null);
+                setDropTarget(null);
+              }
+            : undefined
+        }
+        onDragEnd={
+          editing
+            ? () => {
+                setDragging(null);
+                setDropTarget(null);
+              }
+            : undefined
+        }
+      >
+        {editing && draft ? (
+          <div className="cell-tools" role="group" aria-label={title}>
+            <span className="drag-handle" title={t(lang, "dragToReorder")}>
+              <Icon.Drag />
+              <span className="sr-only">{t(lang, "dragToReorder")}</span>
+            </span>
+            <span className="cell-title">{title}</span>
+            <button
+              type="button"
+              className="tertiary icon-button"
+              aria-label={`${t(lang, "moveUp")}: ${title}`}
+              disabled={idx <= 0}
+              onClick={() => updateDraft(move(draft, w, -1))}
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              className="tertiary icon-button"
+              aria-label={`${t(lang, "moveDown")}: ${title}`}
+              disabled={idx < 0 || idx === editable.length - 1}
+              onClick={() => updateDraft(move(draft, w, 1))}
+            >
+              ↓
+            </button>
+            <button
+              type="button"
+              className="tertiary icon-button"
+              aria-pressed={size === "full"}
+              aria-label={`${t(lang, "widgetSize")}: ${title} — ${
+                size === "full" ? t(lang, "sizeFull") : t(lang, "sizeHalf")
+              }`}
+              onClick={() =>
+                updateDraft(
+                  setSize(draft, w, size === "full" ? "half" : "full"),
+                )
+              }
+            >
+              {size === "full" ? <Icon.Collapse /> : <Icon.Expand />}
+            </button>
+            <button
+              type="button"
+              className="tertiary icon-button"
+              aria-label={`${t(lang, "hideWidget")}: ${title}`}
+              onClick={() => updateDraft(toggleHidden(draft, w))}
+            >
+              <Icon.EyeOff />
+            </button>
+          </div>
+        ) : null}
+        {renderWidget(w)}
+      </div>
+    );
+  }
+
   return (
-    <>
-      <h2 style={{ marginTop: 0 }}>
-        {t(lang, "welcome")}
-        {meta ? `, ${meta.user.display_name}` : ""}
-      </h2>
-      <p className="muted">{t(lang, "dashboardIntro")}</p>
+    <div className={`cockpit-page${editing ? " editing" : ""}`}>
+      <header className="cockpit-hero">
+        <div className="cockpit-hero-text">
+          <p className="eyebrow">
+            {new Date().toLocaleDateString(lang, {
+              weekday: "long",
+              day: "numeric",
+              month: "long",
+            })}
+            {facilityName ? ` · ${facilityName}` : ""}
+          </p>
+          <h1>
+            {t(lang, greetingKey(hour))}
+            {meta ? `, ${meta.user.display_name}` : ""}
+          </h1>
+        </div>
+        <div className="cockpit-hero-actions">
+          {quickActions.map((a) => (
+            <Link key={a.key} href={a.href} className="chip">
+              {t(lang, a.key)}
+            </Link>
+          ))}
+          {hasCockpit ? (
+            editing ? null : (
+              <button
+                type="button"
+                className="secondary"
+                aria-expanded={editing}
+                aria-controls="customizer"
+                onClick={() => {
+                  setDraft(config);
+                  setSaveStatus({ kind: "idle" });
+                }}
+              >
+                <Icon.Settings /> {t(lang, "cockpitEdit")}
+              </button>
+            )
+          ) : null}
+        </div>
+      </header>
 
-      {clinician ? <StartConsultation lang={lang} /> : null}
+      {saveStatus.kind === "saved" || saveStatus.kind === "conflict" ? (
+        <p
+          className={`notice ${saveStatus.kind === "saved" ? "ok" : "warn"}`}
+          role="status"
+        >
+          {saveStatus.kind === "saved"
+            ? t(lang, "cockpitSaved")
+            : t(lang, "cockpitConflict")}
+        </p>
+      ) : null}
 
-      {!worklistUser && !visitUser ? (
+      {hasCockpit ? (
+        <PriorityStrip lang={lang} priorities={priorities} />
+      ) : null}
+
+      {clinician || visits ? (
+        <div className="cockpit-top">
+          {clinician ? <StartConsultation lang={lang} /> : null}
+          {visits ? (
+            <ExpectedToday lang={lang} visits={visits} limit={limit + 2} />
+          ) : null}
+        </div>
+      ) : null}
+
+      {!hasCockpit ? (
         <div className="card">
           <p className="muted" style={{ margin: 0 }}>
             {t(lang, "noWorklistAccess")}
@@ -905,60 +1403,37 @@ function DashboardContent() {
         </div>
       ) : null}
 
-      <div className="card">
-        <div className="recording-dock-head">
-          <h2 style={{ margin: 0 }}>{t(lang, "quickActions")}</h2>
-          {worklistUser || visitUser ? (
-            <button
-              type="button"
-              className="secondary"
-              aria-expanded={customizing}
-              aria-controls="customizer"
-              onClick={() => setCustomizing((c) => !c)}
-            >
-              {customizing
-                ? t(lang, "doneCustomizing")
-                : t(lang, "customizeDashboard")}
-            </button>
-          ) : null}
-        </div>
-        <div className="quick-actions">
-          {quickActions.map((a) => (
-            <Link key={a.key} href={a.href}>
-              {t(lang, a.key)}
-            </Link>
-          ))}
-        </div>
-      </div>
-
       {visits ? <FlowStrip lang={lang} visits={visits} /> : null}
 
-      {customizing && (worklistUser || visitUser) ? (
-        <div id="customizer">
-          <Customizer
-            lang={lang}
-            config={config}
-            available={available}
-            onChange={updateConfig}
-            onRestore={() => updateConfig(defaultConfig(roles ?? []))}
-          />
-        </div>
+      {editing && draft && hasCockpit ? (
+        <EditPanel
+          lang={lang}
+          draft={draft}
+          available={available}
+          dirty={!sameConfig(draft, config)}
+          status={saveStatus}
+          onChange={updateDraft}
+          onRestore={() => updateDraft(defaultConfig(roles ?? []))}
+          onSave={() => void save()}
+          onCancel={() => {
+            setDraft(null);
+            setSaveStatus({ kind: "idle" });
+          }}
+        />
       ) : null}
 
-      {worklistUser || visitUser ? (
+      {hasCockpit ? (
         visible.length === 0 ? (
           <p className="muted" role="status">
             {t(lang, "allWidgetsHidden")}
           </p>
         ) : (
-          <div className={`cockpit ${config.density}`}>
-            {visible.map((w) => (
-              <div key={w}>{renderWidget(w)}</div>
-            ))}
+          <div className={`cockpit-grid ${shown.density}`}>
+            {visible.map((w) => cell(w))}
           </div>
         )
       ) : null}
-    </>
+    </div>
   );
 }
 

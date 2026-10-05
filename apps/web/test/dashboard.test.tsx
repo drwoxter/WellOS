@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import DashboardPage from "@/app/dashboard/page";
 import { SessionProvider } from "@/lib/session";
@@ -179,7 +185,16 @@ function visit(
 }
 
 const VISITS = [
-  visit("v-sched", "scheduled", { can_arrive: true }, { arrived_at: null }),
+  visit(
+    "v-sched",
+    "scheduled",
+    { can_arrive: true },
+    {
+      arrived_at: null,
+      arrival_kind: "scheduled",
+      scheduled_at: "2026-08-29T10:30:00Z",
+    },
+  ),
   visit("v-arrived", "arrived", { can_triage: true }),
   visit("v-triage", "triage_in_progress", { can_triage: true }),
   visit("v-ready", "ready_for_consultation", { can_start_consultation: true }),
@@ -214,12 +229,31 @@ const ALERTS = [
   },
 ];
 
+type StoredLayout = {
+  layout: Record<string, unknown> | null;
+  version: number;
+  updated_at: string | null;
+};
+
 function setup(
   roles: string[],
-  options: { openConsultationId?: string | null } = {},
+  options: {
+    openConsultationId?: string | null;
+    prefs?: StoredLayout;
+    /** Status the next PUT answers with (then back to normal). */
+    putFailsWith?: number;
+  } = {},
 ) {
   const encounterCalls: string[] = [];
   const visitCalls: { url: string; body: string }[] = [];
+  const prefPuts: { layout: unknown; version: number }[] = [];
+  let prefGets = 0;
+  let putFailsWith = options.putFailsWith;
+  const prefs: StoredLayout = options.prefs ?? {
+    layout: null,
+    version: 0,
+    updated_at: null,
+  };
   let visitLoads = 0;
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -233,6 +267,44 @@ function setup(
       return Promise.resolve(jsonResponse({ items: [] }));
     if (url === "/api/v1/dashboard/cockpit")
       return Promise.resolve(jsonResponse(COCKPIT));
+    if (url === "/api/v1/me/dashboard-preferences") {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as {
+          layout: Record<string, unknown>;
+          version: number;
+        };
+        prefPuts.push(body);
+        if (putFailsWith) {
+          const status = putFailsWith;
+          putFailsWith = undefined;
+          return Promise.resolve(
+            jsonResponse(
+              {
+                error: {
+                  code: status === 409 ? "layout_conflict" : "internal",
+                  message: "nope",
+                },
+              },
+              status,
+            ),
+          );
+        }
+        if (body.version !== prefs.version) {
+          return Promise.resolve(
+            jsonResponse(
+              { error: { code: "layout_conflict", message: "stale" } },
+              409,
+            ),
+          );
+        }
+        prefs.layout = body.layout;
+        prefs.version += 1;
+        prefs.updated_at = "2026-08-29T09:00:00Z";
+        return Promise.resolve(jsonResponse(prefs));
+      }
+      prefGets += 1;
+      return Promise.resolve(jsonResponse(prefs));
+    }
     if (url.startsWith("/api/v1/patients?query="))
       return Promise.resolve(
         jsonResponse({
@@ -276,8 +348,26 @@ function setup(
     encounterCalls,
     visitCalls,
     fetchMock,
+    prefs,
+    prefPuts,
+    prefGets: () => prefGets,
     visitLoads: () => visitLoads,
   };
+}
+
+function widgetHeadings() {
+  return screen
+    .getAllByRole("heading", { level: 2 })
+    .map((h) => h.textContent?.trim() ?? "")
+    .filter((h) =>
+      [
+        "Patients needing attention",
+        "Critical and pending results",
+        "Pending tasks",
+        "Recent dMind activity",
+        "Draft consultations",
+      ].includes(h),
+    );
 }
 
 describe("dashboard cockpit", () => {
@@ -466,44 +556,66 @@ describe("dashboard cockpit", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("hides, reorders and restores widgets, storing only layout locally", async () => {
+  it("edits the layout in a previewed edit mode and saves it server-side", async () => {
     const user = userEvent.setup();
-    setup(["physician"]);
+    const { prefs, prefPuts } = setup(["physician"]);
     await screen.findByText("Draft consultations");
-    await user.click(
-      screen.getByRole("button", { name: "Customize dashboard" }),
-    );
+    expect(prefPuts).toHaveLength(0);
+    expect(
+      screen.queryByRole("button", { name: "Hide: Draft consultations" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Edit layout" }));
+    const panel = screen.getByRole("region", { name: /Customize dashboard/ });
+    // Role defaults hide the access widgets; they can be shown again here.
+    expect(
+      within(panel).getAllByRole("button", { name: /^Show: / }),
+    ).toHaveLength(2);
     await user.click(
       screen.getByRole("button", { name: "Hide: Draft consultations" }),
     );
+    // Preview: the widget disappears immediately, nothing is saved yet.
     expect(screen.queryByText("Follow-up of cough")).not.toBeInTheDocument();
+    expect(prefPuts).toHaveLength(0);
+    expect(
+      within(panel).getByText("Preview — changes are not saved yet."),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("button", { name: "Show: Draft consultations" }),
+    ).toBeInTheDocument();
+
     await user.click(
       screen.getByRole("button", {
         name: "Move down: Patients needing attention",
       }),
     );
-    const headings = screen
-      .getAllByRole("heading", { level: 2 })
-      .map((h) => h.textContent)
-      .filter((h) =>
-        [
-          "Patients needing attention",
-          "Critical and pending results",
-          "Pending tasks",
-          "Recent dMind activity",
-        ].includes(h ?? ""),
-      );
-    expect(headings).toEqual([
+    expect(widgetHeadings()).toEqual([
       "Critical and pending results",
       "Patients needing attention",
       "Pending tasks",
       "Recent dMind activity",
     ]);
+    const sizeToggle = screen.getByRole("button", {
+      name: /Size: Pending tasks/,
+    });
+    expect(sizeToggle).toHaveAttribute("aria-pressed", "false");
+    await user.click(sizeToggle);
+    expect(
+      screen.getByRole("button", { name: /Size: Pending tasks/ }),
+    ).toHaveAttribute("aria-pressed", "true");
     await user.click(screen.getByRole("radio", { name: "Compact" }));
-    const stored = JSON.parse(
-      window.localStorage.getItem(COCKPIT_STORAGE_ITEM) ?? "null",
-    );
-    expect(Object.keys(stored).sort()).toEqual(["density", "hidden", "order"]);
+
+    await user.click(screen.getByRole("button", { name: "Save layout" }));
+    expect(await screen.findByText("Layout saved.")).toBeInTheDocument();
+    expect(prefPuts).toHaveLength(1);
+    expect(prefPuts[0].version).toBe(0);
+    const stored = prefs.layout!;
+    expect(Object.keys(stored).sort()).toEqual([
+      "density",
+      "hidden",
+      "order",
+      "sizes",
+    ]);
     expect(stored.order).toEqual([
       "ready",
       "alerts",
@@ -516,20 +628,181 @@ describe("dashboard cockpit", () => {
       "access",
     ]);
     expect(stored.hidden).toEqual(["triage", "access", "drafts"]);
+    expect(stored.sizes).toEqual({ ready: "full", tasks: "full" });
     expect(stored.density).toBe("compact");
     expect(JSON.stringify(stored)).not.toMatch(/Demopatient|SYN-0001|cough/);
+    // Edit mode closed; nothing kept in the browser.
+    expect(
+      screen.queryByRole("button", { name: "Save layout" }),
+    ).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(COCKPIT_STORAGE_ITEM)).toBeNull();
+
+    // Second edit builds on the saved version; cancel discards the preview.
+    await user.click(screen.getByRole("button", { name: "Edit layout" }));
     await user.click(
       screen.getByRole("button", { name: "Restore role defaults" }),
     );
     expect(await screen.findByText(/Follow-up of cough/)).toBeInTheDocument();
-    expect(
-      JSON.parse(window.localStorage.getItem(COCKPIT_STORAGE_ITEM) ?? "{}"),
-    ).toMatchObject({ hidden: ["triage", "access"], density: "expanded" });
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText("Follow-up of cough")).not.toBeInTheDocument();
+    expect(prefPuts).toHaveLength(1);
   });
 
-  it("starts from a stored layout and ignores malformed storage", async () => {
-    window.localStorage.setItem(COCKPIT_STORAGE_ITEM, "{not json");
+  it("reorders widgets by drag and drop", async () => {
+    const user = userEvent.setup();
     setup(["physician"]);
+    await screen.findByText("Draft consultations");
+    await user.click(screen.getByRole("button", { name: "Edit layout" }));
+    const tasks = screen
+      .getByRole("region", { name: "Pending tasks" })
+      .closest(".cockpit-cell")!;
+    const drafts = screen
+      .getByRole("region", { name: "Draft consultations" })
+      .closest(".cockpit-cell")!;
+    expect(tasks).toHaveAttribute("draggable", "true");
+    const data = new Map<string, string>();
+    const dataTransfer = {
+      setData: (k: string, v: string) => void data.set(k, v),
+      getData: (k: string) => data.get(k) ?? "",
+      effectAllowed: "all",
+      dropEffect: "none",
+    };
+    fireEvent.dragStart(tasks, { dataTransfer });
+    fireEvent.dragOver(drafts, { dataTransfer });
+    expect(drafts.className).toContain("drop-target");
+    fireEvent.drop(drafts, { dataTransfer });
+    fireEvent.dragEnd(tasks, { dataTransfer });
+    expect(widgetHeadings()).toEqual([
+      "Pending tasks",
+      "Draft consultations",
+      "Patients needing attention",
+      "Critical and pending results",
+      "Recent dMind activity",
+    ]);
+  });
+
+  it("applies the server layout and recovers from a stale-version conflict", async () => {
+    const user = userEvent.setup();
+    const { prefs, prefPuts, prefGets } = setup(["physician"], {
+      prefs: {
+        layout: {
+          order: ["tasks", "results"],
+          hidden: ["drafts", "triage", "access"],
+          sizes: {},
+          density: "compact",
+        },
+        version: 3,
+        updated_at: "2026-08-29T07:00:00Z",
+      },
+    });
+    await screen.findByText("Pending tasks");
+    expect(screen.queryByText("Draft consultations")).not.toBeInTheDocument();
+    expect(widgetHeadings().slice(0, 2)).toEqual([
+      "Pending tasks",
+      "Critical and pending results",
+    ]);
+    expect(prefPuts).toHaveLength(0);
+
+    // Another session saved meanwhile: the server now holds version 4.
+    prefs.version = 4;
+    prefs.layout = { ...prefs.layout!, hidden: ["triage", "access", "ai"] };
+    await user.click(screen.getByRole("button", { name: "Edit layout" }));
+    await user.click(
+      screen.getByRole("button", { name: "Show: Draft consultations" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save layout" }));
+    expect(
+      await screen.findByText(
+        "Your layout was changed in another session and has been reloaded.",
+      ),
+    ).toBeInTheDocument();
+    expect(prefPuts).toHaveLength(1);
+    expect(prefPuts[0].version).toBe(3);
+    expect(prefGets()).toBe(2);
+    // The reloaded server layout is shown, not the rejected draft.
     expect(await screen.findByText("Draft consultations")).toBeInTheDocument();
+    expect(screen.queryByText("Recent dMind activity")).not.toBeInTheDocument();
+  });
+
+  it("keeps the edit open and reports a failed save", async () => {
+    const user = userEvent.setup();
+    const { prefPuts } = setup(["physician"], { putFailsWith: 500 });
+    await screen.findByText("Draft consultations");
+    await user.click(screen.getByRole("button", { name: "Edit layout" }));
+    await user.click(screen.getByRole("radio", { name: "Compact" }));
+    await user.click(screen.getByRole("button", { name: "Save layout" }));
+    expect(
+      await screen.findByText("The layout could not be saved. Try again."),
+    ).toBeInTheDocument();
+    expect(prefPuts).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Save layout" }));
+    expect(await screen.findByText("Layout saved.")).toBeInTheDocument();
+    expect(prefPuts).toHaveLength(2);
+  });
+
+  it("migrates a valid browser-only layout once and ignores malformed storage", async () => {
+    window.localStorage.setItem(
+      COCKPIT_STORAGE_ITEM,
+      JSON.stringify({
+        order: ["ai"],
+        hidden: ["drafts", "triage", "access"],
+        density: "compact",
+      }),
+    );
+    const { prefs, prefPuts } = setup(["physician"]);
+    await waitFor(() => expect(prefPuts).toHaveLength(1));
+    expect(prefPuts[0].version).toBe(0);
+    expect(prefs.layout?.order).toEqual([
+      "ai",
+      "ready",
+      "alerts",
+      "triage",
+      "access",
+      "drafts",
+      "attention",
+      "results",
+      "tasks",
+    ]);
+    expect(prefs.layout?.hidden).toEqual(["drafts", "triage", "access"]);
+    expect(prefs.layout?.sizes).toEqual({});
+    expect(
+      await screen.findByText("Recent dMind activity"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Draft consultations")).not.toBeInTheDocument();
+    expect(widgetHeadings()[0]).toBe("Recent dMind activity");
+    await waitFor(() =>
+      expect(window.localStorage.getItem(COCKPIT_STORAGE_ITEM)).toBeNull(),
+    );
+  });
+
+  it("ignores malformed browser storage and uses role defaults", async () => {
+    window.localStorage.setItem(COCKPIT_STORAGE_ITEM, "{not json");
+    const { prefPuts } = setup(["physician"]);
+    expect(await screen.findByText("Draft consultations")).toBeInTheDocument();
+    expect(prefPuts).toHaveLength(0);
+    await waitFor(() =>
+      expect(window.localStorage.getItem(COCKPIT_STORAGE_ITEM)).toBeNull(),
+    );
+  });
+
+  it("shows the top priorities first and tells scheduled, urgent and walk-in patients apart", async () => {
+    setup(["physician"]);
+    await screen.findByText("Draft consultations");
+    const strip = screen.getByRole("region", { name: "Top priorities" });
+    const tiles = within(strip).getAllByRole("link");
+    expect(tiles).toHaveLength(3);
+    expect(tiles[0]).toHaveTextContent(/1.*Critical results/);
+    expect(tiles[0]).toHaveAttribute("href", "/results");
+    expect(tiles[1]).toHaveTextContent(/Patients ready/);
+    expect(tiles[2]).toHaveTextContent(/Waiting for triage/);
+    const expected = screen.getByRole("region", { name: /Expected today/ });
+    const rows = within(expected).getAllByRole("listitem");
+    expect(rows.length).toBeGreaterThanOrEqual(4);
+    expect(within(expected).getAllByText("Walk-in").length).toBeGreaterThan(0);
+    expect(within(expected).getByText("Scheduled")).toBeInTheDocument();
+    expect(within(expected).getByText("Resume consultation")).toHaveAttribute(
+      "href",
+      "/encounters/enc-open",
+    );
   });
 });
