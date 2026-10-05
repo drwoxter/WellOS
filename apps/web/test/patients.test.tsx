@@ -31,6 +31,7 @@ function setup(options: {
   register: boolean;
   canOpenChart?: boolean;
   canStartEncounter?: boolean;
+  visits?: unknown;
 }) {
   const encounterCalls: string[] = [];
   vi.stubGlobal(
@@ -52,6 +53,8 @@ function setup(options: {
             ],
           }),
         );
+      if (url === "/api/v1/visits?view=access")
+        return Promise.resolve(jsonResponse(options.visits ?? {}));
       if (url === "/api/v1/encounters" && init?.method === "POST") {
         encounterCalls.push(init.body as string);
         return Promise.resolve(jsonResponse({ id: "enc-1" }));
@@ -156,5 +159,64 @@ describe("patient directory", () => {
       screen.queryByRole("button", { name: "Start encounter" }),
     ).not.toBeInTheDocument();
     expect(screen.getByText("Register a new patient")).toBeInTheDocument();
+  });
+
+  it("lists today's expected patients beside the search for board readers", async () => {
+    setup({
+      clinician: true,
+      register: false,
+      visits: {
+        items: [
+          {
+            id: "v1",
+            status: "ready_for_consultation",
+            arrival_kind: "urgent",
+            service: "general_medicine",
+            reason: "Chest pain",
+            scheduled_at: null,
+            arrived_at: "2026-10-04T08:00:00Z",
+            ready_at: null,
+            consultation_started_at: null,
+            wait_minutes: 12,
+            priority: null,
+            handoff_summary: null,
+            encounter_id: "enc-9",
+            version: 1,
+            updated_at: "2026-10-04T08:10:00Z",
+            facility: { id: "f", name: "Central Hospital" },
+            patient: {
+              id: "p9",
+              family_name: "Demopatient",
+              given_name: "Sofía",
+              identifier: "SYN-0009",
+              age_years: 54,
+              alert_count: 0,
+              allergy_count: 0,
+            },
+            assignment: null,
+            open_alerts: 0,
+            capabilities: { can_resume_consultation: true },
+          },
+        ],
+      },
+    });
+    expect(
+      await screen.findByRole("heading", { name: /Expected today/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Sofía Demopatient")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Resume consultation" }),
+    ).toHaveAttribute("href", "/encounters/enc-9");
+    expect(screen.getByText("12 min")).toBeInTheDocument();
+  });
+
+  it("hides the expected-today panel when the board is unavailable", async () => {
+    setup({ clinician: true, register: false });
+    await screen.findByLabelText("Search patients");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: /Expected today/ }),
+      ).not.toBeInTheDocument(),
+    );
   });
 });

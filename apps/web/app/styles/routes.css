@@ -66,3 +66,130 @@ main.signin {
   padding: 0.15rem 0.55rem;
   vertical-align: middle;
 }
+
+/* ---------- Patients directory ---------- */
+.patients-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(18rem, 0.9fr);
+  gap: 1rem;
+  align-items: start;
+}
+.patients-main,
+.patients-side {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+.patients-side > .card,
+.patients-main > .card {
+  margin: 0;
+}
+.patients-hero h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.6rem;
+}
+.patients-hero .hero-lead {
+  margin: 0 0 1rem;
+  max-width: 48rem;
+  opacity: 0.92;
+}
+.patients-search-row {
+  position: relative;
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+.patients-search-row input {
+  flex: 1;
+  min-width: 0;
+  min-height: 3rem;
+  padding-left: 2.6rem;
+  font-size: 1.05rem;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--fg);
+}
+.patients-search-row .primary {
+  min-height: 3rem;
+  padding-inline: 1.25rem;
+}
+.patients-search-icon {
+  position: absolute;
+  left: 0.9rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--fg-muted);
+  pointer-events: none;
+}
+.patients-search-hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+.patient-hits {
+  margin: 0;
+}
+.patient-hit {
+  border-left-width: 1px;
+  align-items: center;
+}
+.patient-hit .avatar {
+  flex: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 0.9rem;
+  background: var(--primary-softer);
+  color: var(--primary-strong, var(--primary));
+}
+.patient-hit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  margin-top: 0.15rem;
+}
+.patient-hit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: flex-end;
+}
+.register-form {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
+  gap: 0.6rem 0.75rem;
+  align-items: center;
+}
+.register-form label,
+.register-form input,
+.register-form select {
+  margin: 0;
+}
+.register-form .error,
+.register-form .success,
+.register-form .register-submit {
+  grid-column: 1 / -1;
+}
+.register-form .register-submit {
+  margin: 0.75rem 0 0;
+}
+@media (max-width: 1000px) {
+  .patients-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 600px) {
+  .patients-search-row {
+    flex-direction: column;
+  }
+  .register-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

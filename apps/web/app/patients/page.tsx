@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../chrome";
+import { ExpectedToday } from "../dashboard/expected-today";
 import { t } from "@/lib/i18n";
 import { apiFetch, useSession } from "@/lib/session";
 import {
@@ -12,6 +13,10 @@ import {
   patientName,
   registrableFacilities,
 } from "@/lib/clinical";
+import { canReadVisits } from "@/lib/visits";
+import type { VisitItem } from "@/lib/visits";
+import { Icon } from "@/components/ui/icons";
+import { Pill } from "@/components/ui/primitives";
 
 type PatientHit = {
   id: string;
@@ -85,79 +90,130 @@ function SearchSection() {
   }
 
   return (
-    <div className="card">
-      <h2>{t(lang, "searchPatients")}</h2>
-      <form onSubmit={search}>
-        <label htmlFor="patient-query">{t(lang, "searchPatients")}</label>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          <input
-            id="patient-query"
-            value={query}
-            placeholder={t(lang, "searchPlaceholder")}
-            onChange={(e) => setQuery(e.target.value)}
-            autoComplete="off"
-          />
-          <button
-            className="primary"
-            type="submit"
-            disabled={busy || query.trim().length < 2}
-          >
-            {t(lang, "search")}
-          </button>
-        </div>
-      </form>
-      <p className="muted">{t(lang, "searchHint")}</p>
-      {error ? (
-        <p role="alert" className="error">
-          {error}
-        </p>
-      ) : null}
-      {busy ? (
-        <p className="muted" role="status">
-          {t(lang, "loading")}
-        </p>
-      ) : null}
-      {hits && hits.length === 0 && searched ? (
-        <div>
-          <p>
-            {t(lang, "noResultsFor")} “{searched}”.
+    <>
+      <section className="hero patients-hero" aria-labelledby="patients-h">
+        <h1 id="patients-h">{t(lang, "patientsTitle")}</h1>
+        <p className="hero-lead">{t(lang, "patientsLead")}</p>
+        <form onSubmit={search} className="patients-search" role="search">
+          <label htmlFor="patient-query" className="sr-only">
+            {t(lang, "searchPatients")}
+          </label>
+          <div className="patients-search-row">
+            <span className="patients-search-icon" aria-hidden="true">
+              <Icon.Search />
+            </span>
+            <input
+              id="patient-query"
+              value={query}
+              placeholder={t(lang, "searchPlaceholder")}
+              onChange={(e) => setQuery(e.target.value)}
+              autoComplete="off"
+            />
+            <button
+              className="primary"
+              type="submit"
+              disabled={busy || query.trim().length < 2}
+            >
+              {t(lang, "search")}
+            </button>
+          </div>
+          <p className="patients-search-hint">{t(lang, "searchHint")}</p>
+        </form>
+      </section>
+      <section
+        className="card patients-results"
+        aria-live="polite"
+        hidden={!busy && !error && hits === null}
+      >
+        {error ? (
+          <p role="alert" className="error">
+            {error}
           </p>
-          <p className="muted">{t(lang, "checkSpelling")}</p>
-        </div>
-      ) : null}
-      {hits && hits.length > 0 ? (
-        <ul className="result-list" style={{ marginTop: "0.75rem" }}>
-          {hits.map((p) => (
-            <li key={p.id} className="result-card">
-              <div className="grow">
-                <div className="title">{patientName(p)}</div>
-                <div className="muted">
-                  {p.identifier} · {sexLabel(lang, p.sex)} · {t(lang, "born")}{" "}
-                  {formatDate(lang, p.birth_date)}
+        ) : null}
+        {busy ? (
+          <p className="muted" role="status">
+            {t(lang, "loading")}
+          </p>
+        ) : null}
+        {hits && hits.length === 0 && searched ? (
+          <div>
+            <p>
+              {t(lang, "noResultsFor")} “{searched}”.
+            </p>
+            <p className="muted">{t(lang, "checkSpelling")}</p>
+          </div>
+        ) : null}
+        {hits && hits.length > 0 ? (
+          <ul className="result-list patient-hits">
+            {hits.map((p) => (
+              <li key={p.id} className="result-card patient-hit">
+                <span className="avatar" aria-hidden="true">
+                  {initials(p)}
+                </span>
+                <div className="grow">
+                  <div className="title">{patientName(p)}</div>
+                  <div className="muted patient-hit-meta">
+                    <Pill tone="neutral">{p.identifier}</Pill>
+                    <span>{sexLabel(lang, p.sex)}</span>
+                    <span>
+                      {t(lang, "born")} {formatDate(lang, p.birth_date)}
+                    </span>
+                  </div>
                 </div>
-              </div>
-              {p.can_start_encounter ? (
-                <button
-                  className="secondary"
-                  disabled={starting !== null}
-                  onClick={() => void startEncounter(p.id)}
-                >
-                  {starting === p.id
-                    ? t(lang, "loading")
-                    : t(lang, "startEncounter")}
-                </button>
-              ) : null}
-              {p.can_open_chart !== false ? (
-                <Link className="navlink" href={`/patients/${p.id}`}>
-                  {t(lang, "openChart")}
-                </Link>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
+                <div className="patient-hit-actions">
+                  {p.can_start_encounter ? (
+                    <button
+                      className="secondary"
+                      disabled={starting !== null}
+                      onClick={() => void startEncounter(p.id)}
+                    >
+                      {starting === p.id
+                        ? t(lang, "loading")
+                        : t(lang, "startEncounter")}
+                    </button>
+                  ) : null}
+                  {p.can_open_chart !== false ? (
+                    <Link className="navlink" href={`/patients/${p.id}`}>
+                      {t(lang, "openChart")}
+                    </Link>
+                  ) : null}
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
+    </>
   );
+}
+
+function initials(p: { given_name: string; family_name: string }): string {
+  return `${p.given_name.charAt(0)}${p.family_name.charAt(0)}`.toUpperCase();
+}
+
+/** Today's visits for roles allowed to read the access board; hidden (never
+ *  fabricated) when the board is unavailable. */
+function TodaySection() {
+  const { lang, meta } = useSession();
+  const roles = meta?.user.roles ?? [];
+  const allowed = canReadVisits(roles);
+  const [visits, setVisits] = useState<VisitItem[] | null>(null);
+  useEffect(() => {
+    if (!allowed) return;
+    let live = true;
+    apiFetch<{ items: VisitItem[] }>("/api/v1/visits?view=access")
+      .then((r) => {
+        if (live) setVisits(Array.isArray(r.items) ? r.items : null);
+      })
+      .catch(() => {
+        if (live) setVisits(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [allowed]);
+  if (!allowed || visits === null) return null;
+  return <ExpectedToday lang={lang} visits={visits} limit={8} />;
 }
 
 function RegisterSection() {
@@ -203,9 +259,11 @@ function RegisterSection() {
   if (accessible.length === 0) return null;
 
   return (
-    <div className="card" id="register">
-      <h2>{t(lang, "registerPatient")}</h2>
-      <form onSubmit={register}>
+    <section className="card register-card" id="register">
+      <div className="card-head">
+        <h2>{t(lang, "registerPatient")}</h2>
+      </div>
+      <form onSubmit={register} className="register-form">
         {accessible.length > 1 ? (
           <>
             <label htmlFor="reg-facility">{t(lang, "facility")}</label>
@@ -274,23 +332,28 @@ function RegisterSection() {
             {t(lang, "registered")}
           </p>
         ) : null}
-        <p>
+        <p className="register-submit">
           <button className="primary" type="submit" disabled={busy}>
             {t(lang, "register")}
           </button>
         </p>
       </form>
-    </div>
+    </section>
   );
 }
 
 export default function PatientsPage() {
-  const { lang } = useSession();
   return (
     <AppShell>
-      <h2 style={{ marginTop: 0 }}>{t(lang, "patientsTitle")}</h2>
-      <SearchSection />
-      <RegisterSection />
+      <div className="patients-page">
+        <div className="patients-main">
+          <SearchSection />
+        </div>
+        <aside className="patients-side">
+          <TodaySection />
+          <RegisterSection />
+        </aside>
+      </div>
     </AppShell>
   );
 }

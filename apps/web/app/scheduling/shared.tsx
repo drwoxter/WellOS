@@ -635,6 +635,7 @@ export function Worklist<T>({
   keyOf,
   renderRow,
   renderDetail,
+  rowData,
 }: {
   lang: Lang;
   label: string;
@@ -642,6 +643,7 @@ export function Worklist<T>({
   keyOf: (item: T) => string;
   renderRow: (item: T, selected: boolean) => ReactNode;
   renderDetail: (item: T) => ReactNode;
+  rowData?: (item: T) => Record<`data-${string}`, string | undefined>;
 }) {
   const [picked, setPicked] = useState<string | null>(null);
   const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -696,6 +698,7 @@ export function Worklist<T>({
                 tabIndex={sel ? 0 : -1}
                 data-testid="worklist-row"
                 data-id={k}
+                {...(rowData ? rowData(item) : null)}
                 onClick={() => pick(item)}
                 onKeyDown={(e) => onKey(e, i)}
               >

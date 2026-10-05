@@ -32,7 +32,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" data-theme="north" className={inter.variable}>
+    <html
+      lang="en"
+      data-theme="north"
+      data-scroll-behavior="smooth"
+      className={inter.variable}
+    >
       <body>
         <SessionProvider>{children}</SessionProvider>
       </body>

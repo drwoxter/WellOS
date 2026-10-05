@@ -11,9 +11,26 @@ import { setLanguage, signInAs } from "./helpers";
  * the demo data, so reseed (`make seed`) between runs.
  */
 
-/** Worklist card for one synthetic patient (card heading = patient name). */
-function card(page: Page, name: string): Locator {
-  return page.locator("ul.risk-worklist > li").filter({
+/** Row for one synthetic patient in the master list. */
+function row(page: Page, name: string): Locator {
+  return page
+    .locator('.risk-worklist [data-testid="worklist-row"]')
+    .filter({ hasText: name });
+}
+
+/**
+ * Selects the patient's row (when listed) and returns the detail card
+ * (card heading = patient name); resolves to nothing when the patient is
+ * not in the list.
+ */
+async function card(page: Page, name: string): Promise<Locator> {
+  const r = row(page, name);
+  await r
+    .first()
+    .waitFor({ state: "visible", timeout: 5_000 })
+    .catch(() => undefined);
+  if ((await r.count()) > 0) await r.first().click();
+  return page.locator(".risk-worklist .worklist-detail li.risk-item").filter({
     has: page.getByRole("heading", { level: 3, name }),
   });
 }
@@ -42,7 +59,7 @@ test("risk worklist: severity order, explanations, filters, evidence and review 
 
   // Critical and high first; low risk hidden by default; insufficient data is
   // shown as such rather than as low risk.
-  const items = page.locator("ul.risk-worklist > li");
+  const items = page.locator('.risk-worklist [data-testid="worklist-row"]');
   await expect(items.first()).toBeVisible();
   const levels = await items.evaluateAll((els) =>
     els.map((e) => e.getAttribute("data-level")),
@@ -51,7 +68,7 @@ test("risk worklist: severity order, explanations, filters, evidence and review 
   expect(levels).not.toContain("low");
   expect(levels[levels.length - 1]).toBe("insufficient_data");
 
-  const teresa = card(page, "Teresa Riskdemo");
+  const teresa = await card(page, "Teresa Riskdemo");
   await expect(teresa).toContainText("SYN-0103");
   await expect(teresa).toContainText("Why:");
   await expect(teresa).toContainText(
@@ -74,7 +91,7 @@ test("risk worklist: severity order, explanations, filters, evidence and review 
   ).toBeVisible();
 
   // Insufficient data is explained, never presented as low risk.
-  const ivan = card(page, "Iván Riskdemo");
+  const ivan = await card(page, "Iván Riskdemo");
   await expect(ivan).toHaveAttribute("data-level", "insufficient_data");
   await expect(ivan).toContainText("Insufficient data");
   await expect(ivan).toContainText(
@@ -85,25 +102,25 @@ test("risk worklist: severity order, explanations, filters, evidence and review 
   await page
     .getByRole("combobox", { name: "Trend", exact: true })
     .selectOption("worsening");
-  await expect(card(page, "Ramón Riskdemo")).toBeVisible();
+  await expect(await card(page, "Ramón Riskdemo")).toBeVisible();
   await expect(teresa).toHaveCount(0);
   await page
     .getByRole("combobox", { name: "Domain", exact: true })
     .selectOption("chronic_complexity");
-  await expect(card(page, "Ramón Riskdemo")).toContainText(
+  await expect(await card(page, "Ramón Riskdemo")).toContainText(
     "Chronic complexity",
   );
   await page.getByRole("button", { name: "Reset filters" }).click();
-  await expect(teresa).toBeVisible();
+  await expect(await card(page, "Teresa Riskdemo")).toBeVisible();
   await page.getByLabel("Include low risk").check();
-  await expect(card(page, "Lucía Riskdemo")).toHaveAttribute(
+  await expect(await card(page, "Lucía Riskdemo")).toHaveAttribute(
     "data-level",
     "low",
   );
   await page.getByLabel("Include low risk").uncheck();
 
   // Acknowledge Nora (SYN-0105): audit-recorded review state, reviewer shown.
-  const nora = card(page, "Nora Riskdemo");
+  const nora = await card(page, "Nora Riskdemo");
   await nora.getByLabel("Review note (optional)").fill("Seen on rounds.");
   await nora.getByRole("button", { name: "Acknowledge" }).click();
   await expect(nora.getByText("Risk acknowledged.")).toBeVisible();
@@ -130,7 +147,7 @@ test("risk worklist: severity order, explanations, filters, evidence and review 
   await page.getByRole("button", { name: "Reset filters" }).click();
 
   // Mark as reviewed on Hugo (SYN-0104, medication/allergy conflict).
-  const hugo = card(page, "Hugo Riskdemo");
+  const hugo = await card(page, "Hugo Riskdemo");
   await expect(hugo).toContainText("Medication and allergy safety");
   await hugo.getByRole("button", { name: "Mark as reviewed" }).click();
   await expect(hugo.getByText("Risk marked as reviewed.")).toBeVisible();
@@ -143,7 +160,7 @@ test("Patient 360 → dMind summary with explicit confirmation → consultation 
   test.setTimeout(180_000);
   await signInAs(page, "dr.garcia");
   await page.goto("/risk");
-  const teresa = card(page, "Teresa Riskdemo");
+  const teresa = await card(page, "Teresa Riskdemo");
   await teresa.getByRole("link", { name: "Open Patient 360" }).click();
   await expect(page).toHaveURL(/\/patients\/[^/]+\/360$/);
 
@@ -274,11 +291,14 @@ test("risk worklist is keyboard navigable with visible focus", async ({
 }) => {
   await signInAs(page, "dr.garcia");
   await page.goto("/risk");
-  const teresa = card(page, "Teresa Riskdemo");
+  const teresa = await card(page, "Teresa Riskdemo");
   await expect(teresa).toBeVisible();
   const outer = teresa.locator("details.risk-technical").first();
   const summary = outer.locator("> summary");
   await summary.focus();
+  // Reach the disclosure by keyboard so :focus-visible applies.
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
   await expect(summary).toBeFocused();
   const outline = await summary.evaluate(
     (el) => getComputedStyle(el).outlineStyle,
@@ -306,9 +326,11 @@ test("risk pages have no serious accessibility violations", async ({
 }) => {
   await signInAs(page, "dr.garcia");
   await page.goto("/risk");
-  await expect(card(page, "Teresa Riskdemo")).toBeVisible();
+  await expect(await card(page, "Teresa Riskdemo")).toBeVisible();
   await expectNoSeriousViolations(page);
-  await card(page, "Teresa Riskdemo")
+  await (
+    await card(page, "Teresa Riskdemo")
+  )
     .getByRole("link", { name: "Open Patient 360" })
     .click();
   await expect(
@@ -328,7 +350,7 @@ test("roles without risk permission do not see the worklist", async ({
   await expect(page.locator("p[role='alert']")).toContainText(
     "You do not have permission to view this information.",
   );
-  await expect(page.locator("ul.risk-worklist")).toHaveCount(0);
+  await expect(page.locator(".risk-worklist")).toHaveCount(0);
 });
 
 test("risk worklist and Patient 360 in Spanish", async ({ page }) => {
@@ -338,7 +360,7 @@ test("risk worklist and Patient 360 in Spanish", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Lista de trabajo de riesgo" }).first(),
   ).toBeVisible();
-  const teresa = card(page, "Teresa Riskdemo");
+  const teresa = await card(page, "Teresa Riskdemo");
   await expect(teresa).toContainText("Crítico");
   await expect(teresa).toContainText("Motivo:");
   await expect(teresa.getByText("Evidencia técnica").first()).toBeVisible();
@@ -359,7 +381,7 @@ test("390px: worklist cards stack and Patient 360 is single-column @mobile", asy
 }) => {
   await signInAs(page, "dr.garcia");
   await page.goto("/risk");
-  const teresa = card(page, "Teresa Riskdemo");
+  const teresa = await card(page, "Teresa Riskdemo");
   await expect(teresa).toBeVisible();
   const width = await teresa.evaluate((el) => el.getBoundingClientRect().width);
   expect(width).toBeLessThanOrEqual(390);

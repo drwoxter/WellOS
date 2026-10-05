@@ -25,6 +25,7 @@ import {
   RiskActions,
   TrendBadge,
 } from "./risk-view";
+import { Worklist as MasterDetail, WorklistRow } from "@/app/scheduling/shared";
 
 type Filters = {
   domain: string;
@@ -141,13 +142,13 @@ function WorklistCard({
           ) : (
             <ul className="risk-factors">
               {item.explained.flatMap((d) => [
-                ...d.factors.map((f) => (
-                  <li key={`${d.domain}-${f.code}`}>
+                ...d.factors.map((f, fi) => (
+                  <li key={`${d.domain}-${f.code}-${fi}`}>
                     {t(lang, domainKey(d.domain))}: {factorText(lang, f)}
                   </li>
                 )),
-                ...d.missing_data.map((g) => (
-                  <li key={`${d.domain}-m-${g.code}`} className="muted">
+                ...d.missing_data.map((g, gi) => (
+                  <li key={`${d.domain}-m-${g.code}-${gi}`} className="muted">
                     {t(lang, domainKey(d.domain))}: {gapText(lang, g)}
                   </li>
                 )),
@@ -399,18 +400,37 @@ function RiskWorklist() {
                     )}
                   </p>
                 ) : null}
-                <ul className="risk-worklist">
-                  {data.items.map((item) => (
-                    <WorklistCard
-                      key={item.assessment_id}
-                      lang={lang}
-                      item={item}
-                      focusDomain={focusDomain}
-                      professionals={data.professionals}
-                      onChanged={load}
-                    />
-                  ))}
-                </ul>
+                <div className="risk-worklist">
+                  <MasterDetail
+                    lang={lang}
+                    label={t(lang, "riskWorklist")}
+                    items={data.items}
+                    keyOf={(item) => item.assessment_id}
+                    rowData={(item) => ({ "data-level": item.focus_level })}
+                    renderRow={(item) => (
+                      <WorklistRow
+                        title={patientName(item.patient)}
+                        meta={`${item.patient.identifier} · ${ageYears(item.patient.birth_date)} ${t(lang, "ageYears")} · ${item.patient.facility}`}
+                        badges={
+                          <>
+                            <LevelBadge lang={lang} level={item.focus_level} />
+                            <ReviewBadge lang={lang} review={item.review} />
+                          </>
+                        }
+                      />
+                    )}
+                    renderDetail={(item) => (
+                      <WorklistCard
+                        key={item.assessment_id}
+                        lang={lang}
+                        item={item}
+                        focusDomain={focusDomain}
+                        professionals={data.professionals}
+                        onChanged={load}
+                      />
+                    )}
+                  />
+                </div>
               </>
             )}
           </div>

@@ -481,8 +481,16 @@ describe("risk helpers", () => {
 });
 
 describe("risk worklist", () => {
-  const worklistCards = () =>
-    Array.from(document.querySelectorAll<HTMLElement>("ul.risk-worklist > li"));
+  const worklistRows = () =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '.risk-worklist [data-testid="worklist-row"]',
+      ),
+    );
+  const selectedCard = () =>
+    document.querySelector<HTMLElement>(
+      ".risk-worklist .worklist-detail li.risk-item",
+    )!;
 
   function renderWorklist(
     options: { roles?: string[]; handler?: Handler } = {},
@@ -518,18 +526,24 @@ describe("risk worklist", () => {
           : undefined,
     });
     expect(await screen.findByRole("status")).toHaveTextContent("Loading");
-    await screen.findByText("Teresa Riskdemo");
-    const cards = worklistCards();
-    expect(cards).toHaveLength(2);
-    expect(cards[0]).toHaveTextContent("Teresa Riskdemo");
-    expect(cards[0]).toHaveAttribute("data-level", "critical");
-    expect(cards[0]).toHaveTextContent(
+    await screen.findAllByText("Teresa Riskdemo");
+    const rows = worklistRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("Teresa Riskdemo");
+    expect(rows[0]).toHaveAttribute("data-level", "critical");
+    expect(rows[0]).toHaveAttribute("aria-current", "true");
+    const card = selectedCard();
+    expect(card).toHaveTextContent("Teresa Riskdemo");
+    expect(card).toHaveAttribute("data-level", "critical");
+    expect(card).toHaveTextContent(
       "A critical result has not been reviewed yet",
     );
     expect(
-      within(cards[0]).getByRole("link", { name: "Open Patient 360" }),
+      within(card).getByRole("link", { name: "Open Patient 360" }),
     ).toHaveAttribute("href", "/patients/p1/360");
-    expect(cards[1]).toHaveTextContent("Hugo Riskdemo");
+    expect(rows[1]).toHaveTextContent("Hugo Riskdemo");
+    await userEvent.click(rows[1]);
+    expect(selectedCard()).toHaveTextContent("Hugo Riskdemo");
     expect(screen.getAllByText(/risk-rules\.v1/).length).toBeGreaterThan(0);
   });
 
@@ -540,8 +554,8 @@ describe("risk worklist", () => {
           ? jsonResponse(worklist([item()]))
           : undefined,
     });
-    await screen.findByText("Teresa Riskdemo");
-    const card = worklistCards()[0];
+    await screen.findAllByText("Teresa Riskdemo");
+    const card = selectedCard();
     const details = card.querySelector("details.risk-technical");
     expect(details).not.toBeNull();
     expect(details).not.toHaveAttribute("open");
@@ -567,7 +581,7 @@ describe("risk worklist", () => {
       await screen.findByText(/No patient currently has an elevated risk/),
     ).toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText("Trend"), "worsening");
-    expect(await screen.findByText("Teresa Riskdemo")).toBeInTheDocument();
+    expect(await screen.findAllByText("Teresa Riskdemo")).not.toHaveLength(0);
     await userEvent.selectOptions(
       screen.getByLabelText("Domain"),
       "diagnostic_result",
@@ -662,8 +676,8 @@ describe("risk worklist", () => {
             )
           : undefined,
     });
-    await screen.findByText("Teresa Riskdemo");
-    const card = worklistCards()[0];
+    await screen.findAllByText("Teresa Riskdemo");
+    const card = selectedCard();
     expect(card).toHaveAttribute("data-level", "insufficient_data");
     expect(card).toHaveTextContent("Insufficient data");
     expect(card).toHaveTextContent(/the record is too sparse to assess/);
@@ -687,7 +701,7 @@ describe("risk worklist", () => {
     });
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByText("Teresa Riskdemo")).toBeInTheDocument();
+    expect(await screen.findAllByText("Teresa Riskdemo")).not.toHaveLength(0);
   });
 
   it("is not offered to roles without risk permissions", async () => {

@@ -380,8 +380,8 @@ function MedicationSafety({ data, lang }: { data: Patient360; lang: Lang }) {
     <Section id="medications" titleKey="medicationSafety" count={active.length}>
       {domain && domain.factors.length > 0 ? (
         <ul className="brief-list p360-flags">
-          {domain.factors.map((f) => (
-            <li key={f.code}>
+          {domain.factors.map((f, i) => (
+            <li key={`${f.code}-${i}`}>
               <LevelBadge lang={lang} level={f.level} /> {factorText(lang, f)}
             </li>
           ))}
@@ -729,8 +729,8 @@ function Preventive({ data, lang }: { data: Patient360; lang: Lang }) {
             <LevelBadge lang={lang} level={domain.level} />
           </p>
           <ul className="brief-list">
-            {domain.factors.map((f) => (
-              <li key={f.code}>{factorText(lang, f)}</li>
+            {domain.factors.map((f, i) => (
+              <li key={`${f.code}-${i}`}>{factorText(lang, f)}</li>
             ))}
             {gaps.map((g) => (
               <li key={`${g.code}-${g.record_type}`} className="muted">

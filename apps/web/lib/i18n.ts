@@ -114,6 +114,8 @@ const dict = {
     openResult: "Open result",
     // Patients directory
     patientsTitle: "Patients",
+    patientsLead:
+      "Find a patient to open the chart, start a consultation or review Patient 360.",
     searchPatients: "Search patients",
     searchPlaceholder: "Name or identifier (min. 2 characters)",
     search: "Search",
@@ -1953,6 +1955,8 @@ const dict = {
       "A professional reviews every result before it is released to you.",
     homePendingOrders: "Tests ordered",
     homeNoResults: "No results yet",
+    noObservationsYet:
+      "No observations have been received for this request yet.",
     homeNoResultsSub:
       "Results released to you by your care team will appear here.",
     homeTasks: "Your tasks",
@@ -2111,6 +2115,8 @@ const dict = {
     openResult: "Abrir resultado",
     // Patients directory
     patientsTitle: "Pacientes",
+    patientsLead:
+      "Busque un paciente para abrir la historia, iniciar una consulta o revisar el Paciente 360.",
     searchPatients: "Buscar pacientes",
     searchPlaceholder: "Nombre o identificador (mín. 2 caracteres)",
     search: "Buscar",
@@ -3967,6 +3973,8 @@ const dict = {
       "Un profesional revisa cada resultado antes de liberárselo.",
     homePendingOrders: "Pruebas solicitadas",
     homeNoResults: "Aún no hay resultados",
+    noObservationsYet:
+      "Todavía no se han recibido observaciones para esta solicitud.",
     homeNoResultsSub: "Los resultados que su equipo le libere aparecerán aquí.",
     homeTasks: "Sus tareas",
     homeNoTasks: "Sin tareas",

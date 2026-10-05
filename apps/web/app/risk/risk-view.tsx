@@ -243,8 +243,8 @@ export function DomainCard({
           </p>
         ) : (
           <ul className="risk-factors">
-            {domain.factors.map((f) => (
-              <li key={f.code}>{factorText(lang, f)}</li>
+            {domain.factors.map((f, i) => (
+              <li key={`${f.code}-${i}`}>{factorText(lang, f)}</li>
             ))}
           </ul>
         )}
@@ -276,8 +276,8 @@ export function DomainCard({
               </>
             ) : null}
           </dl>
-          {domain.factors.map((f) => (
-            <div key={f.code} className="risk-factor-detail">
+          {domain.factors.map((f, i) => (
+            <div key={`${f.code}-${i}`} className="risk-factor-detail">
               <p>
                 <code>{f.code}</code> <LevelBadge lang={lang} level={f.level} />
                 {f.detected_at ? (
