@@ -21,9 +21,32 @@ import {
   type Offer,
   type SchedulableResource,
 } from "@/lib/access";
-import { PanelState, useCatalog, useLoader } from "./shared";
+import { CalendarGrid, type CalendarItem } from "@/components/ui/charts";
+import { CatalogCombobox, PanelState, useCatalog, useLoader } from "./shared";
 
-type View = "day" | "week";
+type View = "day" | "week" | "month";
+
+/** Monday-start grid covering the whole month that contains `day`. */
+export function monthGrid(day: string): {
+  from: string;
+  to: string;
+  days: string[];
+} {
+  const anchor = new Date(`${day}T00:00:00`);
+  const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+  const start = new Date(first);
+  start.setDate(start.getDate() - ((first.getDay() + 6) % 7));
+  const lastOfMonth = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
+  const end = new Date(lastOfMonth);
+  end.setDate(end.getDate() + ((7 - lastOfMonth.getDay()) % 7) + 1);
+  const days: string[] = [];
+  const cursor = new Date(start);
+  while (cursor < end) {
+    days.push(localDateKey(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return { from: start.toISOString(), to: end.toISOString(), days };
+}
 
 export type AgendaFilters = {
   facility_id: string;
@@ -179,7 +202,13 @@ export function Agenda({
   const professions = useCatalog("profession");
   const modalities = useCatalog("modality");
 
-  const range = view === "day" ? dayRange(day) : weekRange(day);
+  const month = useMemo(() => monthGrid(day), [day]);
+  const range =
+    view === "day"
+      ? dayRange(day)
+      : view === "week"
+        ? weekRange(day)
+        : { from: month.from, to: month.to };
   const key = JSON.stringify({ view, day, filters });
   const state = useLoader(
     () => loadAgenda(filters, range.from, range.to),
@@ -188,9 +217,35 @@ export function Agenda({
   );
 
   const days = useMemo(
-    () => (view === "week" ? weekDays(day) : [day]),
-    [view, day],
+    () =>
+      view === "week" ? weekDays(day) : view === "month" ? month.days : [day],
+    [view, day, month],
   );
+  const weekdayHeaders = useMemo(() => {
+    const fmt = new Intl.DateTimeFormat(lang === "es" ? "es-ES" : "en-GB", {
+      weekday: "short",
+    });
+    return weekDays(day).map((d) => fmt.format(new Date(`${d}T12:00:00`)));
+  }, [lang, day]);
+  const monthLabel = useMemo(
+    () =>
+      new Intl.DateTimeFormat(lang === "es" ? "es-ES" : "en-GB", {
+        month: "long",
+        year: "numeric",
+      }).format(new Date(`${day}T12:00:00`)),
+    [lang, day],
+  );
+  const shiftBy = view === "day" ? 1 : view === "week" ? 7 : 0;
+  const shift = (dir: 1 | -1) => {
+    if (view === "month") {
+      const d = new Date(`${day}T00:00:00`);
+      d.setDate(1);
+      d.setMonth(d.getMonth() + dir);
+      setDay(localDateKey(d));
+    } else {
+      setDay(shiftDay(day, dir * shiftBy));
+    }
+  };
 
   const set = (k: keyof AgendaFilters) => (v: string) =>
     setFilters((f) => ({ ...f, [k]: v }));
@@ -225,7 +280,7 @@ export function Agenda({
       <div className="agenda-head">
         <h3 id="agenda-h">{t(lang, "agendaTitle")}</h3>
         <div className="tabs" role="tablist" aria-label={t(lang, "agendaView")}>
-          {(["day", "week"] as View[]).map((v) => (
+          {(["day", "week", "month"] as View[]).map((v) => (
             <button
               key={v}
               type="button"
@@ -235,7 +290,14 @@ export function Agenda({
               aria-controls="agenda-panel"
               onClick={() => setView(v)}
             >
-              {t(lang, v === "day" ? "viewDay" : "viewWeek")}
+              {t(
+                lang,
+                v === "day"
+                  ? "viewDay"
+                  : v === "week"
+                    ? "viewWeek"
+                    : "viewMonth",
+              )}
             </button>
           ))}
         </div>
@@ -244,7 +306,7 @@ export function Agenda({
         <button
           type="button"
           className="secondary"
-          onClick={() => setDay(shiftDay(day, view === "day" ? -1 : -7))}
+          onClick={() => shift(-1)}
           aria-label={t(lang, "previousPeriod")}
         >
           ‹
@@ -261,7 +323,7 @@ export function Agenda({
         <button
           type="button"
           className="secondary"
-          onClick={() => setDay(shiftDay(day, view === "day" ? 1 : 7))}
+          onClick={() => shift(1)}
           aria-label={t(lang, "nextPeriod")}
         >
           ›
@@ -285,30 +347,33 @@ export function Agenda({
               t(lang, "allFacilities"),
             )
           : null}
-        {renderSelect(
-          "agenda-service",
-          t(lang, "service"),
-          filters.service_code,
-          set("service_code"),
-          catalogOptions(services.entries),
-          t(lang, "allServices"),
-        )}
-        {renderSelect(
-          "agenda-specialty",
-          t(lang, "specialty"),
-          filters.specialty_code,
-          set("specialty_code"),
-          catalogOptions(specialties.entries),
-          t(lang, "allSpecialties"),
-        )}
-        {renderSelect(
-          "agenda-profession",
-          t(lang, "profession"),
-          filters.profession_code,
-          set("profession_code"),
-          catalogOptions(professions.entries),
-          t(lang, "allProfessions"),
-        )}
+        <CatalogCombobox
+          id="agenda-service"
+          lang={lang}
+          label={t(lang, "service")}
+          entries={services.entries}
+          value={filters.service_code}
+          onChange={set("service_code")}
+          placeholder={t(lang, "allServices")}
+        />
+        <CatalogCombobox
+          id="agenda-specialty"
+          lang={lang}
+          label={t(lang, "specialty")}
+          entries={specialties.entries}
+          value={filters.specialty_code}
+          onChange={set("specialty_code")}
+          placeholder={t(lang, "allSpecialties")}
+        />
+        <CatalogCombobox
+          id="agenda-profession"
+          lang={lang}
+          label={t(lang, "profession")}
+          entries={professions.entries}
+          value={filters.profession_code}
+          onChange={set("profession_code")}
+          placeholder={t(lang, "allProfessions")}
+        />
         {renderSelect(
           "agenda-modality",
           t(lang, "modality"),
@@ -337,56 +402,95 @@ export function Agenda({
                   ? ` · ${t(lang, "cancelledInRange").replace("{n}", String(d.cancelled.length))}`
                   : ""}
               </p>
-              <div
-                className="lanes"
-                role="table"
-                aria-label={t(lang, "agendaTitle")}
-              >
-                <div role="row" className="lane-row lane-header">
-                  <div role="columnheader" className="lane-name">
-                    {t(lang, "resource")}
+              {view === "month" ? (
+                <CalendarGrid
+                  label={`${t(lang, "agendaTitle")} · ${monthLabel}`}
+                  headers={weekdayHeaders}
+                  todayKey={localDateKey(new Date())}
+                  moreLabel={(n) =>
+                    t(lang, "moreItems").replace("{n}", String(n))
+                  }
+                  days={days.map((dk) => {
+                    const inMonth = dk.slice(0, 7) === day.slice(0, 7);
+                    const items: CalendarItem[] = d.lanes
+                      .flatMap((lane) => lane.items)
+                      .filter((i) => localDateKey(new Date(i.starts_at)) === dk)
+                      .sort((a, b) => a.starts_at.localeCompare(b.starts_at))
+                      .map((i) => ({
+                        id: `${i.kind}-${i.id}`,
+                        label: `${formatTime(lang, i.starts_at)} ${
+                          i.service
+                            ? catalogName(lang, i.service, i.service_code)
+                            : i.service_code
+                        }`,
+                        title: i.patient
+                          ? `${i.patient.family_name}, ${i.patient.given_name}`
+                          : undefined,
+                        tone: itemTone(i) as CalendarItem["tone"],
+                        onClick: onSelectItem
+                          ? () => onSelectItem(i)
+                          : undefined,
+                      }));
+                    return {
+                      key: dk,
+                      day: String(Number(dk.slice(8, 10))),
+                      items,
+                      muted: !inMonth,
+                    };
+                  })}
+                />
+              ) : (
+                <div
+                  className="lanes"
+                  role="table"
+                  aria-label={t(lang, "agendaTitle")}
+                >
+                  <div role="row" className="lane-row lane-header">
+                    <div role="columnheader" className="lane-name">
+                      {t(lang, "resource")}
+                    </div>
+                    {days.map((dk) => (
+                      <div role="columnheader" key={dk} className="lane-day">
+                        {formatDay(lang, `${dk}T12:00:00`)}
+                      </div>
+                    ))}
                   </div>
-                  {days.map((dk) => (
-                    <div role="columnheader" key={dk} className="lane-day">
-                      {formatDay(lang, `${dk}T12:00:00`)}
+                  {d.lanes.map((lane) => (
+                    <div role="row" className="lane-row" key={lane.resource.id}>
+                      <div role="rowheader" className="lane-name">
+                        <strong>{lane.resource.name}</strong>
+                        <div className="muted small">
+                          {lane.resource.resource_type_code} ·{" "}
+                          {lane.resource.time_zone}
+                        </div>
+                      </div>
+                      {days.map((dk) => {
+                        const items = lane.items.filter(
+                          (i) => localDateKey(new Date(i.starts_at)) === dk,
+                        );
+                        return (
+                          <div role="cell" key={dk} className="lane-day">
+                            {items.length === 0 ? (
+                              <span className="muted small">
+                                {t(lang, "free")}
+                              </span>
+                            ) : (
+                              items.map((i) => (
+                                <ItemChip
+                                  key={`${i.kind}-${i.id}`}
+                                  lang={lang}
+                                  item={i}
+                                  onSelect={onSelectItem}
+                                />
+                              ))
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   ))}
                 </div>
-                {d.lanes.map((lane) => (
-                  <div role="row" className="lane-row" key={lane.resource.id}>
-                    <div role="rowheader" className="lane-name">
-                      <strong>{lane.resource.name}</strong>
-                      <div className="muted small">
-                        {lane.resource.resource_type_code} ·{" "}
-                        {lane.resource.time_zone}
-                      </div>
-                    </div>
-                    {days.map((dk) => {
-                      const items = lane.items.filter(
-                        (i) => localDateKey(new Date(i.starts_at)) === dk,
-                      );
-                      return (
-                        <div role="cell" key={dk} className="lane-day">
-                          {items.length === 0 ? (
-                            <span className="muted small">
-                              {t(lang, "free")}
-                            </span>
-                          ) : (
-                            items.map((i) => (
-                              <ItemChip
-                                key={`${i.kind}-${i.id}`}
-                                lang={lang}
-                                item={i}
-                                onSelect={onSelectItem}
-                              />
-                            ))
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
+              )}
             </>
           )}
         </PanelState>

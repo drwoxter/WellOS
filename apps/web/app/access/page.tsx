@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "../chrome";
 import { t } from "@/lib/i18n";
 import type { Lang, TKey } from "@/lib/i18n";
 import { ApiRequestError, apiFetch, useSession } from "@/lib/session";
 import { canReadVisits, defaultAccessView } from "@/lib/visits";
 import type { InternalAlert, VisitItem } from "@/lib/visits";
+import { StatTile } from "@/components/ui/primitives";
 import { AlertsPanel } from "./alerts-panel";
 import { NewVisit } from "./new-visit";
 import { VisitCard, useVisitActions } from "./visit-card";
@@ -21,6 +22,52 @@ const VIEWS: { id: View; label: TKey }[] = [
 ];
 
 const MANAGE_ROLES = ["registration_staff", "nurse", "clinical_administrator"];
+
+const PRIORITY_RANK: Record<string, number> = {
+  immediate: 4,
+  urgent: 3,
+  standard: 2,
+  non_urgent: 1,
+};
+
+/**
+ * Operational ordering for a queue: triage priority first, then the longest
+ * wait. Nothing is inferred — both signals come from the visit record.
+ */
+export function sortQueue(items: VisitItem[]): VisitItem[] {
+  return items
+    .map((v, i) => ({ v, i }))
+    .sort((a, b) => {
+      const pa = PRIORITY_RANK[a.v.priority ?? ""] ?? 0;
+      const pb = PRIORITY_RANK[b.v.priority ?? ""] ?? 0;
+      if (pa !== pb) return pb - pa;
+      const wa = a.v.wait_minutes ?? -1;
+      const wb = b.v.wait_minutes ?? -1;
+      if (wa !== wb) return wb - wa;
+      return a.i - b.i;
+    })
+    .map((x) => x.v);
+}
+
+export function summarizeQueue(items: VisitItem[]) {
+  let urgent = 0;
+  let scheduled = 0;
+  let walkIn = 0;
+  let longest = 0;
+  for (const v of items) {
+    if (
+      v.arrival_kind === "urgent" ||
+      v.priority === "immediate" ||
+      v.priority === "urgent"
+    )
+      urgent++;
+    if (v.arrival_kind === "scheduled") scheduled++;
+    if (v.arrival_kind === "walk_in") walkIn++;
+    if (v.wait_minutes !== null && v.wait_minutes > longest)
+      longest = v.wait_minutes;
+  }
+  return { total: items.length, urgent, scheduled, walkIn, longest };
+}
 
 function AccessBoard() {
   const { lang, authenticated, meta } = useSession();
@@ -75,6 +122,11 @@ function AccessBoard() {
   const { busy, message, run } = useVisitActions(lang, load);
 
   const canManage = roles.some((r) => MANAGE_ROLES.includes(r));
+  const ordered = useMemo(() => (items ? sortQueue(items) : null), [items]);
+  const summary = useMemo(
+    () => (items && activeView !== "closed" ? summarizeQueue(items) : null),
+    [items, activeView],
+  );
 
   if (meta && !boardUser) {
     return (
@@ -97,12 +149,8 @@ function AccessBoard() {
           </p>
         </div>
       ) : (
-        <>
-          {alerts && alerts.length > 0 ? (
-            <AlertsPanel lang={lang} alerts={alerts} onAcknowledged={load} />
-          ) : null}
-          {canManage ? <NewVisit lang={lang} onCreated={load} /> : null}
-          <section className="card" aria-labelledby="board-h">
+        <div className="access-layout">
+          <section className="card access-board" aria-labelledby="board-h">
             <h2 id="board-h" className="sr-only">
               {t(lang, "accessTitle")}
             </h2>
@@ -148,6 +196,42 @@ function AccessBoard() {
                 {message.text}
               </p>
             ) : null}
+            {summary && summary.total > 0 ? (
+              <section
+                className="queue-summary"
+                aria-label={t(lang, "queueSummary")}
+              >
+                <StatTile
+                  value={summary.total}
+                  label={t(lang, "queueInQueue")}
+                  tone="teal"
+                />
+                <StatTile
+                  value={summary.urgent}
+                  label={t(lang, "queueUrgent")}
+                  tone={summary.urgent > 0 ? "critical" : "neutral"}
+                />
+                <StatTile
+                  value={summary.scheduled}
+                  label={t(lang, "queueScheduled")}
+                />
+                <StatTile
+                  value={summary.walkIn}
+                  label={t(lang, "queueWalkIn")}
+                />
+                <StatTile
+                  value={t(lang, "queueMinutes").replace(
+                    "{n}",
+                    String(summary.longest),
+                  )}
+                  label={t(lang, "queueLongestWait")}
+                  tone={summary.longest >= 60 ? "warn" : "neutral"}
+                />
+                <p className="muted small queue-sort-help">
+                  {t(lang, "queueSortHelp")}
+                </p>
+              </section>
+            ) : null}
             <div
               id="visit-panel"
               role="tabpanel"
@@ -171,8 +255,8 @@ function AccessBoard() {
                   {t(lang, "noVisitsInList")}
                 </p>
               ) : (
-                <ul className="result-list">
-                  {items.map((v) => (
+                <ul className="result-list queue-list">
+                  {(ordered ?? items).map((v) => (
                     <VisitCard
                       key={v.id}
                       lang={lang}
@@ -186,7 +270,16 @@ function AccessBoard() {
               )}
             </div>
           </section>
-        </>
+          <aside
+            className="access-side"
+            aria-label={t(lang, "boardOperations")}
+          >
+            {alerts && alerts.length > 0 ? (
+              <AlertsPanel lang={lang} alerts={alerts} onAcknowledged={load} />
+            ) : null}
+            {canManage ? <NewVisit lang={lang} onCreated={load} /> : null}
+          </aside>
+        </div>
       )}
     </>
   );

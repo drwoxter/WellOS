@@ -1,21 +1,32 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { apiFetch, ApiRequestError, useSession } from "@/lib/session";
 import { t, type Lang } from "@/lib/i18n";
 import {
   catalogName,
+  factorLabel,
   formatRange,
   loadCatalog,
   minutesUntil,
   offerReasons,
   offerStatusLabel,
+  preparationText,
   rankingNotice,
   supportiveActionLabel,
   type CatalogEntry,
   type Offer,
   type RankingOutcome,
 } from "@/lib/access";
+import { Combobox, type ComboOption } from "@/components/ui/combobox";
 
 /** User-visible outcome of the last action on a panel. */
 export type Msg = { kind: "error" | "success"; text: string } | null;
@@ -358,6 +369,8 @@ export function OfferCard({
       : offer.service.name_en
     : offer.service_code;
   const headingId = `offer-${offer.id}-h`;
+  const compromises = (offer.score?.factors ?? []).filter((f) => f.points < 0);
+  const preparation = preparationText(lang, offer.service);
   return (
     <li className="result-card offer-card" aria-labelledby={headingId}>
       <div className="offer-head">
@@ -416,6 +429,19 @@ export function OfferCard({
               {offer.score.supportive_actions
                 .map((a) => supportiveActionLabel(lang, a))
                 .join(", ")}
+            </p>
+          ) : null}
+          {compromises.length > 0 ? (
+            <p className="muted">
+              {t(lang, "offerCompromises")}:{" "}
+              {compromises
+                .map((f) => f.detail || factorLabel(lang, f.code))
+                .join("; ")}
+            </p>
+          ) : null}
+          {preparation ? (
+            <p className="muted">
+              {t(lang, "offerPreparation")}: {preparation}
             </p>
           ) : null}
           {offer.score?.travel ? (
@@ -541,4 +567,172 @@ export async function opsFetch<T>(
 
 export async function postOps<T>(path: string, body: unknown): Promise<T> {
   return opsFetch<T>(path, { method: "POST", body: JSON.stringify(body) });
+}
+
+/**
+ * Searchable single-select over a catalog kind (services, specialties,
+ * professions…). Long lists get type-ahead; the value stays the catalog
+ * code so request payloads are unchanged.
+ */
+export function CatalogCombobox({
+  id,
+  lang,
+  label,
+  entries,
+  value,
+  onChange,
+  placeholder,
+  required,
+  disabled,
+  describedBy,
+}: {
+  id: string;
+  lang: Lang;
+  label: string;
+  entries: CatalogEntry[];
+  value: string;
+  onChange: (code: string) => void;
+  placeholder?: string;
+  required?: boolean;
+  disabled?: boolean;
+  describedBy?: string;
+}) {
+  const options = useMemo<ComboOption[]>(
+    () =>
+      entries.map((e) => ({
+        id: e.code,
+        label: catalogName(lang, e, e.code),
+        sub: e.code,
+        keywords: `${e.name_en} ${e.name_es} ${e.synonyms.join(" ")}`,
+      })),
+    [entries, lang],
+  );
+  const selected = options.find((o) => o.id === value) ?? null;
+  return (
+    <Combobox
+      id={id}
+      label={label}
+      placeholder={placeholder ?? t(lang, "comboHint")}
+      options={options}
+      value={selected}
+      onChange={(o) => onChange(o?.id ?? "")}
+      emptyText={t(lang, "comboNoMatches")}
+      loadingText={t(lang, "comboLoading")}
+      clearLabel={t(lang, "comboClear")}
+      required={required}
+      disabled={disabled}
+      describedBy={describedBy}
+    />
+  );
+}
+
+/** Master–detail worklist: a compact selectable list beside the full record.
+ *  Selection survives reloads by key and falls back to the first item. */
+export function Worklist<T>({
+  lang,
+  label,
+  items,
+  keyOf,
+  renderRow,
+  renderDetail,
+}: {
+  lang: Lang;
+  label: string;
+  items: T[];
+  keyOf: (item: T) => string;
+  renderRow: (item: T, selected: boolean) => ReactNode;
+  renderDetail: (item: T) => ReactNode;
+}) {
+  const [picked, setPicked] = useState<string | null>(null);
+  const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const detailRef = useRef<HTMLDivElement | null>(null);
+  const selected = items.find((it) => keyOf(it) === picked) ?? items[0] ?? null;
+  const selectedKey = selected ? keyOf(selected) : null;
+
+  function pick(item: T) {
+    setPicked(keyOf(item));
+    if (
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(max-width: 1000px)").matches
+    ) {
+      const reduce = window.matchMedia(
+        "(prefers-reduced-motion: reduce)",
+      ).matches;
+      detailRef.current?.scrollIntoView({
+        block: "start",
+        behavior: reduce ? "auto" : "smooth",
+      });
+    }
+  }
+
+  function onKey(e: KeyboardEvent<HTMLButtonElement>, i: number) {
+    const last = items.length - 1;
+    let next: number | null = null;
+    if (e.key === "ArrowDown") next = i >= last ? 0 : i + 1;
+    else if (e.key === "ArrowUp") next = i <= 0 ? last : i - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    if (next === null) return;
+    e.preventDefault();
+    rowRefs.current[next]?.focus();
+  }
+
+  return (
+    <div className="master-detail worklist">
+      <ul className="worklist-rows" aria-label={label}>
+        {items.map((item, i) => {
+          const k = keyOf(item);
+          const sel = k === selectedKey;
+          return (
+            <li key={k}>
+              <button
+                type="button"
+                ref={(el) => {
+                  rowRefs.current[i] = el;
+                }}
+                className={sel ? "worklist-row selected" : "worklist-row"}
+                aria-current={sel ? "true" : undefined}
+                tabIndex={sel ? 0 : -1}
+                data-testid="worklist-row"
+                data-id={k}
+                onClick={() => pick(item)}
+                onKeyDown={(e) => onKey(e, i)}
+              >
+                {renderRow(item, sel)}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="worklist-detail" ref={detailRef}>
+        {selected ? (
+          <ul className="plain">{renderDetail(selected)}</ul>
+        ) : (
+          <p className="muted">{t(lang, "worklistSelectHint")}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Standard row content for `Worklist`: title, one meta line and badges. */
+export function WorklistRow({
+  title,
+  meta,
+  badges,
+}: {
+  title: ReactNode;
+  meta?: ReactNode;
+  badges?: ReactNode;
+}) {
+  return (
+    <>
+      <span className="worklist-row-main">
+        <span className="worklist-row-title">{title}</span>
+        {meta ? <span className="worklist-row-meta muted">{meta}</span> : null}
+      </span>
+      {badges ? <span className="worklist-row-badges">{badges}</span> : null}
+    </>
+  );
 }

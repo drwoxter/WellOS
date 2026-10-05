@@ -689,6 +689,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <Link
                 href={role === "patient" ? "/my" : "/dashboard"}
                 className="brand topbar-brand"
+                aria-label={t(lang, "appName")}
               >
                 <BrandMark />
               </Link>

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { signInAsRegistration } from "./helpers";
+import { pickCombo, setLanguage, signInAsRegistration } from "./helpers";
 
 /**
  * Staff scheduling journeys on the synthetic fixtures: the three-stage
@@ -52,9 +52,7 @@ test("registration staff find, hold, confirm and cancel an appointment", async (
     .click();
   const stepper = page.getByRole("list", { name: "Find the best appointment" });
   await expect(stepper.getByText("1. Need and constraints")).toBeVisible();
-  await page
-    .getByLabel("Service", { exact: true })
-    .selectOption({ label: "General medicine consultation" });
+  await pickCombo(page, "Service", "General medicine consultation");
   await page.getByTestId("find-best-appointment").click();
 
   // Stage 2: only deterministically valid options, each with reasons.
@@ -91,6 +89,11 @@ test("registration staff find, hold, confirm and cancel an appointment", async (
   await page.getByRole("button", { name: "Start over" }).click();
   await page.getByRole("tab", { name: "Appointments" }).click();
   const panel = page.locator("#scheduling-panel");
+  const apptId = /appointments\/([0-9a-f-]+)\/ics/.exec(icsHref ?? "")?.[1];
+  const row = panel.locator(
+    `[data-testid="worklist-row"][data-id="${apptId}"]`,
+  );
+  await row.click();
   const card = panel
     .getByRole("listitem")
     .filter({ has: page.locator(`a[href="${icsHref}"]`) });
@@ -108,6 +111,7 @@ test("registration staff find, hold, confirm and cancel an appointment", async (
   await confirm.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByText("Appointment updated.")).toBeVisible();
   await page.getByLabel("State").selectOption("cancelled");
+  await row.click();
   const cancelled = panel
     .getByRole("listitem")
     .filter({ has: page.locator(`a[href="${icsHref}"]`) });
@@ -193,7 +197,7 @@ test("console switches to Spanish without losing state", async ({ page }) => {
   await signInAsRegistration(page);
   await page.goto("/scheduling");
   await page.getByRole("tab", { name: "Capacity pressure" }).click();
-  await page.getByLabel("Language").selectOption("es");
+  await setLanguage(page, "es");
   await expect(
     page.getByRole("heading", { name: "Consola de programación" }),
   ).toBeVisible();

@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { signInAs } from "./helpers";
+import { setLanguage, signInAs } from "./helpers";
 
 /**
  * Patient 360 + explainable risk golden path against the seeded synthetic
@@ -333,7 +333,7 @@ test("roles without risk permission do not see the worklist", async ({
 
 test("risk worklist and Patient 360 in Spanish", async ({ page }) => {
   await signInAs(page, "dr.garcia");
-  await page.getByLabel("Language").first().selectOption("es");
+  await setLanguage(page, "es");
   await page.goto("/risk");
   await expect(
     page.getByRole("heading", { name: "Lista de trabajo de riesgo" }).first(),

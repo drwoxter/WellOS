@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { signInAs } from "./helpers";
+import { clickSignOut, signInAs } from "./helpers";
 
 async function openChart(page: Page, identifier: string): Promise<void> {
   await page.goto("/patients");
@@ -173,9 +173,6 @@ test("sign-out is confirmed before the session is revoked while a note has unsav
     if (req.method() === "DELETE" && req.url().endsWith("/api/session"))
       revocations += 1;
   });
-  const signOut = page
-    .locator(".topbar")
-    .getByRole("button", { name: "Sign out" });
 
   // Decline: still signed in, on the same screen, with the same text.
   const messages: string[] = [];
@@ -183,7 +180,7 @@ test("sign-out is confirmed before the session is revoked while a note has unsav
     messages.push(d.message());
     void d.dismiss();
   });
-  await signOut.click();
+  await clickSignOut(page);
   expect(messages).toHaveLength(1);
   expect(messages[0]).toMatch(/unsaved documentation/i);
   await expect(page).toHaveURL(encounterUrl);
@@ -200,7 +197,7 @@ test("sign-out is confirmed before the session is revoked while a note has unsav
     dialogs += 1;
     void d.accept();
   });
-  await signOut.click();
+  await clickSignOut(page);
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByRole("button", { name: /Sign out/ })).toHaveCount(0);
   expect(revocations).toBe(1);

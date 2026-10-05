@@ -131,6 +131,23 @@
   border-radius: 3px;
   background: var(--teal-400);
 }
+/* Route content reuses `.navlink` on light surfaces. */
+main .navlink {
+  color: var(--fg);
+  font-weight: 500;
+}
+main .navlink:hover {
+  background: var(--surface-3);
+  color: var(--fg-strong);
+}
+main .navlink[aria-current="page"] {
+  background: var(--primary);
+  color: #fff;
+}
+main .navlink[aria-current="page"]::before {
+  content: none;
+}
+
 .navlink.dmind svg {
   color: var(--violet-400);
 }

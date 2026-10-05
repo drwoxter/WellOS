@@ -10,6 +10,7 @@
   --ink-200: #c3cedb;
   --ink-100: #e2e8ef;
 
+  --teal-800: #085a66;
   --teal-700: #0b6f7d;
   --teal-600: #0f8a9b;
   --teal-500: #15a3b5;
@@ -105,8 +106,8 @@
 /* Tenant appearance: both keep the WellOS teal identity; "south" shifts the
    accent to a deeper sea-green so facilities can tell their workspace apart. */
 html[data-theme="north"] {
-  --primary: var(--teal-600);
-  --primary-strong: var(--teal-700);
+  --primary: var(--teal-700);
+  --primary-strong: var(--teal-800);
   --primary-soft: var(--teal-100);
   --primary-softer: var(--teal-50);
   --primary-contrast: #ffffff;

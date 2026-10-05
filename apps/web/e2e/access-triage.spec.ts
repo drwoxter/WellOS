@@ -1,6 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { signInAs, signInAsRegistration, signOut } from "./helpers";
+import {
+  setLanguage,
+  signInAs,
+  signInAsRegistration,
+  signOut,
+} from "./helpers";
 
 /**
  * Care-team golden path: development login → register a new synthetic patient
@@ -297,7 +302,7 @@ test("access board and triage workspace switch to Spanish", async ({
 }) => {
   await signInAs(page, "nurse.kim");
   await page.goto("/access");
-  await page.getByLabel("Language").first().selectOption("es");
+  await setLanguage(page, "es");
   await expect(
     page.getByRole("heading", { name: "Acceso de pacientes" }).first(),
   ).toBeVisible();
