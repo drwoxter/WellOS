@@ -982,7 +982,6 @@ fieldset.choice-group legend {
 
 .radio-option input,
 .check-option input {
-  width: auto;
   margin: 0;
 }
 

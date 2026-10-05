@@ -141,13 +141,15 @@ textarea:disabled {
   color: var(--muted);
   cursor: not-allowed;
 }
+/* 24 px minimum pointer target (WCAG 2.2 AA 2.5.8). */
 input[type="checkbox"],
 input[type="radio"] {
-  width: 1.1rem;
-  height: 1.1rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
   accent-color: var(--primary);
   margin: 0 0.4rem 0 0;
-  vertical-align: -0.15em;
+  vertical-align: -0.3em;
 }
 fieldset {
   border: 1px solid var(--border);

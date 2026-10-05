@@ -286,6 +286,10 @@ test("access board and triage workspace are keyboard operable with no serious a1
   await expect(redFlag).toBeChecked({ checked: !before });
   await page.keyboard.press("Space");
   await expect(redFlag).toBeChecked({ checked: before });
+  // WCAG 2.2 AA 2.5.8: each checkbox is a 24 px pointer target on its own.
+  const box = await redFlag.boundingBox();
+  expect(box?.width ?? 0).toBeGreaterThanOrEqual(24);
+  expect(box?.height ?? 0).toBeGreaterThanOrEqual(24);
 
   const triageScan = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag22aa"])

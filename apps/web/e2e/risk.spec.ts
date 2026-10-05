@@ -265,9 +265,27 @@ test("Patient 360 → dMind summary with explicit confirmation → consultation 
       'li[data-domain="diagnostic_result"] details.risk-technical > summary',
     )
     .click();
-  await expect(
-    cockpit.getByRole("link", { name: /Potassium/ }).first(),
-  ).toBeVisible();
+  const evidenceLink = cockpit.getByRole("link", { name: /Potassium/ }).first();
+  await expect(evidenceLink).toBeVisible();
+  // Evidence labels wrap inside the cockpit column: a long label must never
+  // overflow into the documentation column, where it would paint over the
+  // vital-sign form and intercept the clinician's clicks.
+  const overflow = await evidenceLink.evaluate((a) => {
+    const item = a.closest("li") as HTMLElement;
+    const column = a.closest(".encounter-main") as HTMLElement;
+    const right = a.getBoundingClientRect().right;
+    return {
+      scroll: a.scrollWidth - a.clientWidth,
+      pastItem: right - item.getBoundingClientRect().right,
+      pastColumn:
+        a.getBoundingClientRect().left +
+        a.scrollWidth -
+        column.getBoundingClientRect().right,
+    };
+  });
+  expect(overflow.scroll).toBeLessThanOrEqual(1);
+  expect(overflow.pastItem).toBeLessThanOrEqual(1);
+  expect(overflow.pastColumn).toBeLessThanOrEqual(1);
 
   // Confirmed clinical change (vital signs) refreshes the risk read without
   // interrupting the consultation.
