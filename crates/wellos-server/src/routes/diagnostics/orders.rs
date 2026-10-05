@@ -1469,6 +1469,19 @@ pub async fn confirm(
     Ok(Json(json!({ "group": out })))
 }
 
+/// The ordering clinician is the accountable human who set the priority,
+/// so the Access request carries the highest urgency a human triage decision
+/// can assign (`priority`); `urgent` is reserved for untriaged intake and
+/// would send the order back to clinical triage.
+fn access_urgency(priority: OrderPriority) -> Option<String> {
+    match priority {
+        OrderPriority::Stat | OrderPriority::Urgent | OrderPriority::Timed => {
+            Some("priority".to_string())
+        }
+        OrderPriority::Routine => None,
+    }
+}
+
 /// Create (and submit) the Access request that will book the appointment for
 /// one schedulable order, through the ordinary request path: deterministic
 /// triage floor, matcher, offers, holds and confirmation all stay in Access.
@@ -1484,16 +1497,7 @@ async fn link_access_request(
     latest: Option<DateTime<Utc>>,
     lang: &str,
 ) -> Result<(), ApiError> {
-    // The ordering clinician is the accountable human who set the priority,
-    // so the Access request carries the highest urgency a human triage
-    // decision can assign (`priority`); `urgent` is reserved for untriaged
-    // intake and would send the order back to clinical triage.
-    let urgency = match row.priority {
-        OrderPriority::Stat | OrderPriority::Urgent | OrderPriority::Timed => {
-            Some("priority".to_string())
-        }
-        OrderPriority::Routine => None,
-    };
+    let urgency = access_urgency(row.priority);
     let free_text = if lang == "es" {
         format!("Orden diagnóstica: {}", row.display)
     } else {
@@ -1938,11 +1942,7 @@ pub async fn schedule(
     let mut row = o.clone();
     row.performing_facility_id = Some(facility_id);
     let request = {
-        let urgency = match row.priority {
-            OrderPriority::Stat | OrderPriority::Urgent => Some("urgent".to_string()),
-            OrderPriority::Timed => Some("priority".to_string()),
-            OrderPriority::Routine => None,
-        };
+        let urgency = access_urgency(row.priority);
         let free_text = if lang == "es" {
             format!("Orden diagnóstica: {}", row.display)
         } else {

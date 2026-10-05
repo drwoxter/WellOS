@@ -1233,9 +1233,14 @@ async fn imported_busy_time_excludes_matcher_candidates() {
     set_consent(&state, &token, &patient, "scheduling_calendar", "active").await;
 
     // The patient is busy every day 08:00-18:00 UTC for the whole horizon
-    // except one day; the professional only works those hours.
+    // except one day; the professional only works those hours. The free day
+    // is the first weekday five or more days ahead, so the facility's
+    // weekday opening hours never leave it without slots.
     let now = chrono::Utc::now();
-    let free_day = (now + chrono::Duration::days(5)).date_naive();
+    let free_day = (5..12)
+        .map(|d| (now + chrono::Duration::days(d)).date_naive())
+        .find(|d| chrono::Datelike::weekday(d).number_from_monday() <= 5)
+        .unwrap();
     let mut intervals = Vec::new();
     for d in 0..=120 {
         let day = (now + chrono::Duration::days(d)).date_naive();

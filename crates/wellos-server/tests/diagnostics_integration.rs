@@ -1210,7 +1210,11 @@ async fn access_scheduling_linkage_conflicts_and_fulfilment_modes() {
         "POST",
         &format!("/api/v1/appointments/{appt_id}/cancel"),
         REG,
-        Some(json!({ "reason_code": "patient_request", "note": "synthetic cancellation" })),
+        Some(json!({
+            "reason_code": "patient_request",
+            "note": "synthetic cancellation",
+            "override_reason": "synthetic test: the slot may fall inside the cancellation window"
+        })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
@@ -1263,6 +1267,66 @@ async fn access_scheduling_linkage_conflicts_and_fulfilment_modes() {
         "an open request must not be duplicated: {v}"
     );
     assert_eq!(code_of(&v), "access_request_open");
+
+    // A priority set by the ordering clinician never re-enters untriaged
+    // intake: neither the first request nor a manual re-schedule routes the
+    // order to clinical triage.
+    let g3 = place(
+        &state,
+        &e,
+        &f,
+        &[(&cxr, None)],
+        json!({ "priority": "stat" }),
+    )
+    .await;
+    let o3 = &g3["orders"][0];
+    let req3 = o3["access_request_id"].as_str().unwrap().to_string();
+    let (st, r3) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/access-requests/{req3}"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r3}");
+    assert_eq!(r3["request"]["urgency"], "priority", "{r3}");
+    assert_ne!(r3["request"]["status"], "needs_clinical_triage", "{r3}");
+    let (st, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/access-requests/{req3}/close"),
+        REG,
+        Some(json!({ "reason": "synthetic: rebook at another facility" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, d3) = detail(&state, DR, &id(o3)).await;
+    assert_eq!(st, StatusCode::OK, "{d3}");
+    let (st, re3) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/diagnostics/orders/{}/schedule", id(o3)),
+        DR,
+        Some(json!({ "version": version(&d3), "facility_id": f })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{re3}");
+    let req3b = re3["access_request_id"].as_str().unwrap().to_string();
+    let (st, r3b) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/access-requests/{req3b}"),
+        REG,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r3b}");
+    assert_eq!(r3b["request"]["urgency"], "priority", "{r3b}");
+    assert_ne!(
+        r3b["request"]["status"], "needs_clinical_triage",
+        "manual re-scheduling keeps the clinician's priority: {r3b}"
+    );
 
     // Inpatient fulfilment of an imaging order starts without appointment,
     // recording the explicit mode switch.
@@ -2011,6 +2075,26 @@ async fn pathology_amendment_chain_and_entered_in_error() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{legacy}");
+    assert!(
+        legacy["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["severity"] == "critical" && a["status"] == "open"),
+        "a conclusion-only critical alert reaches the legacy request view: {legacy}"
+    );
+    let (st, wl) = call(&state, "GET", "/api/v1/worklist?critical=true", DR, None).await;
+    assert_eq!(st, StatusCode::OK, "{wl}");
+    let row = wl["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == acc["id"])
+        .cloned();
+    assert!(
+        row.as_ref().is_some_and(|r| r["has_open_alert"] == true),
+        "a conclusion-only critical alert prioritises the worklist: {wl}"
+    );
     let (st, old) = call(
         &state,
         "GET",
