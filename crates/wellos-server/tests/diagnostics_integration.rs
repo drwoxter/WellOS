@@ -789,6 +789,17 @@ async fn composer_safety_groups_specimen_chain_and_typed_results() {
     let accepted = if a.0 == StatusCode::OK { a.1 } else { b.1 };
     assert_eq!(accepted["order_status"], "accepted");
 
+    // A specimen-based test refuses results until a specimen is collected.
+    let (st, v) = issue(
+        &state,
+        LAB,
+        &id(&accepted),
+        json!({ "status": "final", "sign": true, "components": [quantity("2823-3", "4.1", "mmol/L")] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(code_of(&v), "specimen_required");
+
     // Specimen custody chain with identifier, rejection and recollection.
     let s1 = record_specimen(&state, &accepted, &f).await;
     assert_eq!(s1["status"], "collected");
@@ -1746,6 +1757,20 @@ async fn critical_report_review_release_and_patient_privacy() {
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    // An abnormal or critical result is never released without text the
+    // patient can read in both languages, approved artifact or not.
+    let mut one_language = release_body.clone();
+    one_language["explanation_es"] = Value::Null;
+    let (st, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/diagnostics/reports/{}/release", id(&report)),
+        DR,
+        Some(one_language),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(code_of(&v), "validation_failed");
     let (st, released) = call(
         &state,
         "POST",
@@ -1997,6 +2022,38 @@ async fn pathology_amendment_chain_and_entered_in_error() {
     assert_eq!(st, StatusCode::OK, "{old}");
     assert_eq!(old["replaced_by"], amended["id"], "{old}");
     assert_eq!(old["reviewable"], false, "{old}");
+    // Release the amended version to the patient's representative.
+    let rev = review(&state, &amended, json!({})).await;
+    let (st, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/diagnostics/reports/{}/release", id(&amended)),
+        DR,
+        Some(json!({ "report_version": version(&amended), "review_id": rev["review_id"], "decision": "release", "notify_patient": false,
+                      "explanation_en": "The deeper sections showed atypical cells; your clinician will discuss the next steps (synthetic).",
+                      "explanation_es": "Los cortes más profundos mostraron células atípicas; su médico le explicará los siguientes pasos (sintético)." })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    grant_for(&state, &p).await;
+    let (st, me) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/diagnostics?patient_id={p}"),
+        REP,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{me}");
+    assert!(
+        me["released"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["report_id"] == amended["id"] || r["id"] == amended["id"]),
+        "{me}"
+    );
+
     // Entered in error is terminal for the chain.
     // Retracting a report is a clinical decision: the laboratory cannot do it alone.
     let (st, v) = issue(
@@ -2016,6 +2073,42 @@ async fn pathology_amendment_chain_and_entered_in_error() {
     .await;
     assert_eq!(st, StatusCode::OK, "{eie}");
     assert_eq!(eie["status"], "entered_in_error");
+    // The retraction retires the earlier release: the patient no longer sees
+    // the invalidated findings, nor a misleading "under review" entry.
+    let (st, me) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/diagnostics?patient_id={p}"),
+        REP,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{me}");
+    assert!(
+        !me["released"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["report_id"] == amended["id"] || r["id"] == amended["id"]),
+        "{me}"
+    );
+    assert!(
+        !me["under_review"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["service_request_id"] == acc["id"]),
+        "{me}"
+    );
+    let (st, v) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/diagnostics/{}?patient_id={p}", id(&amended)),
+        REP,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
     let (st, v) = issue(
         &state,
         LAB,

@@ -164,6 +164,7 @@ pub async fn list(
          JOIN diagnostic_reports r ON r.service_request_id = sr.id
          WHERE sr.tenant_id = $1 AND sr.patient_id = $2 AND sr.order_status = 'completed'
            AND r.status IN ('preliminary','final','amended','corrected')
+           AND NOT EXISTS (SELECT 1 FROM diagnostic_reports n WHERE n.replaces = r.id)
            AND NOT EXISTS (SELECT 1 FROM result_release_decisions c
                            WHERE c.service_request_id = sr.id AND c.decision = 'release'
                              AND c.superseded_at IS NULL)

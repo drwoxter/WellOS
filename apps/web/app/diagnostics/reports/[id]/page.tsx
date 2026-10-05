@@ -461,7 +461,6 @@ function Release({
   const needsExplanation = report.criticality !== "normal";
   const explanationOk =
     !needsExplanation ||
-    approved !== null ||
     (explEn.trim().length >= 10 && explEs.trim().length >= 10);
   const valid =
     review !== null &&

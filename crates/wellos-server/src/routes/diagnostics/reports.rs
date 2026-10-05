@@ -685,6 +685,29 @@ pub async fn issue_in(
     let has_specs = orderable
         .as_ref()
         .is_some_and(|ob| !ob.config.components.is_empty());
+    // Specimen-based tests only accept results once a specimen for this very
+    // order has been collected; orderables migrated from the legacy laboratory
+    // path predate specimen custody and keep the adapter contract.
+    if carries_results
+        && orderable
+            .as_ref()
+            .is_some_and(|ob| ob.config.needs_specimen() && !ob.config.legacy_migrated)
+    {
+        let collected: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM specimens
+             WHERE service_request_id = $1 AND status NOT IN ('planned', 'rejected')
+             LIMIT 1",
+        )
+        .bind(o.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if collected.is_none() {
+            return Err(ApiError::conflict(
+                "specimen_required",
+                "this test needs a collected specimen before results can be issued",
+            ));
+        }
+    }
 
     // Validate components against the orderable before anything is written.
     let mut prepared = Vec::with_capacity(input.components.len());
@@ -1274,15 +1297,16 @@ pub async fn issue_in(
         .map_err(ApiError::internal)?;
     }
 
+    // Every new version — including a retraction or cancellation — makes the
+    // earlier release describe a report that is no longer current.
+    sqlx::query(
+        "UPDATE result_release_decisions SET superseded_at = now()
+         WHERE service_request_id = $1 AND superseded_at IS NULL",
+    )
+    .bind(o.id)
+    .execute(&mut *tx)
+    .await?;
     if input.status.is_reviewable() {
-        // Earlier release decisions describe a superseded version.
-        sqlx::query(
-            "UPDATE result_release_decisions SET superseded_at = now()
-             WHERE service_request_id = $1 AND superseded_at IS NULL",
-        )
-        .bind(o.id)
-        .execute(&mut *tx)
-        .await?;
         notify_responsible(tx, ctx, state, &order, report_id, criticality).await?;
     }
 
@@ -2754,6 +2778,19 @@ pub async fn release(
                 "provide the explanation text the patient will read (edited or approved as drafted)",
             ));
         }
+    }
+    let blank = |s: &Option<String>| s.as_deref().is_none_or(|t| t.trim().is_empty());
+    if decision == "release"
+        && matches!(
+            r.criticality,
+            Interpretation::Abnormal | Interpretation::Critical
+        )
+        && (blank(&explanation_en) || blank(&explanation_es))
+    {
+        return Err(ApiError::bad_request(
+            "validation_failed",
+            "abnormal and critical results are released with an explanation the patient can read in English and Spanish",
+        ));
     }
     sqlx::query(
         "UPDATE result_release_decisions SET superseded_at = now()
