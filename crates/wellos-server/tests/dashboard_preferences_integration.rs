@@ -235,3 +235,42 @@ async fn preferences_follow_cockpit_access() {
         );
     }
 }
+
+#[tokio::test]
+async fn concurrent_first_saves_keep_exactly_one_layout() {
+    let state = test_state().await;
+    reset(&state, &["dr.lopez"]).await;
+    // Two tabs save for the first time with version 0 at once: there is no
+    // row to lock yet, so the insert itself must settle the race — exactly
+    // one save wins, the other gets layout_conflict and the stored version
+    // is 1, never 2.
+    let (a, b) = tokio::join!(
+        call(
+            &state,
+            "PUT",
+            "dev-dr.lopez",
+            Some(json!({ "layout": layout("results"), "version": 0 })),
+        ),
+        call(
+            &state,
+            "PUT",
+            "dev-dr.lopez",
+            Some(json!({ "layout": layout("tasks"), "version": 0 })),
+        ),
+    );
+    let mut statuses = [a.0, b.0];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CONFLICT],
+        "{} / {}",
+        a.1,
+        b.1
+    );
+    let winner = if a.0 == StatusCode::OK { &a.1 } else { &b.1 };
+    assert_eq!(winner["version"], 1);
+    let (st, stored) = call(&state, "GET", "dev-dr.lopez", None).await;
+    assert_eq!(st, StatusCode::OK, "{stored}");
+    assert_eq!(stored["version"], 1, "{stored}");
+    assert_eq!(stored["layout"]["order"][0], winner["layout"]["order"][0]);
+}

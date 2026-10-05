@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import {
   appointmentNeedsConfirmation,
   buildLanes,
+  dayItems,
+  localDateKey,
   hasSchedulingConsoleAccess,
   isUpcoming,
   minutesUntil,
@@ -303,6 +305,34 @@ describe("agenda lanes", () => {
       "appointment:a1",
     ]);
     expect(lanes[1].items.map((i) => i.id)).toEqual(["a1"]);
+  });
+
+  it("lists a multi-resource booking once per day across lanes", () => {
+    const lanes = buildLanes(
+      [resource("r-ana", "Dr. Ana"), resource("r-room", "Room 1")],
+      [
+        appointment({
+          id: "a1",
+          resources: [
+            { resource_id: "r-ana", role: "primary" },
+            { resource_id: "r-room", role: "room" },
+          ],
+        }),
+      ],
+      [
+        offer({
+          id: "o-held",
+          status: "held",
+          starts_at: "2026-10-02T06:00:00Z",
+        }),
+      ],
+    );
+    const dk = localDateKey(new Date("2026-10-02T07:40:00Z"));
+    expect(dayItems(lanes, dk).map((i) => `${i.kind}:${i.id}`)).toEqual([
+      "hold:o-held",
+      "appointment:a1",
+    ]);
+    expect(dayItems(lanes, "2001-01-01")).toEqual([]);
   });
 
   it("builds Monday-start weeks", () => {

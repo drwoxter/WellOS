@@ -115,18 +115,13 @@ const RELEASED = {
   id: "r1",
   service_request_id: "sr1",
   patient_id: "pa",
-  display: "Potassium, serum",
-  code: "2823-3",
+  order_display: "Potassium, serum",
   category_code: "laboratory",
   modality_code: null,
   status: "final",
   version: 1,
   criticality: "normal",
   conclusion: null,
-  value: { type: "quantity", value: "4.2", unit: "mmol/L" },
-  value_text: null,
-  interpretation: "normal",
-  reference_range: "3.5-5.1 mmol/L",
   issued_at: "2026-10-02T09:00:00Z",
   effective_at: "2026-10-02T08:00:00Z",
   released_at: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
@@ -152,7 +147,19 @@ const HOME_A = {
     under_review: 1,
     pending_orders: 0,
   },
-  appointments: { upcoming: [APPT], recent: [] },
+  appointments: {
+    upcoming: [APPT],
+    recent: [
+      {
+        ...APPT,
+        id: "a0",
+        status: "fulfilled",
+        starts_at: "2026-09-30T09:00:00Z",
+        ends_at: "2026-09-30T09:30:00Z",
+        confirmation_required: false,
+      },
+    ],
+  },
   requests: [],
   notifications: [
     {
@@ -236,9 +243,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function setup(meta: unknown = META) {
+function setup(meta: unknown = META, opts: { deferB?: boolean } = {}) {
   const calls: { url: string; init?: RequestInit }[] = [];
   let confirmedA = false;
+  let releaseB: (() => void) | null = null;
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -265,8 +273,12 @@ function setup(meta: unknown = META) {
           }),
         );
       }
-      if (url === "/api/v1/me/home?patient_id=pb")
-        return Promise.resolve(jsonResponse(HOME_B));
+      if (url === "/api/v1/me/home?patient_id=pb") {
+        if (!opts.deferB) return Promise.resolve(jsonResponse(HOME_B));
+        return new Promise<Response>((resolve) => {
+          releaseB = () => resolve(jsonResponse(HOME_B));
+        });
+      }
       if (url === "/api/v1/me/appointments/a1/confirm") {
         confirmedA = true;
         return Promise.resolve(jsonResponse({ ...APPT, version: 4 }));
@@ -279,7 +291,7 @@ function setup(meta: unknown = META) {
       <PatientHomePage />
     </SessionProvider>,
   );
-  return calls;
+  return Object.assign(calls, { releaseB: () => releaseB?.() });
 }
 
 describe("patient home /my", () => {
@@ -364,6 +376,42 @@ describe("patient home /my", () => {
         "/api/v1/me/home?patient_id=pb",
       ]).toContain(c.url);
     }
+  });
+
+  it("keeps the previous person's home off the page while a switch is loading", async () => {
+    const calls = setup(META, { deferB: true });
+    await screen.findByText("Please confirm you will attend your appointment.");
+    expect(screen.getAllByText("Potassium, serum").length).toBeGreaterThan(0);
+    const group = screen.getByRole("group", {
+      name: "Who are you looking at?",
+    });
+    await userEvent
+      .setup()
+      .click(within(group).getByRole("button", { name: /Mateo Ortiz/ }));
+    // Mateo's home has not arrived: nothing of Lucía's remains actionable.
+    expect(await screen.findByText("Loading…")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Please confirm you will attend your appointment."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryAllByText("Potassium, serum")).toHaveLength(0);
+    expect(
+      screen.queryByRole("button", { name: /Confirm attendance/ }),
+    ).not.toBeInTheDocument();
+    calls.releaseB();
+    expect(
+      await screen.findByText("Nothing needs your attention right now."),
+    ).toBeInTheDocument();
+  });
+
+  it("orders the timeline by instant, not by the localised date text", async () => {
+    setup();
+    await screen.findByText("Please confirm you will attend your appointment.");
+    const items = within(
+      screen.getByRole("list", { name: "Recent activity" }),
+    ).getAllByRole("listitem");
+    // "Oct" sorts before "Sep" as text; the October release is the newer event.
+    expect(items[0]).toHaveTextContent("Potassium, serum");
+    expect(items[1]).toHaveTextContent("Echocardiogram");
   });
 
   it("renders in Spanish", async () => {

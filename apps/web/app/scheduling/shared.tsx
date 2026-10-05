@@ -677,6 +677,8 @@ export function Worklist<T>({
     else if (e.key === "End") next = last;
     if (next === null) return;
     e.preventDefault();
+    const item = items[next];
+    if (item) setPicked(keyOf(item));
     rowRefs.current[next]?.focus();
   }
 

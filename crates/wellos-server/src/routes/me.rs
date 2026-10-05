@@ -234,7 +234,7 @@ async fn home(
     allowed.record(&mut conn, &ctx, &state.cell).await?;
     let now = Utc::now();
 
-    let upcoming = home_appointments(
+    let mut upcoming = home_appointments(
         &mut conn,
         &g,
         "SELECT id FROM appointments
@@ -251,14 +251,61 @@ async fn home(
          ORDER BY starts_at DESC, id DESC LIMIT $3",
     )
     .await?;
-    let to_confirm: Vec<&Value> = upcoming
-        .iter()
-        .filter(|a| {
-            a["confirmation_required"].as_bool() == Some(true)
-                && a["patient_confirmed_at"].is_null()
-        })
-        .collect();
+    // Counts and the ranked action come from the whole record, not from the
+    // few rows the home lists: the sixth appointment still needs confirming.
+    let (upcoming_total, to_confirm_total): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*),
+                COUNT(*) FILTER (WHERE confirmation_required AND patient_confirmed_at IS NULL)
+         FROM appointments
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'confirmed' AND ends_at >= now()",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let first_to_confirm = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM appointments
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'confirmed' AND ends_at >= now()
+           AND confirmation_required AND patient_confirmed_at IS NULL
+         ORDER BY starts_at, id LIMIT 1",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    // The appointment to confirm is always among the listed ones so the
+    // action can be taken from the home itself.
+    if let Some(id) = first_to_confirm {
+        if !upcoming.iter().any(|a| a["id"] == json!(id)) {
+            let a = access::load_appointment_scoped(&mut conn, g.tenant_id, id).await?;
+            let mut v = scheduling::appointment_json(&a);
+            v["resources"] = access::appointment_resources(&mut *conn, a.id).await?;
+            let mut extra = vec![v];
+            scheduling::attach_scheduling_labels(&mut conn, g.tenant_id, &mut extra).await?;
+            upcoming.extend(extra);
+            upcoming.sort_by_key(|a| (starts_at(a), a["id"].as_str().map(str::to_owned)));
+        }
+    }
 
+    let (open_requests_total, options_ready_total): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'options_ready')
+         FROM access_requests
+         WHERE tenant_id = $1 AND patient_id = $2
+           AND status IN ('draft', 'submitted', 'needs_clinical_triage', 'options_ready')",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let first_options_ready = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM access_requests
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'options_ready'
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let request_ids = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM access_requests
          WHERE tenant_id = $1 AND patient_id = $2
@@ -275,10 +322,6 @@ async fn home(
         let r = access::load_request(&mut conn, g.tenant_id, id).await?;
         requests.push(access::request_json(&r));
     }
-    let options_ready = requests
-        .iter()
-        .filter(|r| r["status"] == "options_ready")
-        .count();
 
     let patient_ids = [g.patient_id];
     let unread = sqlx::query_scalar::<_, i64>(
@@ -317,14 +360,10 @@ async fn home(
     let next_appointment = upcoming.first();
     let soon = next_appointment
         .is_some_and(|a| starts_at(a).is_some_and(|t| t <= now + Duration::hours(PREPARE_HOURS)));
-    let next_action = if let Some(a) = to_confirm.first() {
-        json!({ "kind": "confirm_attendance", "appointment_id": a["id"] })
-    } else if options_ready > 0 {
-        let r = requests
-            .iter()
-            .find(|r| r["status"] == "options_ready")
-            .map(|r| r["id"].clone());
-        json!({ "kind": "review_options", "access_request_id": r })
+    let next_action = if let Some(id) = first_to_confirm {
+        json!({ "kind": "confirm_attendance", "appointment_id": id })
+    } else if let Some(id) = first_options_ready {
+        json!({ "kind": "review_options", "access_request_id": id })
     } else if new_results > 0 {
         json!({ "kind": "new_results", "count": new_results })
     } else if soon {
@@ -342,10 +381,10 @@ async fn home(
         "patient": { "given_name": g.patient_given_name, "family_name": g.patient_family_name },
         "next_action": next_action,
         "counts": {
-            "upcoming_appointments": upcoming.len(),
-            "to_confirm": to_confirm.len(),
-            "open_requests": requests.len(),
-            "options_ready": options_ready,
+            "upcoming_appointments": upcoming_total,
+            "to_confirm": to_confirm_total,
+            "open_requests": open_requests_total,
+            "options_ready": options_ready_total,
             "unread_notifications": unread,
             "new_results": new_results,
             "under_review": under_review,

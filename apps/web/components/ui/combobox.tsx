@@ -58,8 +58,14 @@ export function Combobox({
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const lastValue = useRef<ComboOption | null>(value);
   useEffect(() => {
-    setQuery(value?.label ?? "");
+    const prev = lastValue.current;
+    lastValue.current = value;
+    if (value) setQuery(value.label);
+    // A selection cleared from outside empties the field; one cleared
+    // because the user typed over it keeps what they typed.
+    else if (prev) setQuery((q) => (q === prev.label ? "" : q));
   }, [value]);
 
   const filtered = useMemo(() => {

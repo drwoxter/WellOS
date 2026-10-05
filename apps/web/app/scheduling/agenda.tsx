@@ -6,6 +6,7 @@ import { t, type Lang } from "@/lib/i18n";
 import {
   buildLanes,
   catalogName,
+  dayItems,
   dayRange,
   formatDay,
   formatTime,
@@ -412,11 +413,8 @@ export function Agenda({
                   }
                   days={days.map((dk) => {
                     const inMonth = dk.slice(0, 7) === day.slice(0, 7);
-                    const items: CalendarItem[] = d.lanes
-                      .flatMap((lane) => lane.items)
-                      .filter((i) => localDateKey(new Date(i.starts_at)) === dk)
-                      .sort((a, b) => a.starts_at.localeCompare(b.starts_at))
-                      .map((i) => ({
+                    const items: CalendarItem[] = dayItems(d.lanes, dk).map(
+                      (i) => ({
                         id: `${i.kind}-${i.id}`,
                         label: `${formatTime(lang, i.starts_at)} ${
                           i.service
@@ -430,7 +428,8 @@ export function Agenda({
                         onClick: onSelectItem
                           ? () => onSelectItem(i)
                           : undefined,
-                      }));
+                      }),
+                    );
                     return {
                       key: dk,
                       day: String(Number(dk.slice(8, 10))),

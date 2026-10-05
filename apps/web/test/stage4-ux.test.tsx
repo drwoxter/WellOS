@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import SchedulingPage from "@/app/scheduling/page";
@@ -181,6 +182,32 @@ describe("catalog combobox", () => {
     expect(options[0]).toHaveTextContent("Cardiology consultation");
     await user.keyboard("{Enter}");
     expect(onChange).toHaveBeenCalledWith("cardiology_consultation");
+  });
+
+  it("keeps the typed text when a selection is edited over", async () => {
+    const user = userEvent.setup();
+    function Stateful() {
+      const [code, setCode] = useState("");
+      return (
+        <CatalogCombobox
+          id="svc"
+          lang="en"
+          label="Service"
+          entries={entries}
+          value={code}
+          onChange={setCode}
+        />
+      );
+    }
+    render(<Stateful />);
+    const input = screen.getByRole("combobox", { name: "Service" });
+    await user.type(input, "cardio");
+    await user.keyboard("{Enter}");
+    expect(input).toHaveValue("Cardiology consultation");
+    await user.keyboard("{Backspace}");
+    expect(input).toHaveValue("Cardiology consultatio");
+    await user.keyboard("{Enter}");
+    expect(input).toHaveValue("Cardiology consultation");
   });
 
   it("matches synonyms and shows Spanish names", async () => {
@@ -462,7 +489,7 @@ describe("Worklist master-detail", () => {
     expect(screen.getByTestId("detail")).toHaveTextContent("Alpha detail");
   });
 
-  it("moves focus between rows with the arrow keys and wraps", async () => {
+  it("moves focus and the detail together with the arrow keys and wraps", async () => {
     const user = userEvent.setup();
     render(ui(items));
     const rows = within(
@@ -471,10 +498,14 @@ describe("Worklist master-detail", () => {
     rows[0].focus();
     await user.keyboard("{ArrowDown}");
     expect(rows[1]).toHaveFocus();
+    expect(rows[1]).toHaveAttribute("aria-current", "true");
+    expect(screen.getByTestId("detail")).toHaveTextContent("Beta detail");
     await user.keyboard("{End}");
     expect(rows[2]).toHaveFocus();
+    expect(screen.getByTestId("detail")).toHaveTextContent("Gamma detail");
     await user.keyboard("{ArrowDown}");
     expect(rows[0]).toHaveFocus();
+    expect(screen.getByTestId("detail")).toHaveTextContent("Alpha detail");
     await user.keyboard("{ArrowUp}");
     expect(rows[2]).toHaveFocus();
     await user.keyboard("{Enter}");

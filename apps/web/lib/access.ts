@@ -797,6 +797,26 @@ export type LaneItem = {
 export type Lane = { resource: SchedulableResource; items: LaneItem[] };
 
 /**
+ * Records of one local day across all lanes, each once even when it occupies
+ * several resources (lanes repeat a booking per resource; a month cell must
+ * not).
+ */
+export function dayItems(lanes: Lane[], dayKey: string): LaneItem[] {
+  const seen = new Set<string>();
+  const out: LaneItem[] = [];
+  for (const lane of lanes) {
+    for (const item of lane.items) {
+      const k = `${item.kind}-${item.id}`;
+      if (seen.has(k)) continue;
+      if (localDateKey(new Date(item.starts_at)) !== dayKey) continue;
+      seen.add(k);
+      out.push(item);
+    }
+  }
+  return out.sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+}
+
+/**
  * Group confirmed appointments and live offers/holds into one lane per
  * resource. A multi-resource booking appears in every lane it occupies.
  * Resources without items are kept so unfilled capacity stays visible.

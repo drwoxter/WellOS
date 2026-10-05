@@ -747,6 +747,63 @@ async fn representative_books_for_one_of_several_dependants() {
     assert_eq!(home_b["counts"]["upcoming_appointments"], 0, "{home_b}");
     assert_eq!(s(&home_b["next_action"]["kind"]), "none", "{home_b}");
 
+    // Counts and the next action cover the whole record, not only the five
+    // listed appointments: six more confirmed visits, the farthest one still
+    // to confirm, must be counted and surfaced from the home.
+    let base_to_confirm = home["counts"]["to_confirm"].as_i64().unwrap();
+    let extra: Vec<Uuid> = (0..6).map(|_| Uuid::now_v7()).collect();
+    for (i, id) in extra.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO appointments (id, tenant_id, facility_id, patient_id, service_code, status,
+                 starts_at, ends_at, time_zone, booked_via, booked_by, confirmation_required)
+             SELECT $1, tenant_id, facility_id, patient_id, service_code, 'confirmed',
+                 starts_at + make_interval(days => $2), ends_at + make_interval(days => $2),
+                 time_zone, booked_via, booked_by, $3
+             FROM appointments WHERE id = $4",
+        )
+        .bind(id)
+        .bind(30 + i as i32)
+        .bind(i == 5)
+        .bind(Uuid::parse_str(&aid).unwrap())
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    }
+    let (st, home) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/home?patient_id={child_a}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{home}");
+    assert_eq!(home["counts"]["upcoming_appointments"], 7, "{home}");
+    assert_eq!(home["counts"]["to_confirm"], base_to_confirm + 1, "{home}");
+    assert_eq!(
+        s(&home["next_action"]["kind"]),
+        "confirm_attendance",
+        "{home}"
+    );
+    let listed: Vec<String> = home["appointments"]["upcoming"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| s(&a["id"]))
+        .collect();
+    let action_id = s(&home["next_action"]["appointment_id"]);
+    assert!(listed.contains(&action_id), "{home}");
+    if base_to_confirm == 0 {
+        assert_eq!(action_id, extra[5].to_string(), "{home}");
+        assert_eq!(listed.len(), 6, "{home}");
+        assert_eq!(listed[5], extra[5].to_string(), "{home}");
+    }
+    sqlx::query("DELETE FROM appointments WHERE id = ANY($1)")
+        .bind(&extra)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
     // ICS export and history through /me.
     let (st, ics) = send(
         &state,

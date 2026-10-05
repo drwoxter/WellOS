@@ -21,7 +21,6 @@ import {
   explanationFor,
   orderStatusLabel,
   preparationFor,
-  valueText,
   type MyReleasedResult,
 } from "@/lib/diagnostics";
 import {
@@ -132,22 +131,26 @@ export default function PatientHomePage() {
     `${patientId}`,
     authenticated === true && selfService && patientId !== null,
   );
+  // Only the selected person's home is ever shown: while a switch is in
+  // flight the previous person's data stays out of the page.
+  const data =
+    home.data && home.data.patient_id === patientId ? home.data : null;
   const { busy, message, run } = useAction(lang);
   const L = (k: TKey) => t(lang, k);
 
   const explained = useMemo(
-    () => (home.data ? latestExplained(home.data.diagnostics.released) : null),
-    [home.data],
+    () => (data ? latestExplained(data.diagnostics.released) : null),
+    [data],
   );
   useDmindPageContext(
-    home.data
+    data
       ? {
           state: explained ? "ready" : "idle",
           items: explained
             ? [
                 {
                   id: explained.id,
-                  title: explained.display,
+                  title: explained.order_display,
                   sub: L("homeExplanationSource"),
                   href: "/my/diagnostics",
                   status: "approved",
@@ -242,19 +245,10 @@ export default function PatientHomePage() {
               </p>
             ) : null}
 
-            {home.loading && !home.data ? (
-              <Skeleton title lines={6} label={L("loading")} />
-            ) : home.error && !home.data ? (
-              <ErrorState
-                title={L("stateErrorTitle")}
-                description={home.error}
-                onRetry={home.reload}
-                retryLabel={L("retry")}
-              />
-            ) : home.data ? (
+            {data ? (
               <HomeBody
                 lang={lang}
-                home={home.data}
+                home={data}
                 explained={explained}
                 busy={busy}
                 onConfirm={(ap) =>
@@ -266,7 +260,16 @@ export default function PatientHomePage() {
                   }, "attendanceConfirmed")
                 }
               />
-            ) : null}
+            ) : home.error ? (
+              <ErrorState
+                title={L("stateErrorTitle")}
+                description={home.error}
+                onRetry={home.reload}
+                retryLabel={L("retry")}
+              />
+            ) : (
+              <Skeleton title lines={6} label={L("loading")} />
+            )}
           </>
         )}
       </div>
@@ -322,7 +325,7 @@ function HomeBody({
   newReleased.forEach((r) =>
     tasks.push({
       id: `result-${r.id}`,
-      title: `${L("homeTaskResult")} · ${r.display}`,
+      title: `${L("homeTaskResult")} · ${r.order_display}`,
       href: "/my/diagnostics",
       tone: "dmind",
     }),
@@ -336,9 +339,10 @@ function HomeBody({
     });
   }
 
-  const timeline: TimelineItem[] = [
+  const timeline: (TimelineItem & { at: string })[] = [
     ...home.appointments.recent.map((a) => ({
       id: `a-${a.id}`,
+      at: a.starts_at,
       when: formatDateTime(lang, a.starts_at),
       title: catalogName(lang, a.service, a.service_code),
       sub: `${appointmentStatusLabel(lang, a.status)}${
@@ -353,14 +357,15 @@ function HomeBody({
     })),
     ...released.map((r) => ({
       id: `r-${r.id}`,
+      at: r.released_at,
       when: formatDateTime(lang, r.released_at),
-      title: r.display,
+      title: r.order_display,
       sub: criticalityLabel(lang, r.criticality),
       tone: criticalityTone(r.criticality) as Tone,
       href: "/my/diagnostics",
     })),
   ]
-    .sort((a, b) => String(b.when).localeCompare(String(a.when)))
+    .sort((a, b) => b.at.localeCompare(a.at))
     .slice(0, 8);
 
   return (
@@ -528,7 +533,7 @@ function HomeBody({
                       key={r.id}
                       title={
                         <>
-                          {r.display}{" "}
+                          {r.order_display}{" "}
                           {isNewRelease(r) ? (
                             <Pill tone="teal" icon={false}>
                               {L("homeNewResult")}
@@ -537,7 +542,7 @@ function HomeBody({
                         </>
                       }
                       sub={`${formatDate(lang, r.released_at)}${
-                        r.value ? ` · ${valueText(lang, r.value)}` : ""
+                        r.conclusion ? ` · ${r.conclusion}` : ""
                       }`}
                       tone={criticalityTone(r.criticality) as Tone}
                       leading={
@@ -671,7 +676,7 @@ function HomeBody({
           {explained ? (
             <>
               <p className="home-explain-what">
-                <strong>{explained.display}</strong> ·{" "}
+                <strong>{explained.order_display}</strong> ·{" "}
                 {formatDate(lang, explained.released_at)}
               </p>
               <p>{explanationFor(lang, explained)}</p>

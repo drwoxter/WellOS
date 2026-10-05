@@ -430,21 +430,32 @@ pub async fn put_preferences(
             "the dashboard layout changed elsewhere; reload before saving",
         ));
     }
-    let row: (Value, i32, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+    // Two first saves can both pass the check above (there is no row to
+    // lock yet); the second insert then waits on the unique index and must
+    // only update when the row still carries the version the client saw.
+    let row: Option<(Value, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "INSERT INTO dashboard_preferences (tenant_id, user_id, layout, version)
          VALUES ($1, $2, $3, 1)
          ON CONFLICT (tenant_id, user_id) DO UPDATE
             SET layout = EXCLUDED.layout,
                 version = dashboard_preferences.version + 1,
                 updated_at = now()
+            WHERE dashboard_preferences.version = $4
          RETURNING layout, version, updated_at",
     )
     .bind(ctx.tenant_id)
     .bind(ctx.user_id)
     .bind(&layout)
-    .fetch_one(&mut *tx)
+    .bind(body.version)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(ApiError::internal)?;
+    let Some(row) = row else {
+        return Err(ApiError::conflict(
+            "layout_conflict",
+            "the dashboard layout changed elsewhere; reload before saving",
+        ));
+    };
     tx.commit().await.map_err(ApiError::internal)?;
     Ok(Json(preferences_json(Some(row))))
 }

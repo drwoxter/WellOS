@@ -15,7 +15,6 @@ import {
   orderStatusLabel,
   orderStatusTone,
   preparationFor,
-  valueText,
   type MyDiagnostics,
 } from "@/lib/diagnostics";
 import { PanelState, StatusBadge, useLoader } from "../../scheduling/shared";
@@ -211,7 +210,7 @@ export default function MyDiagnosticsPage() {
                             >
                               <div className="row-main">
                                 <div className="row-head">
-                                  <strong>{r.display}</strong>
+                                  <strong>{r.order_display}</strong>
                                   <StatusBadge
                                     label={criticalityLabel(
                                       lang,
@@ -227,18 +226,6 @@ export default function MyDiagnosticsPage() {
                                     ? ` · ${t(lang, "dxSampleTaken")} ${formatDate(lang, r.effective_at)}`
                                     : ""}
                                 </p>
-                                {r.value ? (
-                                  <p>
-                                    <strong>{valueText(lang, r.value)}</strong>
-                                    {r.reference_range ? (
-                                      <span className="muted">
-                                        {" "}
-                                        ({t(lang, "referenceRange")}:{" "}
-                                        {r.reference_range})
-                                      </span>
-                                    ) : null}
-                                  </p>
-                                ) : null}
                                 {r.conclusion ? <p>{r.conclusion}</p> : null}
                                 {explanation ? (
                                   <p

@@ -1933,6 +1933,14 @@ async fn critical_report_review_release_and_patient_privacy() {
     assert_eq!(st, StatusCode::OK, "{home}");
     let released = home["diagnostics"]["released"].as_array().unwrap();
     assert!(released.iter().any(|r| r["id"] == report["id"]), "{home}");
+    // The list form carries the order title and explanation only; component
+    // values belong to the single-report view.
+    assert!(
+        released.iter().all(|r| r["order_display"].is_string()
+            && r.get("display").is_none()
+            && r.get("value").is_none()),
+        "{home}"
+    );
     assert_eq!(home["counts"]["new_results"], released.len(), "{home}");
     assert_eq!(home["next_action"]["kind"], "new_results", "{home}");
     let text = home.to_string();
