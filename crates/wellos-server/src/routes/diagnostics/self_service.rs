@@ -135,6 +135,20 @@ pub async fn list(
     let (g, allowed) = scope(&state, &ctx, &mut conn, "diagnostic_result", q.patient_id).await?;
     allowed.record(&mut conn, &ctx, &state.cell).await?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let mut v = summary(&mut conn, &g, limit).await?;
+    v["relationship"] = json!(g.relationship);
+    Ok(Json(v))
+}
+
+/// The patient-visible diagnostics picture for one grant: released reports
+/// (current release decision only), orders whose report is still with the
+/// professionals (status only) and pending orders as scheduling facts. Shared
+/// by `/me/diagnostics` and the patient home so the release rules live once.
+pub(crate) async fn summary(
+    conn: &mut PgConnection,
+    g: &GrantRow,
+    limit: i64,
+) -> Result<Value, ApiError> {
     let releases = sqlx::query(&format!(
         "{RELEASE_SELECT} WHERE d.tenant_id = $1 AND d.patient_id = $2 AND d.decision = 'release'
            AND d.superseded_at IS NULL ORDER BY d.decided_at DESC, d.id DESC LIMIT $3"
@@ -147,13 +161,13 @@ pub async fn list(
     let mut released = Vec::with_capacity(releases.len());
     for rel in &releases {
         let r = load_report(
-            &mut conn,
+            &mut *conn,
             g.tenant_id,
             rel.get("diagnostic_report_id"),
             false,
         )
         .await?;
-        released.push(released_report_json(&mut conn, &r, rel, false).await?);
+        released.push(released_report_json(&mut *conn, &r, rel, false).await?);
     }
     // Completed orders whose report (first version or an update to one the
     // patient has already seen) is still with the professionals: visible as a
@@ -190,9 +204,8 @@ pub async fn list(
     .bind(limit)
     .fetch_all(&mut *conn)
     .await?;
-    Ok(Json(json!({
+    Ok(json!({
         "patient_id": g.patient_id,
-        "relationship": g.relationship,
         "released": released,
         "under_review": under_review.iter().map(|r| json!({
             "service_request_id": r.get::<Uuid, _>("service_request_id"),
@@ -214,7 +227,89 @@ pub async fn list(
             "preparation_en": r.get::<Option<String>, _>("preparation_en"),
             "preparation_es": r.get::<Option<String>, _>("preparation_es"),
         })).collect::<Vec<_>>(),
-    })))
+    }))
+}
+
+const MAX_TREND_SERIES: usize = 6;
+const MAX_TREND_POINTS: usize = 12;
+
+/// Numeric observations the patient is allowed to see — current, non-amended
+/// quantities of reports under a current release decision — grouped per
+/// analyte and unit. Only series with at least two points are returned, so
+/// the home never draws a "trend" from a single value.
+pub(crate) async fn released_trends(
+    conn: &mut PgConnection,
+    g: &GrantRow,
+) -> Result<Vec<Value>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT o.code_loinc, o.display, o.value_num, o.unit, o.reference_range, o.interpretation,
+                o.effective_at, o.diagnostic_report_id
+         FROM observations o
+         JOIN result_release_decisions d
+           ON d.diagnostic_report_id = o.diagnostic_report_id
+          AND d.decision = 'release' AND d.superseded_at IS NULL
+         WHERE d.tenant_id = $1 AND d.patient_id = $2
+           AND o.value_type = 'quantity' AND o.value_num IS NOT NULL
+           AND o.status <> 'amended-superseded'
+           AND NOT EXISTS (SELECT 1 FROM observations n WHERE n.amends = o.id)
+         ORDER BY o.code_loinc, o.unit, o.effective_at, o.id",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut series: Vec<(String, String, Option<String>, Vec<Value>)> = Vec::new();
+    for r in &rows {
+        let code: String = r.get("code_loinc");
+        let unit: String = r.get::<Option<String>, _>("unit").unwrap_or_default();
+        let display: Option<String> = r.get("display");
+        let point = json!({
+            "value": r.get::<rust_decimal::Decimal, _>("value_num"),
+            "unit": unit,
+            "reference_range": r.get::<Option<String>, _>("reference_range"),
+            "interpretation": r.get::<String, _>("interpretation"),
+            "effective_at": r.get::<DateTime<Utc>, _>("effective_at"),
+            "report_id": r.get::<Uuid, _>("diagnostic_report_id"),
+        });
+        match series.last_mut() {
+            Some((c, u, d, points)) if *c == code && *u == unit => {
+                if d.is_none() {
+                    *d = display;
+                }
+                points.push(point);
+            }
+            _ => series.push((code, unit, display, vec![point])),
+        }
+    }
+    let mut out: Vec<(DateTime<Utc>, Value)> = series
+        .into_iter()
+        .filter(|(_, _, _, points)| points.len() >= 2)
+        .map(|(code, unit, display, mut points)| {
+            if points.len() > MAX_TREND_POINTS {
+                points.drain(0..points.len() - MAX_TREND_POINTS);
+            }
+            let latest = points
+                .last()
+                .and_then(|p| p["effective_at"].as_str())
+                .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+                .unwrap_or_default();
+            (
+                latest,
+                json!({
+                    "code": code,
+                    "unit": unit,
+                    "display": display,
+                    "points": points,
+                }),
+            )
+        })
+        .collect();
+    out.sort_by_key(|a| std::cmp::Reverse(a.0));
+    Ok(out
+        .into_iter()
+        .take(MAX_TREND_SERIES)
+        .map(|(_, v)| v)
+        .collect())
 }
 
 async fn current_release(

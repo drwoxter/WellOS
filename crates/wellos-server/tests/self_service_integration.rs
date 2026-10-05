@@ -290,6 +290,23 @@ async fn self_service_identity_comes_only_from_an_active_grant() {
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    // The patient home follows the same rules: no grant, no home; naming a
+    // patient is not_found.
+    let (st, v) = call(&state, "GET", "/api/v1/me/home", &token, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(code(&v), "no_patient_grant");
+    let (st, v) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/home?patient_id={patient}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    // Staff accounts have no self-service identity at all.
+    let (st, v) = call(&state, "GET", "/api/v1/me/home", REG, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
 
     // Grants require staff verification with a note; the grantee must be a
     // representative account of the same tenant.
@@ -674,6 +691,62 @@ async fn representative_books_for_one_of_several_dependants() {
     assert_eq!(st, StatusCode::OK, "{list}");
     assert_eq!(list["items"].as_array().unwrap().len(), 0);
 
+    // The patient home is assembled from the same grant-scoped sources: child
+    // A's home shows the appointment and a deterministic next action, child
+    // B's home is honestly empty, and the home never carries staff-only data.
+    let (st, home) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/home?patient_id={child_a}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{home}");
+    assert_eq!(s(&home["patient_id"]), child_a);
+    assert_eq!(s(&home["appointments"]["upcoming"][0]["id"]), aid);
+    assert_eq!(home["counts"]["upcoming_appointments"], 1, "{home}");
+    assert!(
+        home["appointments"]["upcoming"][0]["service"].is_object(),
+        "{home}"
+    );
+    let kind = s(&home["next_action"]["kind"]);
+    if home["counts"]["to_confirm"] == 1 {
+        assert_eq!(kind, "confirm_attendance", "{home}");
+        assert_eq!(s(&home["next_action"]["appointment_id"]), aid);
+    } else {
+        assert!(
+            ["prepare_appointment", "read_notifications", "none"].contains(&kind.as_str()),
+            "{home}"
+        );
+    }
+    assert!(home["diagnostics"]["released"].is_array(), "{home}");
+    assert!(
+        home["trends"].as_array().unwrap().is_empty(),
+        "no released numeric results yet: {home}"
+    );
+    let text = home.to_string();
+    assert!(!text.contains("clinical_assessment"), "{home}");
+    let (st, home_b) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/home?patient_id={child_b}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{home_b}");
+    assert_eq!(s(&home_b["patient_id"]), child_b);
+    assert!(
+        home_b["appointments"]["upcoming"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{home_b}"
+    );
+    assert_eq!(home_b["counts"]["upcoming_appointments"], 0, "{home_b}");
+    assert_eq!(s(&home_b["next_action"]["kind"]), "none", "{home_b}");
+
     // ICS export and history through /me.
     let (st, ics) = send(
         &state,
@@ -713,6 +786,19 @@ async fn representative_books_for_one_of_several_dependants() {
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    let (st, v) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/home?patient_id={child_a}"),
+        &other_token,
+        None,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::NOT_FOUND,
+        "another grantee's dependant: {v}"
+    );
 
     // Cancel within policy from /me; the linked visit follows.
     let (st, cancelled) = call(
@@ -764,6 +850,24 @@ async fn representative_books_for_one_of_several_dependants() {
         ids(&past).contains(&aid),
         "cancelled missing from history: {past}"
     );
+    let (st, home) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/home?patient_id={child_a}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{home}");
+    assert!(
+        home["appointments"]["upcoming"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "cancelled still upcoming on the home: {home}"
+    );
+    assert_eq!(s(&home["appointments"]["recent"][0]["id"]), aid, "{home}");
+    assert_eq!(home["counts"]["to_confirm"], 0, "{home}");
 }
 
 #[tokio::test]

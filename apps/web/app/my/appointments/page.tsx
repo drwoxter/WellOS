@@ -722,6 +722,10 @@ export default function MyAppointmentsPage() {
   const me = useLoader(() => apiFetch<Me>(ME), "me", authenticated === true);
   const [patientId, setPatientId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("appointments");
+  useEffect(() => {
+    const wanted = new URLSearchParams(window.location.search).get("tab");
+    if (wanted && (TABS as string[]).includes(wanted)) setTab(wanted as Tab);
+  }, []);
   const [refreshKey, setRefreshKey] = useState(0);
   const [findSeed, setFindSeed] = useState<{
     key: number;

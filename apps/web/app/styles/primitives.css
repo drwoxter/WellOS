@@ -1476,3 +1476,73 @@ details.accordion .accordion-body {
     transform: none;
   }
 }
+
+/* ---------- Patient home ---------- */
+.patient-home {
+  display: grid;
+  gap: 1rem;
+}
+.patient-hero h1 {
+  font-size: clamp(1.5rem, 2.5vw, 2.1rem);
+  margin: 0.15rem 0 0.25rem;
+}
+.patient-hero .chips {
+  margin-top: 0.75rem;
+}
+.home-next .home-next-text {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0.25rem 0;
+}
+.home-grid {
+  gap: 1rem;
+}
+.home-appt-when {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+  color: var(--primary);
+  margin: 0;
+}
+.home-appt-what {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0.2rem 0;
+}
+.home-prep {
+  background: color-mix(in srgb, var(--amber-600) 8%, transparent);
+  border-left: 3px solid var(--amber-600);
+  border-radius: var(--r-sm);
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+}
+.home-requests {
+  margin-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+.home-under-review {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0;
+}
+.home-pending h3 {
+  font-size: 0.9rem;
+  margin: 0.75rem 0 0.25rem;
+  color: var(--muted);
+}
+.home-trends {
+  display: grid;
+  gap: 0.75rem;
+}
+.home-explain-what {
+  margin: 0 0 0.25rem;
+}
+@media (max-width: 760px) {
+  .home-grid > .card {
+    grid-column: span 12;
+  }
+}
