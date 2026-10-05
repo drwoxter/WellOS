@@ -124,20 +124,27 @@ async function dirtyNote() {
   return reason;
 }
 
-function topbarSignOut() {
+// Sign-out lives in the account menu; open it (if closed) within `root`.
+async function menuSignOut(root: HTMLElement) {
+  const menu = within(root).getByRole("button", { name: "Account menu" });
+  if (menu.getAttribute("aria-expanded") !== "true") {
+    await userEvent.setup().click(menu);
+  }
+  return within(root).getByRole("button", { name: "Sign out" });
+}
+
+async function topbarSignOut() {
   const topbar = document.querySelector(".topbar");
   if (!(topbar instanceof HTMLElement)) throw new Error("topbar missing");
-  return within(topbar).getByRole("button", { name: "Sign out" });
+  return menuSignOut(topbar);
 }
 
 function lastPush() {
   return pushSpy.mock.calls.at(-1)?.[0];
 }
 
-function headerSignOut() {
-  return within(screen.getByTestId("header")).getByRole("button", {
-    name: "Sign out",
-  });
+async function headerSignOut() {
+  return menuSignOut(screen.getByTestId("header"));
 }
 
 describe("sign-out with unsaved documentation", () => {
@@ -153,7 +160,7 @@ describe("sign-out with unsaved documentation", () => {
     const revocations = setup();
     const reason = await dirtyNote();
 
-    await userEvent.setup().click(topbarSignOut());
+    await userEvent.setup().click(await topbarSignOut());
     expect(confirmMock).toHaveBeenCalledWith(
       expect.stringMatching(/unsaved documentation/i),
     );
@@ -162,11 +169,11 @@ describe("sign-out with unsaved documentation", () => {
     expect(pushSpy).not.toHaveBeenCalled();
     expect(reason).toHaveValue("Chest pain");
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
-    expect(topbarSignOut()).toBeInTheDocument();
+    expect(await topbarSignOut()).toBeInTheDocument();
 
     // Accepting signs out once, then leaves without asking again.
     confirmMock.mockReturnValue(true);
-    await userEvent.setup().click(topbarSignOut());
+    await userEvent.setup().click(await topbarSignOut());
     await waitFor(() => expect(revocations).toHaveLength(1));
     await waitFor(() => expect(lastPush()).toBe("/"));
     expect(confirmMock).toHaveBeenCalledTimes(2);
@@ -178,7 +185,7 @@ describe("sign-out with unsaved documentation", () => {
     const revocations = setup();
     const reason = await dirtyNote();
 
-    await userEvent.setup().click(headerSignOut());
+    await userEvent.setup().click(await headerSignOut());
     expect(confirmMock).toHaveBeenCalledTimes(1);
     expect(revocations).toHaveLength(0);
     expect(pushSpy).not.toHaveBeenCalled();
@@ -186,7 +193,7 @@ describe("sign-out with unsaved documentation", () => {
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
 
     confirmMock.mockReturnValue(true);
-    await userEvent.setup().click(headerSignOut());
+    await userEvent.setup().click(await headerSignOut());
     await waitFor(() => expect(revocations).toHaveLength(1));
     await waitFor(() => expect(lastPush()).toBe("/"));
   });
@@ -199,7 +206,7 @@ describe("sign-out with unsaved documentation", () => {
     );
     await dirtyNote();
 
-    await userEvent.setup().click(topbarSignOut());
+    await userEvent.setup().click(await topbarSignOut());
     await waitFor(() => expect(revocations).toHaveLength(1));
     expect(pushSpy).not.toHaveBeenCalled();
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
@@ -236,7 +243,7 @@ describe("sign-out with unsaved documentation", () => {
     const revocations = setup();
     await screen.findByLabelText(/Reason for consultation/);
 
-    await userEvent.setup().click(topbarSignOut());
+    await userEvent.setup().click(await topbarSignOut());
     await waitFor(() => expect(revocations).toHaveLength(1));
     await waitFor(() => expect(lastPush()).toBe("/"));
     expect(confirmMock).not.toHaveBeenCalled();

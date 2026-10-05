@@ -144,11 +144,21 @@ describe("development demo login", () => {
   });
 
   it("redirects an already-authenticated visitor to the dashboard", async () => {
-    devServer((url) =>
-      url === "/api/session"
-        ? jsonResponse({ authenticated: true })
-        : undefined,
-    );
+    devServer((url) => {
+      if (url === "/api/session") return jsonResponse({ authenticated: true });
+      if (url === "/api/v1/meta/tenant") {
+        return jsonResponse({
+          tenant: { id: "t", name: "Demo Tenant", cell: "eu" },
+          user: {
+            username: "dr.garcia",
+            display_name: "Dr. García",
+            roles: ["physician"],
+          },
+          facilities: [],
+        });
+      }
+      return undefined;
+    });
     render(
       <SessionProvider>
         <SignInPage />
@@ -247,6 +257,9 @@ describe("production sign-in", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /temporarily unavailable/,
     );
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /sign in/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /sign in/i })).toBeNull();
   });
 });

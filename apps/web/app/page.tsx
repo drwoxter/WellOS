@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AppHeader } from "./chrome";
+import { AppHeader, BrandMark } from "./chrome";
+import { Icon } from "@/components/ui/icons";
 import { t } from "@/lib/i18n";
 import {
   fetchAuthProviders,
@@ -23,7 +24,13 @@ import { useSession } from "@/lib/session";
  * no client-side switch can enable them.
  */
 export default function SignInPage() {
-  const { lang, authenticated, signIn: sessionSignIn } = useSession();
+  const {
+    lang,
+    authenticated,
+    meta,
+    metaError,
+    signIn: sessionSignIn,
+  } = useSession();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [providers, setProviders] = useState<AuthProviders | null>(null);
@@ -54,11 +61,13 @@ export default function SignInPage() {
     };
   }, []);
 
-  // Redirect only visitors who arrived already authenticated; a role-card
-  // sign-in navigates to its own role-appropriate home instead.
+  // Redirect only visitors who arrived already authenticated, to their
+  // role-appropriate home once the workspace context is known.
   useEffect(() => {
-    if (authenticated && busy === null) router.replace("/dashboard");
-  }, [authenticated, busy, router]);
+    if (!authenticated || busy !== null) return;
+    if (meta) router.replace(homeForRoles(meta.user.roles));
+    else if (metaError) router.replace("/dashboard");
+  }, [authenticated, busy, meta, metaError, router]);
 
   async function signInAs(user: DevUser) {
     setBusy(user.username);
@@ -75,7 +84,28 @@ export default function SignInPage() {
   return (
     <>
       <AppHeader />
-      <main>
+      <main className="signin">
+        <section className="hero signin-hero" aria-labelledby="signin-tagline">
+          <p className="eyebrow">{t(lang, "appName")}</p>
+          <h1
+            id="signin-tagline"
+            style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}
+          >
+            <BrandMark /> {t(lang, "signInTagline")}
+          </h1>
+          <p className="hero-sub">{t(lang, "signInIntro")}</p>
+          <ul className="signin-pillars">
+            <li>
+              <Icon.Shield aria-hidden="true" /> {t(lang, "signInPillar1")}
+            </li>
+            <li>
+              <Icon.Sparkle aria-hidden="true" /> {t(lang, "signInPillar2")}
+            </li>
+            <li>
+              <Icon.Eye aria-hidden="true" /> {t(lang, "signInPillar3")}
+            </li>
+          </ul>
+        </section>
         <div className="card">
           <h2>{t(lang, "signIn")}</h2>
           {providersError ? (
@@ -91,7 +121,7 @@ export default function SignInPage() {
               <p className="muted">{t(lang, "oidcSignInHelp")}</p>
               <p>
                 <a
-                  className="primary"
+                  className="button primary"
                   href="/api/auth/oidc/login"
                   role="button"
                 >

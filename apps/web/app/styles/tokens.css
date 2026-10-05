@@ -1,0 +1,125 @@
+/* WellOS design tokens — Experience Reset v1.
+   Structure: deep navy/ink. Identity: teal/cyan. dMind: indigo/violet.
+   Positive: mint. Amber/red are reserved for warning and critical. */
+:root {
+  --ink-950: #07101d;
+  --ink-900: #0b1526;
+  --ink-800: #10203a;
+  --ink-700: #1b2f4d;
+  --ink-600: #2c4466;
+  --ink-200: #c3cedb;
+  --ink-100: #e2e8ef;
+
+  --teal-700: #0b6f7d;
+  --teal-600: #0f8a9b;
+  --teal-500: #15a3b5;
+  --teal-400: #3cc1cf;
+  --teal-200: #a9e3ea;
+  --teal-100: #d9f3f5;
+  --teal-50: #eefafb;
+
+  --indigo-700: #4a3fc0;
+  --indigo-600: #5b4fd6;
+  --indigo-500: #6d61e8;
+  --indigo-200: #c9c3f7;
+  --indigo-100: #e6e3fb;
+  --indigo-50: #f3f1fd;
+  --violet-400: #9b8cf7;
+
+  --mint-700: #146e4c;
+  --mint-600: #1c8f63;
+  --mint-100: #d8f5e6;
+  --mint-50: #ecfaf2;
+
+  --amber-700: #8a4b00;
+  --amber-600: #a05a00;
+  --amber-100: #fdefd3;
+  --amber-50: #fff7e8;
+
+  --red-700: #961b24;
+  --red-600: #b4232c;
+  --red-100: #fde3e3;
+  --red-50: #fff1f1;
+
+  --canvas: #f4f7fa;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --surface-3: #eef3f7;
+  --border: #dbe3ea;
+  --border-strong: #b9c6d2;
+  --fg: #13202e;
+  --fg-strong: #0b1526;
+  --muted: #5a6a78;
+  --muted-2: #7c8a96;
+
+  /* Legacy aliases used by existing route styles. */
+  --bg: var(--canvas);
+  --focus: var(--teal-600);
+  --danger-bg: var(--red-100);
+  --danger-fg: var(--red-700);
+  --ok-bg: var(--mint-100);
+  --ok-fg: var(--mint-700);
+  --warn-bg: var(--amber-100);
+  --warn-fg: var(--amber-700);
+  --neutral-bg: var(--surface-3);
+  --neutral-fg: #3c4c57;
+
+  --dmind: var(--indigo-600);
+  --dmind-soft: var(--indigo-100);
+  --dmind-fg: var(--indigo-700);
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-pill: 999px;
+
+  --shadow-1:
+    0 1px 2px rgba(16, 32, 58, 0.05), 0 1px 3px rgba(16, 32, 58, 0.07);
+  --shadow-2:
+    0 2px 4px rgba(16, 32, 58, 0.05), 0 10px 28px -14px rgba(16, 32, 58, 0.28);
+  --shadow-3: 0 18px 48px -18px rgba(16, 32, 58, 0.38);
+  --glow-teal:
+    0 0 0 1px rgba(21, 163, 181, 0.28),
+    0 8px 24px -14px rgba(21, 163, 181, 0.55);
+  --glow-dmind:
+    0 0 0 1px rgba(109, 97, 232, 0.3), 0 8px 24px -14px rgba(109, 97, 232, 0.6);
+
+  --dur-fast: 150ms;
+  --dur: 200ms;
+  --dur-slow: 250ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  --font-sans:
+    var(--font-inter, "Inter"), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --rail-w: 15.5rem;
+  --rail-w-collapsed: 4.25rem;
+  --topbar-h: 3.5rem;
+  --bottom-nav-h: 4rem;
+  --touch: 44px;
+}
+
+/* Tenant appearance: both keep the WellOS teal identity; "south" shifts the
+   accent to a deeper sea-green so facilities can tell their workspace apart. */
+html[data-theme="north"] {
+  --primary: var(--teal-600);
+  --primary-strong: var(--teal-700);
+  --primary-soft: var(--teal-100);
+  --primary-softer: var(--teal-50);
+  --primary-contrast: #ffffff;
+  --mesh-a: rgba(21, 163, 181, 0.18);
+  --mesh-b: rgba(109, 97, 232, 0.12);
+}
+
+html[data-theme="south"] {
+  --primary: #0d7f73;
+  --primary-strong: #0a6559;
+  --primary-soft: #d6f1ec;
+  --primary-softer: #ecf9f6;
+  --primary-contrast: #ffffff;
+  --mesh-a: rgba(13, 127, 115, 0.18);
+  --mesh-b: rgba(109, 97, 232, 0.12);
+}
