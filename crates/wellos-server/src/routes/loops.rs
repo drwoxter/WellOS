@@ -292,8 +292,9 @@ struct WorklistCursor {
 /// alert row version was visible in the MVCC snapshot (`$3`) and had not
 /// been closed at the snapshot instant (`$4`).
 const SNAP_PRIORITY_EXPR: &str = "CASE WHEN EXISTS (
-        SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
-        WHERE o.service_request_id = sr.id
+        SELECT 1 FROM alerts a LEFT JOIN observations o ON a.observation_id = o.id
+                 LEFT JOIN diagnostic_reports dr ON a.diagnostic_report_id = dr.id
+        WHERE COALESCE(o.service_request_id, dr.service_request_id) = sr.id
           AND pg_visible_in_snapshot(a.xmin::text::xid8, $3::pg_snapshot)
           AND (a.closed_at IS NULL OR a.closed_at > $4)
     ) THEN 1 ELSE 0 END";
@@ -429,8 +430,9 @@ pub async fn worklist(
         "SELECT sr.id, sr.display, sr.code_loinc, sr.loop_state, sr.version, sr.created_at,
                 p.family_name, p.given_name, p.identifier, p.facility_id,
                 {SNAP_PRIORITY_EXPR} AS snap_priority,
-                EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
-                        WHERE o.service_request_id = sr.id AND a.status = 'open') AS has_open_alert,
+                EXISTS (SELECT 1 FROM alerts a LEFT JOIN observations o ON a.observation_id = o.id
+                 LEFT JOIN diagnostic_reports dr ON a.diagnostic_report_id = dr.id
+                        WHERE COALESCE(o.service_request_id, dr.service_request_id) = sr.id AND a.status = 'open') AS has_open_alert,
                 EXISTS (SELECT 1 FROM encounters e
                         WHERE e.tenant_id = sr.tenant_id AND e.patient_id = p.id
                           AND e.practitioner_id = $2) AS has_relationship
@@ -448,8 +450,9 @@ pub async fn worklist(
     }
     if params.critical == Some(true) {
         sql.push_str(
-            " AND EXISTS (SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
-                          WHERE o.service_request_id = sr.id AND a.status = 'open')",
+            " AND EXISTS (SELECT 1 FROM alerts a LEFT JOIN observations o ON a.observation_id = o.id
+                 LEFT JOIN diagnostic_reports dr ON a.diagnostic_report_id = dr.id
+                          WHERE COALESCE(o.service_request_id, dr.service_request_id) = sr.id AND a.status = 'open')",
         );
     }
     if query_filter.is_some() {
@@ -574,8 +577,9 @@ pub async fn worklist_summary(
     let scope = facility_scope(&ctx, actions::WORKLIST_READ);
     const SUMMARY_SQL: &str = "SELECT
             COUNT(*) FILTER (WHERE sr.loop_state <> 'closed' AND EXISTS (
-                SELECT 1 FROM alerts a JOIN observations o ON a.observation_id = o.id
-                WHERE o.service_request_id = sr.id AND a.status = 'open')) AS critical_open,
+                SELECT 1 FROM alerts a LEFT JOIN observations o ON a.observation_id = o.id
+                 LEFT JOIN diagnostic_reports dr ON a.diagnostic_report_id = dr.id
+                WHERE COALESCE(o.service_request_id, dr.service_request_id) = sr.id AND a.status = 'open')) AS critical_open,
             COUNT(*) FILTER (WHERE sr.loop_state = 'received') AS awaiting_review,
             COUNT(*) FILTER (WHERE sr.loop_state = 'reviewed') AS awaiting_notification,
             COUNT(*) FILTER (WHERE sr.loop_state = 'notified') AS awaiting_closure,
@@ -675,7 +679,7 @@ pub async fn detail(
     });
 
     let observation_rows = sqlx::query(
-        "SELECT id, code_loinc, value_num::text AS value_num, unit, reference_range, status,
+        "SELECT id, code_loinc, COALESCE(value_num::text, value_code_display, value_code, value_bool::text, value_datetime::text, value_text, value_narrative) AS value_num, COALESCE(unit, '') AS unit, reference_range, status,
                 amends, source_system, effective_at, received_at
          FROM observations WHERE tenant_id=$1 AND service_request_id=$2 ORDER BY received_at",
     )
@@ -701,7 +705,7 @@ pub async fn detail(
             json!({
                 "id": obs_id,
                 "code_loinc": r.get::<String,_>("code_loinc"),
-                "value": r.get::<String,_>("value_num"),
+                "value": r.get::<Option<String>,_>("value_num").unwrap_or_default(),
                 "unit": r.get::<String,_>("unit"),
                 "reference_range": r.get::<Option<String>,_>("reference_range"),
                 "status": status,
@@ -790,8 +794,10 @@ pub async fn detail(
 
     let alerts = sqlx::query(
         "SELECT a.id, a.severity, a.message, a.status, a.created_at
-         FROM alerts a JOIN observations o ON o.id = a.observation_id
-         WHERE a.tenant_id=$1 AND o.service_request_id=$2 ORDER BY a.created_at",
+         FROM alerts a LEFT JOIN observations o ON o.id = a.observation_id
+         LEFT JOIN diagnostic_reports dr ON dr.id = a.diagnostic_report_id
+         WHERE a.tenant_id=$1 AND COALESCE(o.service_request_id, dr.service_request_id)=$2
+         ORDER BY a.created_at",
     )
     .bind(sr.tenant_id)
     .bind(id)

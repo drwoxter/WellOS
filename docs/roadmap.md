@@ -213,6 +213,39 @@ keyboard, accessibility, 390px and Spanish coverage. Hazards H-23–H-33
 recorded. Not clinically validated; ranking and forecast quality are
 unmeasured on real populations.
 
+dMind Clinical Orders & Diagnostics v1 — the staff-created "scheduled
+visit" approximation and the potassium/glucose-only loop replaced by a
+general diagnostic pathway (`docs/architecture/dmind-clinical-diagnostics.md`):
+migration `0016` with order groups, versioned orders, state history,
+fulfilment modes, appointment links, persisted safety evaluations,
+specimens and custody, typed report components, report version chains,
+reviews, release decisions, documents and imaging references (legacy
+service requests migrated once, verified by a real 0015→0016 upgrade
+gate); runtime `diagnostic_orderable` catalog (EN/ES, synonyms, codings,
+panels, specimen, preparation, scheduling mapping, safety rules, history)
+searched server-side; `diagnostic-safety.v1` preflight (duplicates,
+prerequisites, contraindications, timing, redundancy, fulfilment) with
+acknowledged warnings, authorised reasoned hard-stop overrides and
+confirmation bound to the exact evaluation (`409` when stale); explicit
+order state machine with hold/resume, scheduling through dMind Access or
+recorded immediate/inpatient/bedside/walk-in fulfilment and surfaced
+order/appointment conflicts; three governed dMind operations
+(`diagnostic-order-suggestion`, `diagnostic-result-synthesis`,
+`patient-result-explanation`) bounded to server-supplied candidates and
+facts, bound to exact versions and deterministic when AI is disabled or
+degraded; deterministic criticality, professional review bound to the
+report version, explicit clinician release/withhold with bilingual patient
+explanation and notification only inside the release transaction;
+ObjectStore (`disabled|fixture|s3`) documents and imaging references; FHIR
+R4 subset (`ServiceRequest`, `Specimen`, `Observation`, `DiagnosticReport`,
+`DocumentReference`, `ImagingStudy`) with idempotent inbound
+`DiagnosticReport`; `/diagnostics` worklists, order detail, report
+review/release, catalog administration, consultation and Patient 360
+composer, `/my/diagnostics`; integration, upgrade, component and Playwright
+coverage incl. Spanish, keyboard, accessibility and 390 px. Hazards
+H-34–H-42 recorded. Not clinically validated: safety rules and criticality
+thresholds are synthetic fixtures requiring clinical sign-off.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
@@ -237,8 +270,9 @@ unmeasured on real populations.
    scenarios beyond the golden clinician path now covered.
 8. **Observability**: OpenTelemetry traces/metrics with PHI-free attribute
    linting, dashboards for loop latency and overdue counts.
-9. **Object storage abstraction** (S3-compatible) for large artifacts, with
-   per-tenant encryption context.
+9. **Object storage hardening**: integrated malware scanning, retention
+   and legal-hold policies and bucket-policy guidance on top of the
+   `disabled|fixture|s3` ObjectStore delivered with Diagnostics v1.
 10. **Live-provider validation and evaluation**: smoke-test the existing
    `openai_compatible` adapters against a vendor with synthetic patients
    (procedure in `docs/architecture/ai-native-platform.md`), then add a

@@ -299,7 +299,7 @@ pub(crate) async fn chart_payload(
     let observations = sqlx::query(
         // Observation rows are append-only: supersession is derived from
         // the amendment relationship rather than a mutated status.
-        "SELECT id, code_loinc, value_num::text AS value_num, unit, status, effective_at,
+        "SELECT id, code_loinc, COALESCE(value_num::text, value_code_display, value_code, value_bool::text, value_datetime::text, value_text, value_narrative) AS value_num, COALESCE(unit, '') AS unit, status, effective_at,
                 EXISTS(SELECT 1 FROM observations o2
                        WHERE o2.tenant_id = observations.tenant_id AND o2.amends = observations.id)
                     AS superseded
@@ -315,7 +315,7 @@ pub(crate) async fn chart_payload(
         json!({
             "id": r.get::<Uuid,_>("id"),
             "code_loinc": r.get::<String,_>("code_loinc"),
-            "value": r.get::<String,_>("value_num"),
+            "value": r.get::<Option<String>,_>("value_num").unwrap_or_default(),
             "unit": r.get::<String,_>("unit"),
             "status": if r.get::<bool,_>("superseded") {
                 "amended-superseded".to_string()
@@ -413,7 +413,7 @@ pub(crate) async fn chart_payload(
     .collect::<Vec<_>>();
 
     let alerts = sqlx::query(
-        "SELECT id, observation_id, severity, message, created_at FROM alerts
+        "SELECT id, observation_id, diagnostic_report_id, severity, message, created_at FROM alerts
          WHERE tenant_id=$1 AND patient_id=$2 AND status='open' ORDER BY created_at DESC",
     )
     .bind(ctx.tenant_id)
@@ -424,7 +424,8 @@ pub(crate) async fn chart_payload(
     .map(|r| {
         json!({
             "id": r.get::<Uuid,_>("id"),
-            "observation_id": r.get::<Uuid,_>("observation_id"),
+            "observation_id": r.get::<Option<Uuid>,_>("observation_id"),
+            "diagnostic_report_id": r.get::<Option<Uuid>,_>("diagnostic_report_id"),
             "severity": r.get::<String,_>("severity"),
             "message": r.get::<String,_>("message"),
             "created_at": r.get::<chrono::DateTime<chrono::Utc>,_>("created_at"),

@@ -117,6 +117,17 @@
   closed in staging/production without one, and live positions are purged
   after their TTL.
 
+- **B7 Object storage**: diagnostic documents are written and read only
+  through the server's `ObjectStore` (`disabled|fixture|s3`); the browser
+  receives short-lived, single-object URLs (≤ 900 s) after authorization
+  and only for uploads verified `clean`, never bucket credentials or listing rights. Imaging
+  rows carry study/series references only. `fixture` storage exists only
+  in development/test builds and is refused in staging/production.
+- **B8 Inbound diagnostic interfaces**: `POST /fhir/r4/DiagnosticReport`
+  from a scoped service credential is validated, idempotent and mapped to
+  typed components; it can create a reviewable report but never a review,
+  release or patient notification.
+
 ## Data classes
 
 | Class | Examples | Handling |

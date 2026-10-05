@@ -329,6 +329,31 @@ Invoke-RestMethod "http://127.0.0.1:8080/api/v1/patients/$patientId/risk/project
   -Headers @{ Authorization = 'Bearer dev-admin.silva'; 'X-Purpose-Of-Use' = 'operations' }
 ```
 
+### Clinical orders and diagnostics demo (clinician → laboratory → patient)
+
+1. As **Dr. García** resume Alba Demopatient's consultation (SYN-0001):
+   the **Diagnostic orders** composer searches the server catalog, optionally
+   asks dMind for suggestions (only catalog candidates can be suggested),
+   runs the deterministic safety check (`diagnostic-safety.v1`) and places
+   the orders only after every warning is acknowledged and you confirm.
+   Jonás Demopatient's pacemaker shows an MRI hard stop that needs an
+   authorised, reasoned override.
+2. `/diagnostics` lists orders (hold, resume, accept, start, complete,
+   schedule through dMind Access, specimens with custody, documents,
+   typed result entry) and **Reports to review**; critical reports stay
+   there until a professional review bound to that report version exists.
+3. On a report, record the review, optionally request a dMind synthesis
+   draft, then take the explicit **release / withhold** decision with a
+   bilingual patient explanation. Nothing is released or notified
+   automatically; amendments and corrections reopen review and release.
+4. As **Carla Silva** add a runtime orderable on `/diagnostics/catalog`
+   (no deployment); as **rep.alba** open `/my/diagnostics` to see pending
+   tests, "under review" items without values and released results with the
+   approved explanation.
+
+See `docs/architecture/dmind-clinical-diagnostics.md` for the data model,
+state machines, safety engine, dMind operations, release rules and non-goals.
+
 ## Tests
 
 ```bash

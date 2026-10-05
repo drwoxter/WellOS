@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import type { SchedulingCapabilities } from "./access";
+import type { DiagnosticsCapabilities } from "./diagnostics";
 import type { AiCapabilities } from "./capabilities";
 import { installHistoryIndex } from "./history-index";
 import type { Lang } from "./i18n";
@@ -33,6 +34,7 @@ export type TenantMeta = {
   /** Trusted per-capability AI availability reported by the server. */
   ai_capabilities?: AiCapabilities;
   scheduling_capabilities?: SchedulingCapabilities;
+  diagnostics_capabilities?: DiagnosticsCapabilities;
 };
 
 type Session = {

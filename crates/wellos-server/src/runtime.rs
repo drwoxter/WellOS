@@ -238,6 +238,7 @@ pub struct RuntimeConfig {
     pub ai_quotas: AiQuotas,
     pub notifications: NotificationConfig,
     pub location: LocationConfig,
+    pub object_store: crate::objectstore::ObjectStoreConfig,
 }
 
 impl RuntimeConfig {
@@ -289,6 +290,7 @@ impl RuntimeConfig {
         };
         let notifications = notification_config_from_env(env)?;
         let location = location_config_from_env(env)?;
+        let object_store = crate::objectstore::ObjectStoreConfig::from_env(env)?;
         Ok(Self {
             env,
             cell,
@@ -300,6 +302,7 @@ impl RuntimeConfig {
             ai_quotas,
             notifications,
             location,
+            object_store,
         })
     }
 
@@ -332,6 +335,7 @@ impl RuntimeConfig {
                 keyring: Some(crate::crypto::Keyring::synthetic("test-fixtures")),
                 live_location_ttl: Duration::from_secs(15 * 60),
             },
+            object_store: crate::objectstore::ObjectStoreConfig::fixture(),
         }
     }
 

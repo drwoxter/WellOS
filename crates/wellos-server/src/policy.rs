@@ -117,6 +117,26 @@ pub mod actions {
     pub const CAPACITY_REVIEW: &str = "capacity.review";
     /// Read and mark one's own in-app notifications.
     pub const NOTIFICATION_READ: &str = "notification.read";
+    /// Compose, confirm, place and cancel diagnostic orders from a
+    /// consultation (the accountable ordering clinician).
+    pub const DIAGNOSTIC_ORDER_MANAGE: &str = "diagnostic_order.manage";
+    /// Authorized reasoned override of a deterministic safety hard stop.
+    pub const DIAGNOSTIC_SAFETY_OVERRIDE: &str = "diagnostic_safety.override";
+    /// Read diagnostic orders, worklists, specimens and reports.
+    pub const DIAGNOSTIC_READ: &str = "diagnostic.read";
+    /// Fulfilment transitions: accept, schedule, start, complete, hold,
+    /// reject, record acquisition status.
+    pub const DIAGNOSTIC_FULFIL: &str = "diagnostic.fulfil";
+    /// Specimen collection, custody events, rejection and recollection.
+    pub const SPECIMEN_HANDLE: &str = "specimen.handle";
+    /// Author, sign, amend and correct diagnostic reports and their
+    /// structured results; register documents and imaging references.
+    pub const DIAGNOSTIC_REPORT_WRITE: &str = "diagnostic_report.write";
+    /// Professional review of a final/amended/corrected report.
+    pub const DIAGNOSTIC_REVIEW: &str = "diagnostic_report.review";
+    /// Clinician decision to release (or withhold) a reviewed report and its
+    /// approved explanation to the patient.
+    pub const DIAGNOSTIC_RELEASE: &str = "diagnostic_result.release";
 
     pub const ALL: &[&str] = &[
         PATIENT_REGISTER,
@@ -159,6 +179,14 @@ pub mod actions {
         TRANSPORT_COORDINATE,
         CAPACITY_REVIEW,
         NOTIFICATION_READ,
+        DIAGNOSTIC_ORDER_MANAGE,
+        DIAGNOSTIC_SAFETY_OVERRIDE,
+        DIAGNOSTIC_READ,
+        DIAGNOSTIC_FULFIL,
+        SPECIMEN_HANDLE,
+        DIAGNOSTIC_REPORT_WRITE,
+        DIAGNOSTIC_REVIEW,
+        DIAGNOSTIC_RELEASE,
     ];
 
     /// Whether `s` names a known action (used to validate service scopes).
@@ -210,6 +238,16 @@ pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
             Purpose::Emergency,
         ],
         RESULT_INGEST => &[Purpose::Treatment, Purpose::Operations],
+        // Ordering, overriding a safety stop, reviewing and releasing results
+        // are clinical decisions: treatment context only.
+        DIAGNOSTIC_ORDER_MANAGE
+        | DIAGNOSTIC_SAFETY_OVERRIDE
+        | DIAGNOSTIC_REVIEW
+        | DIAGNOSTIC_RELEASE => &[Purpose::Treatment],
+        DIAGNOSTIC_FULFIL | SPECIMEN_HANDLE | DIAGNOSTIC_REPORT_WRITE => {
+            &[Purpose::Treatment, Purpose::Operations]
+        }
+        DIAGNOSTIC_READ => &[Purpose::Treatment, Purpose::Operations, Purpose::Quality],
         AUDIT_READ => &[Purpose::Operations, Purpose::Quality],
         CONSENT_WRITE => &[Purpose::Treatment, Purpose::Operations],
         WORKLIST_READ => &[Purpose::Treatment, Purpose::Operations, Purpose::Quality],
@@ -248,6 +286,12 @@ pub mod roles {
     pub const BREAK_GLASS_AUTHORIZED: &str = "break_glass_authorized";
     /// Transport personnel and dispatch: logistics only, no chart access.
     pub const TRANSPORT_COORDINATOR: &str = "transport_coordinator";
+    /// Diagnostic performing professionals (radiology, cardiology,
+    /// pathology, dentistry, endoscopy technologists and reporting
+    /// specialists): fulfil orders, handle specimens, author and sign
+    /// reports in their facility. Never order, review for the patient or
+    /// release results.
+    pub const DIAGNOSTIC_PROFESSIONAL: &str = "diagnostic_professional";
     pub const ALL: &[&str] = &[
         REGISTRATION,
         PHYSICIAN,
@@ -264,6 +308,7 @@ pub mod roles {
         INSURER_INTEGRATION,
         BREAK_GLASS_AUTHORIZED,
         TRANSPORT_COORDINATOR,
+        DIAGNOSTIC_PROFESSIONAL,
     ];
 }
 
@@ -313,6 +358,13 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             CATALOG_READ,
             SCHEDULING_READ,
             NOTIFICATION_READ,
+            DIAGNOSTIC_ORDER_MANAGE,
+            DIAGNOSTIC_SAFETY_OVERRIDE,
+            DIAGNOSTIC_READ,
+            DIAGNOSTIC_FULFIL,
+            DIAGNOSTIC_REPORT_WRITE,
+            DIAGNOSTIC_REVIEW,
+            DIAGNOSTIC_RELEASE,
         ],
         // Nurses have no PATIENT_NOTIFY grant: result notification requires
         // the encounter-based care relationship, and encounters name a single
@@ -336,8 +388,31 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             SCHEDULING_MANAGE,
             WAITLIST_MANAGE,
             NOTIFICATION_READ,
+            DIAGNOSTIC_READ,
+            DIAGNOSTIC_FULFIL,
+            SPECIMEN_HANDLE,
         ],
-        LAB => &[RESULT_INGEST, WORKLIST_READ, TENANT_META_READ, CATALOG_READ],
+        LAB => &[
+            RESULT_INGEST,
+            WORKLIST_READ,
+            TENANT_META_READ,
+            CATALOG_READ,
+            DIAGNOSTIC_READ,
+            DIAGNOSTIC_FULFIL,
+            SPECIMEN_HANDLE,
+            DIAGNOSTIC_REPORT_WRITE,
+        ],
+        DIAGNOSTIC_PROFESSIONAL => &[
+            WORKLIST_READ,
+            TENANT_META_READ,
+            CATALOG_READ,
+            SCHEDULING_READ,
+            NOTIFICATION_READ,
+            DIAGNOSTIC_READ,
+            DIAGNOSTIC_FULFIL,
+            SPECIMEN_HANDLE,
+            DIAGNOSTIC_REPORT_WRITE,
+        ],
         // Pharmacists read risk (medication/allergy safety domain) but the
         // review actions stay with the responsible clinical professional.
         PHARMACIST => &[
@@ -371,6 +446,7 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             TRANSPORT_COORDINATE,
             CAPACITY_REVIEW,
             NOTIFICATION_READ,
+            DIAGNOSTIC_READ,
         ],
         PRIVACY_OFFICER => &[
             AUDIT_READ,
@@ -407,7 +483,9 @@ pub fn role_allows(role: &str, action: &str) -> bool {
         ],
         // dMind generates suggestions only; it never writes clinical results.
         DMIND_SERVICE => &[],
-        LAB_INTERFACE => &[RESULT_INGEST],
+        // Interface agents deliver results and reports from source systems;
+        // they never review, release or order.
+        LAB_INTERFACE => &[RESULT_INGEST, DIAGNOSTIC_REPORT_WRITE],
         INSURER_INTEGRATION => &[RISK_PROJECTION_READ],
         BREAK_GLASS_AUTHORIZED => &[],
         _ => &[],

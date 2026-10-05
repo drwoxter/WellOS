@@ -3,7 +3,7 @@
 # Synthetic fixture mode (development/test only). Every fixture-dependent
 # target sets these explicitly; nothing here is inherited by `make server`.
 FIXTURE_ENV := WELLOS_ENV=test WELLOS_ALLOW_SYNTHETIC_SEED=true \
-	DMIND_MODEL_PROVIDER=fake WELLOS_SCRIBE_PROVIDER=fake
+	DMIND_MODEL_PROVIDER=fake WELLOS_SCRIBE_PROVIDER=fake WELLOS_OBJECT_STORE=fixture
 
 help:
 	@grep -E '^[a-z-]+:' Makefile | sed 's/:.*//'

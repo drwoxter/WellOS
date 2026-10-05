@@ -111,6 +111,7 @@ struct Series {
     latest_value: Option<Decimal>,
     latest_range: Option<String>,
     pending: Vec<Value>,
+    pending_refs: Vec<String>,
 }
 
 impl Series {
@@ -125,6 +126,7 @@ impl Series {
             latest_value: None,
             latest_range: None,
             pending: Vec::new(),
+            pending_refs: Vec::new(),
         }
     }
 }
@@ -167,7 +169,7 @@ pub(crate) async fn diagnostic_history(
                         WHERE re.observation_id = o.id
                           AND re.outcome->>'outcome' = 'critical') AS critical
          FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
-         WHERE o.tenant_id = $1 AND o.patient_id = $2
+         WHERE o.tenant_id = $1 AND o.patient_id = $2 AND o.value_num IS NOT NULL
          ORDER BY o.effective_at ASC, o.received_at ASC, o.id ASC",
     )
     .bind(tenant_id)
@@ -252,6 +254,9 @@ pub(crate) async fn diagnostic_history(
         let entry = groups
             .entry(code)
             .or_insert_with(|| Series::new(r.get("display"), String::new()));
+        entry
+            .pending_refs
+            .push(format!("service_request:{}", r.get::<Uuid, _>("id")));
         entry.pending.push(json!({
             "id": r.get::<Uuid,_>("id"),
             "display": r.get::<String,_>("display"),
@@ -281,6 +286,7 @@ pub(crate) async fn diagnostic_history(
             result_count: s.values.len() + s.incomparable,
             incomparable_count: s.incomparable,
             pending_count: s.pending.len(),
+            pending_refs: s.pending_refs.clone(),
         });
         tests.push(json!({
             "code": code,
@@ -430,7 +436,7 @@ async fn recent_abnormal(
                             WHERE re.observation_id = o.id
                               AND re.outcome->>'outcome' = 'critical') AS critical
              FROM observations o JOIN service_requests sr ON sr.id = o.service_request_id
-             WHERE o.tenant_id = $1 AND o.patient_id = $2
+             WHERE o.tenant_id = $1 AND o.patient_id = $2 AND o.value_num IS NOT NULL
                AND NOT EXISTS (SELECT 1 FROM observations x WHERE x.amends = o.id)
                AND ($3::timestamptz IS NULL OR (o.effective_at, o.id) < ($3, $4::uuid))
              ORDER BY o.effective_at DESC, o.id DESC LIMIT $5",

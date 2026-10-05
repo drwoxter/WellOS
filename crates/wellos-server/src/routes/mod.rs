@@ -9,6 +9,7 @@ pub mod creds;
 pub mod dashboard;
 #[cfg(feature = "dev-fixtures")]
 pub mod dev;
+pub mod diagnostics;
 pub mod encounter_docs;
 pub mod encounters;
 pub mod extract;
@@ -204,6 +205,7 @@ pub fn router(state: AppState) -> Router {
             post(admin::escalate_overdue),
         )
         .merge(access_admin_routes())
+        .merge(diagnostics::routes())
         .nest("/api/v1", access::routes())
         .nest("/api/v1", me::routes())
         .nest("/api/v1", waitlist::routes())
@@ -221,6 +223,20 @@ pub fn router(state: AppState) -> Router {
         .route("/fhir/r4/Patient/:id", get(fhir::patient))
         .route("/fhir/r4/Observation/:id", get(fhir::observation))
         .route("/fhir/r4/ServiceRequest/:id", get(fhir::service_request))
+        .route("/fhir/r4/Specimen/:id", get(fhir::specimen))
+        .route(
+            "/fhir/r4/DiagnosticReport",
+            post(fhir::ingest_diagnostic_report),
+        )
+        .route(
+            "/fhir/r4/DiagnosticReport/:id",
+            get(fhir::diagnostic_report),
+        )
+        .route(
+            "/fhir/r4/DocumentReference/:id",
+            get(fhir::document_reference),
+        )
+        .route("/fhir/r4/ImagingStudy/:id", get(fhir::imaging_study))
         .layer(cors_layer());
     // Defense-in-depth response headers for the API surface. The API is
     // JSON-only, so a restrictive CSP with frame protection is safe

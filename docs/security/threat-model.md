@@ -79,6 +79,21 @@ dead-letter, transport without consent or without an encryption key in a
 deployed environment (refused), emergency transport without a human
 coordinator (refused), malformed/oversized ICS (bounded, nothing stored).
 
+## dMind Clinical Diagnostics (orders, specimens, reports, release, documents)
+
+Additional boundaries introduced by Diagnostics v1 (see
+`docs/architecture/dmind-clinical-diagnostics.md` and hazards H-34 to H-42):
+
+| Threat | Vector | Mitigations (implemented) | Planned |
+| --- | --- | --- | --- |
+| Spoofing an ordering or releasing professional | Service token or AI output creating, confirming or releasing | Orders, reviews and releases require a human principal with the specific permission inside the practitioner's own active encounter or care relationship; dMind operations have no write path to orders, reports, releases or notifications; inbound FHIR needs a scoped service credential and can only create reports in a reviewable, unreleased state | — |
+| Tampering with the safety check | Replaying an old evaluation; editing the composition after preflight; client-side acknowledgement | Evaluations are persisted server-side with `input_hash`; confirmation is rejected (`409 stale_safety_evaluation`) when the composition, facts or catalog changed; acknowledgements and override reasons are recorded with the actor; the UI state is never trusted | — |
+| Tampering with results | Overwriting components; silent correction; AI rewriting values | Components are append-only with provenance; corrections create a new report version that `replaces` the old one and reopens review/release; synthesis drafts cannot change values or lower criticality and are superseded by a new version | — |
+| Information disclosure (documents, imaging, results) | Predictable object keys; long-lived URLs; patient reading unreleased values; cross-facility reads | Per-download authorization, short-lived URLs (≤ 900 s) only for documents verified `clean`, `fixture` storage refused outside dev/test builds; `/me/diagnostics` derives patients from active grants and returns "under review" without values until an explicit release; facility and tenant scoping on every list and detail (`tenant_facility_and_role_isolation`) | Integrated malware scanning; S3 bucket policies are deployment concerns |
+| Repudiation | Who ordered, overrode, reviewed, released | Every transition, override, review and release decision is audited in the same transaction with actor, reason and bound version | Tamper-evident audit chain planned |
+| Denial of service | Oversized uploads; FHIR bundles; catalog searches | `WELLOS_OBJECT_MAX_BYTES`; the server's default request body limit on inbound FHIR; catalog search limit and existing rate-limit families; bounded dMind candidate and fact sets | — |
+| Elevation of privilege | Catalog membership as permission; specimen role writing reports; representative seeing clinical detail | Functional permissions (`diagnostic_order.manage`, `diagnostic_safety.override`, `diagnostic.read`, `diagnostic.fulfil`, `specimen.handle`, `diagnostic_report.write`, `diagnostic_report.review`, `diagnostic_result.release`, `catalog.manage`); `patient_representative` has only self-service read of released material | — |
+
 ## Residual risk: rate limiting
 
 Fixed windows allow a boundary burst of up to twice the per-minute limit.
@@ -107,6 +122,15 @@ location purge and notification delivery depend on the scheduling worker
 being alive (runbook alert). Delivery receipts from e-mail providers are not
 consumed. Representative verification is a staff process outside the
 system. Key custody for location encryption is a deployment concern.
+
+## Residual risk: dMind Clinical Diagnostics
+
+Safety rules and criticality thresholds are tenant data shipped as synthetic
+fixtures and are not clinically validated. Document scanning is a status
+hook without an integrated scanner. There is no on-call escalation for
+unreviewed critical reports beyond the deterministic overdue job. Patient
+identification at specimen collection relies on staff process (no barcode
+scanning).
 
 ## Assumptions
 

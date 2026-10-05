@@ -522,6 +522,16 @@ pub fn render(kind: &str, language: &str, time_zone: &str, payload: &Value) -> (
         ("waitlist_offer_expired", true) => ("Oferta de lista de espera caducada", format!("La oferta de {service} para el {when} ha caducado. Sigue en la lista de espera.")),
         ("transport_status", false) => ("Transport update", format!("Your transport status is now '{}'.", payload.get("status").and_then(|v| v.as_str()).unwrap_or(""))),
         ("transport_status", true) => ("Actualización de transporte", format!("El estado de su transporte ahora es '{}'.", payload.get("status").and_then(|v| v.as_str()).unwrap_or(""))),
+        // Diagnostic notifications carry identifiers only: results, conclusions
+        // and explanations are read inside the authenticated application.
+        ("diagnostic_result_released", false) => ("A result is available", "A clinician has released a diagnostic result to you. Sign in to My results to read it.".to_string()),
+        ("diagnostic_result_released", true) => ("Hay un resultado disponible", "Un profesional ha liberado un resultado diagnóstico para usted. Inicie sesión en Mis resultados para leerlo.".to_string()),
+        ("diagnostic_report_review", false) => ("Diagnostic report awaiting your review", format!("A {} report needs professional review in the diagnostics worklist.", payload.get("criticality").and_then(|v| v.as_str()).unwrap_or("new"))),
+        ("diagnostic_report_review", true) => ("Informe diagnóstico pendiente de revisión", format!("Un informe {} requiere revisión profesional en la lista de trabajo de diagnósticos.", payload.get("criticality").and_then(|v| v.as_str()).unwrap_or("nuevo"))),
+        ("diagnostic_order_conflict", false) => ("Diagnostic order needs rescheduling", "An appointment linked to a diagnostic order was cancelled or missed; the order stays open and needs a scheduling decision.".to_string()),
+        ("diagnostic_order_conflict", true) => ("Orden diagnóstica pendiente de reprogramar", "Una cita vinculada a una orden diagnóstica fue cancelada o no atendida; la orden sigue abierta y requiere una decisión de agenda.".to_string()),
+        ("diagnostic_follow_up", false) => ("Diagnostic follow-up due", "A follow-up action from a reviewed diagnostic report is due.".to_string()),
+        ("diagnostic_follow_up", true) => ("Seguimiento diagnóstico pendiente", "Hay una acción de seguimiento pendiente de un informe diagnóstico revisado.".to_string()),
         (_, false) => ("Appointment update", "There is an update about your appointment.".to_string()),
         (_, true) => ("Actualización de cita", "Hay una actualización sobre su cita.".to_string()),
     };

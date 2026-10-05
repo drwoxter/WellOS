@@ -228,10 +228,20 @@ async fn run_to_received(state: &AppState, value: f64) -> Loop {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{res}");
+    let (st, detail) = call(
+        state,
+        "GET",
+        &format!("/api/v1/service-requests/{sr_id}"),
+        "dev-dr.garcia",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{detail}");
     Loop {
         service_request_id: sr_id,
         observation_id: res["observation_id"].as_str().unwrap().to_string(),
-        version: 2,
+        version: detail["service_request"]["version"].as_i64().unwrap(),
     }
 }
 

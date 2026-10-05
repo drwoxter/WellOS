@@ -9,6 +9,7 @@
 use crate::routes::visits::single_row_vital_facts;
 use crate::runtime::RuntimeConfig;
 use crate::seed_access;
+use crate::seed_diagnostics;
 use chrono::{DateTime, Utc};
 use dmind_gateway::triage::TRIAGE_TEMPLATE;
 use dmind_gateway::{ModelGateway, SummaryRequest, TriageRequest};
@@ -210,6 +211,7 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
     let mut reg_rivera_id = None;
     let mut admin_silva_id = None;
     let mut pharm_osei_id = None;
+    let mut lab_chen_id = None;
     for (username, display, role, is_service) in users {
         let uid = Uuid::now_v7();
         match *username {
@@ -218,6 +220,7 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
             "nurse.kim" => nurse_kim_id = Some(uid),
             "admin.silva" => admin_silva_id = Some(uid),
             "pharm.osei" => pharm_osei_id = Some(uid),
+            "lab.chen" => lab_chen_id = Some(uid),
             "reg.rivera" => reg_rivera_id = Some(uid),
             _ => {}
         }
@@ -513,6 +516,30 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
     )
     .await?;
 
+    // Diagnostic catalog, acquisition resources and order-only encounters go
+    // through the same production write paths; the clinical scenarios run
+    // after commit because scheduling needs committed Access state.
+    let diagnostics_fixtures = seed_diagnostics::seed(
+        &mut tx,
+        &access_state,
+        seed_diagnostics::DiagnosticsFixtureInput {
+            tenant: tenant_a,
+            facility: facility_a,
+            annex: facility_a2,
+            admin: admin_silva_id.expect("admin.silva seeded"),
+            dr_garcia,
+            lab_chen: lab_chen_id.expect("lab.chen seeded"),
+            alba_encounter: demo.alba_draft_encounter,
+            anexa: patient_a2,
+            carlos: demo.carlos,
+            marta: demo.marta,
+            jonas: demo.jonas,
+            sofia: access_seeded.sofia,
+            diego: access_seeded.diego,
+        },
+    )
+    .await?;
+
     // Every seeded dMind artifact is a deterministic fixture and is marked
     // as such so no view can mistake it for a real model execution.
     sqlx::query(
@@ -529,6 +556,7 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
     // need their own (committed) transactions; each re-marks its artifacts
     // synthetic before committing.
     seed_access::after_commit(pool, runtime, &access_fixtures).await?;
+    seed_diagnostics::after_commit(pool, runtime, &diagnostics_fixtures).await?;
     Ok(Some(Seeded {
         tenant_a,
         tenant_b,

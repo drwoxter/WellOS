@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { t } from "@/lib/i18n";
 import { useSession } from "@/lib/session";
+import { hasDiagnosticsWorkspaceAccess } from "@/lib/diagnostics";
 import { canReadWorklist, canSearchPatients } from "@/lib/clinical";
 import { canReadVisits } from "@/lib/visits";
 import { canReadRisk } from "@/lib/risk";
@@ -69,10 +70,14 @@ function NavLinks() {
   const pathname = usePathname();
   const roles = meta?.user.roles ?? [];
   const sched = meta?.scheduling_capabilities;
+  const dx = meta?.diagnostics_capabilities;
   const links = [
     { href: "/dashboard", label: t(lang, "navHome") },
     ...(sched?.self_service
       ? [{ href: "/my/appointments", label: t(lang, "navMyAppointments") }]
+      : []),
+    ...(dx?.self_service
+      ? [{ href: "/my/diagnostics", label: t(lang, "navMyDiagnostics") }]
       : []),
     ...(canSearchPatients(roles)
       ? [{ href: "/patients", label: t(lang, "navPatients") }]
@@ -82,6 +87,9 @@ function NavLinks() {
       : []),
     ...(canReadVisits(roles)
       ? [{ href: "/access", label: t(lang, "navAccess") }]
+      : []),
+    ...(hasDiagnosticsWorkspaceAccess(dx)
+      ? [{ href: "/diagnostics", label: t(lang, "navDiagnostics") }]
       : []),
     ...(canReadWorklist(roles)
       ? [{ href: "/results", label: t(lang, "navResults") }]
