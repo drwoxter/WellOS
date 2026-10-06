@@ -9,6 +9,7 @@ import {
   catalogName,
   formatDay,
   formatRange,
+  offerStatusLabel,
   query,
   requestStatusLabel,
   urgencyLabel,
@@ -29,11 +30,14 @@ import {
   StatusBadge,
   appointmentTone,
   errorText,
+  offerTone,
   postJson,
   useAction,
   useCatalog,
   useLoader,
   type OfferAction,
+  Worklist,
+  WorklistRow,
 } from "./shared";
 
 type PatientHit = PatientSummary & { identifier: string; birth_date: string };
@@ -209,8 +213,32 @@ export function RequestsPanel({
         isEmpty={(d) => d.length === 0}
       >
         {(items) => (
-          <ul className="result-list">
-            {items.map((r) => (
+          <Worklist
+            lang={lang}
+            label={t(lang, "pendingRequests")}
+            items={items}
+            keyOf={(r) => r.id}
+            renderRow={(r) => (
+              <WorklistRow
+                title={r.patient ? patientLabel(r.patient) : r.patient_id}
+                meta={`${serviceName(r.constraints.service_code)} · ${formatDay(lang, r.created_at)}`}
+                badges={
+                  <>
+                    <StatusBadge
+                      label={urgencyLabel(lang, r.urgency)}
+                      tone={urgencyTone(r.urgency)}
+                    />
+                    {r.status === "needs_clinical_triage" ? (
+                      <StatusBadge
+                        label={requestStatusLabel(lang, r.status)}
+                        tone="warn"
+                      />
+                    ) : null}
+                  </>
+                }
+              />
+            )}
+            renderDetail={(r) => (
               <li key={r.id} className="result-card">
                 <div className="offer-head">
                   <div>
@@ -290,8 +318,8 @@ export function RequestsPanel({
                   </div>
                 )}
               </li>
-            ))}
-          </ul>
+            )}
+          />
         )}
       </PanelState>
     </section>
@@ -417,19 +445,34 @@ export function HoldsPanel({
         isEmpty={(d) => d.length === 0}
       >
         {(items) => (
-          <ul className="result-list">
-            {items.map((o) => (
+          <Worklist
+            lang={lang}
+            label={t(lang, "activeHolds")}
+            items={items}
+            keyOf={(o) => o.id}
+            renderRow={(o) => (
+              <WorklistRow
+                title={formatRange(lang, o.starts_at, o.ends_at)}
+                meta={o.patient ? patientLabel(o.patient) : o.patient_id}
+                badges={
+                  <StatusBadge
+                    label={offerStatusLabel(lang, o.status)}
+                    tone={offerTone(o.status)}
+                  />
+                }
+              />
+            )}
+            renderDetail={(o) => (
               <OfferCard
                 key={o.id}
                 lang={lang}
                 offer={o}
                 busy={busy}
                 showPatient
-                compact
                 onAction={(offer, action) => void act(offer, action)}
               />
-            ))}
-          </ul>
+            )}
+          />
         )}
       </PanelState>
     </section>
@@ -576,8 +619,24 @@ export function AppointmentsPanel({
         isEmpty={(d) => d.length === 0}
       >
         {(items) => (
-          <ul className="result-list">
-            {items.map((a) => {
+          <Worklist
+            lang={lang}
+            label={t(lang, "appointments")}
+            items={items}
+            keyOf={(a) => a.id}
+            renderRow={(a) => (
+              <WorklistRow
+                title={formatRange(lang, a.starts_at, a.ends_at, a.time_zone)}
+                meta={a.patient ? patientLabel(a.patient) : a.patient_id}
+                badges={
+                  <StatusBadge
+                    label={appointmentStatusLabel(lang, a.status)}
+                    tone={appointmentTone(a.status)}
+                  />
+                }
+              />
+            )}
+            renderDetail={(a) => {
               const serviceName = a.service
                 ? lang === "es"
                   ? a.service.name_es
@@ -788,8 +847,8 @@ export function AppointmentsPanel({
                   ) : null}
                 </li>
               );
-            })}
-          </ul>
+            }}
+          />
         )}
       </PanelState>
     </section>

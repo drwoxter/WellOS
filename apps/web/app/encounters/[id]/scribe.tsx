@@ -4,6 +4,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { aiAvailability } from "@/lib/capabilities";
 import type { AiCapabilities } from "@/lib/capabilities";
 import { t } from "@/lib/i18n";
+import { Icon } from "@/components/ui/icons";
 import type { Lang, TKey } from "@/lib/i18n";
 import { ApiRequestError, apiFetch } from "@/lib/session";
 import { formatDateTime } from "@/lib/clinical";
@@ -290,6 +291,13 @@ export function RecordingDock({
   if (!enabled) return null;
 
   const live = state.phase === "recording" || state.phase === "paused";
+  const idle = state.phase === "idle" || state.phase === "ready";
+  const stage =
+    state.phase === "ready"
+      ? "draft"
+      : state.phase === "processing"
+        ? "processing"
+        : state.phase;
 
   return (
     <section
@@ -298,54 +306,216 @@ export function RecordingDock({
       data-phase={state.phase}
     >
       <div className="recording-dock-head">
-        <h2 id="recording-dock-title">{t(lang, "recordingDockTitle")}</h2>
-        {live ? (
-          <span
-            className={`recording-status ${state.phase}`}
-            role="status"
-            aria-live="polite"
-          >
-            <span className="recording-indicator" aria-hidden="true" />
-            {state.phase === "recording"
+        <h2 id="recording-dock-title">
+          <Icon.Mic /> {t(lang, "recordingDockTitle")}
+        </h2>
+        <span
+          className={`recording-status ${state.phase}`}
+          role={live ? "status" : undefined}
+          aria-live={live ? "polite" : undefined}
+        >
+          <span className="recording-indicator" aria-hidden="true" />
+          {live
+            ? state.phase === "recording"
               ? t(lang, "recordingLive")
-              : t(lang, "recordingPaused")}
-            {" · "}
-            <span aria-label={t(lang, "elapsed")}>
-              {formatTimecode(elapsed)}
-            </span>
-          </span>
-        ) : null}
+              : t(lang, "recordingPaused")
+            : state.phase === "ready"
+              ? t(lang, "recordingDraftReady")
+              : state.phase === "processing"
+                ? t(lang, "processingAudio")
+                : state.phase === "error"
+                  ? t(lang, "error")
+                  : state.phase === "requesting_permission"
+                    ? t(lang, "requestingMicrophone")
+                    : t(lang, "recordingReadyState")}
+          {live ? (
+            <>
+              {" · "}
+              <span aria-label={t(lang, "elapsed")}>
+                {formatTimecode(elapsed)}
+              </span>
+            </>
+          ) : null}
+        </span>
       </div>
 
-      {state.phase === "idle" || state.phase === "ready" ? (
-        <div className="recording-row">
-          <p className="muted grow">
-            {state.phase === "ready"
-              ? t(lang, "scribeReady")
-              : t(lang, "recordingIdleHelp")}
-          </p>
+      <div className={`rec-stage stage-${stage}`}>
+        {idle ? (
           <button
             type="button"
-            className="primary record-button"
+            className="rec-core"
             onClick={start}
             disabled={!scribe.callable}
             aria-describedby={scribe.notice ? "scribe-capability" : undefined}
           >
-            {state.phase === "ready"
-              ? t(lang, "recordAgain")
-              : t(lang, "recordConsultation")}
+            <span className="rec-halo" aria-hidden="true" />
+            <span className="rec-face" aria-hidden="true">
+              <Icon.Mic />
+            </span>
+            <span className="rec-label">
+              {state.phase === "ready"
+                ? t(lang, "recordAgain")
+                : t(lang, "recordConsultation")}
+            </span>
           </button>
+        ) : null}
+
+        {live ? (
+          <div className="rec-live">
+            <div className="rec-ring" aria-hidden="true">
+              <LiveWaveform
+                stream={recorder.current?.stream?.() ?? null}
+                paused={state.phase === "paused"}
+              />
+            </div>
+            <span className="rec-time" aria-hidden="true">
+              {formatTimecode(elapsed)}
+            </span>
+          </div>
+        ) : null}
+
+        {state.phase === "processing" ? (
+          <div className="rec-live" aria-busy="true">
+            <div className="rec-ring processing" aria-hidden="true">
+              <Icon.Sparkle />
+            </div>
+          </div>
+        ) : null}
+
+        {state.phase === "requesting_permission" ? (
+          <div className="rec-live">
+            <div className="rec-ring waiting" aria-hidden="true">
+              <Icon.Mic />
+            </div>
+          </div>
+        ) : null}
+
+        <div className="rec-side">
+          {idle ? (
+            <p className="muted rec-help">
+              {state.phase === "ready"
+                ? t(lang, "scribeReady")
+                : t(lang, "recordingReadyHelp")}
+            </p>
+          ) : null}
+          {idle && scribe.notice ? (
+            <p
+              id="scribe-capability"
+              className="muted"
+              data-capability={scribe.state}
+            >
+              {scribe.notice}
+            </p>
+          ) : null}
+
+          {state.phase === "requesting_permission" ? (
+            <p role="status" className="muted">
+              {t(lang, "requestingMicrophone")}
+            </p>
+          ) : null}
+
+          {live ? (
+            <>
+              <p className="muted rec-help">
+                {state.phase === "recording"
+                  ? t(lang, "recordingLiveHelp")
+                  : t(lang, "recordingPausedHelp")}
+              </p>
+              <div className="recording-row">
+                {state.phase === "recording" ? (
+                  <button type="button" className="secondary" onClick={pause}>
+                    <Icon.Pause /> {t(lang, "pauseRecording")}
+                  </button>
+                ) : (
+                  <button type="button" className="secondary" onClick={resume}>
+                    <Icon.Play /> {t(lang, "resumeRecording")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => void finish()}
+                >
+                  <Icon.Stop /> {t(lang, "finishRecording")}
+                </button>
+                {confirmingDiscard ? (
+                  <span className="recording-row">
+                    <span>{t(lang, "discardRecordingConfirm")}</span>
+                    <button
+                      type="button"
+                      className="tertiary"
+                      onClick={discard}
+                    >
+                      {t(lang, "confirm")}
+                    </button>
+                    <button
+                      type="button"
+                      className="tertiary"
+                      onClick={() => setConfirmingDiscard(false)}
+                    >
+                      {t(lang, "cancel")}
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="tertiary"
+                    onClick={() => setConfirmingDiscard(true)}
+                  >
+                    {t(lang, "discardRecording")}
+                  </button>
+                )}
+              </div>
+            </>
+          ) : null}
+
+          {state.phase === "processing" ? (
+            <p role="status" className="grow">
+              <strong>{t(lang, "processingAudio")}</strong>{" "}
+              <span className="muted">{t(lang, "processingHelp")}</span>
+            </p>
+          ) : null}
+
+          {state.phase === "error" && state.error ? (
+            <div className="recording-row">
+              <p role="alert" className="error grow">
+                {t(lang, errorKey(state.error.kind))}
+              </p>
+              {state.error.retryable ? (
+                <button type="button" className="primary" onClick={retry}>
+                  {state.recording
+                    ? t(lang, "retryTranscription")
+                    : t(lang, "retry")}
+                </button>
+              ) : null}
+              {state.recording ? (
+                <button type="button" className="tertiary" onClick={discard}>
+                  {t(lang, "discardRecording")}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => dispatch({ type: "reset" })}
+                >
+                  {t(lang, "recordAgain")}
+                </button>
+              )}
+            </div>
+          ) : null}
+
+          {state.phase === "discarded" ? (
+            <div className="recording-row">
+              <p role="status" className="muted grow">
+                {t(lang, "recordingDiscarded")}
+              </p>
+              <button type="button" className="secondary" onClick={start}>
+                {t(lang, "recordAgain")}
+              </button>
+            </div>
+          ) : null}
         </div>
-      ) : null}
-      {(state.phase === "idle" || state.phase === "ready") && scribe.notice ? (
-        <p
-          id="scribe-capability"
-          className="muted"
-          data-capability={scribe.state}
-        >
-          {scribe.notice}
-        </p>
-      ) : null}
+      </div>
 
       {state.phase === "consent_required" ? (
         <div
@@ -373,105 +543,97 @@ export function RecordingDock({
           </button>
         </div>
       ) : null}
-
-      {state.phase === "requesting_permission" ? (
-        <p role="status" className="muted">
-          {t(lang, "requestingMicrophone")}
-        </p>
-      ) : null}
-
-      {live ? (
-        <div className="recording-row">
-          {state.phase === "recording" ? (
-            <button type="button" className="secondary" onClick={pause}>
-              {t(lang, "pauseRecording")}
-            </button>
-          ) : (
-            <button type="button" className="secondary" onClick={resume}>
-              {t(lang, "resumeRecording")}
-            </button>
-          )}
-          <button
-            type="button"
-            className="primary"
-            onClick={() => void finish()}
-          >
-            {t(lang, "finishRecording")}
-          </button>
-          {confirmingDiscard ? (
-            <span className="recording-row">
-              <span>{t(lang, "discardRecordingConfirm")}</span>
-              <button type="button" className="tertiary" onClick={discard}>
-                {t(lang, "confirm")}
-              </button>
-              <button
-                type="button"
-                className="tertiary"
-                onClick={() => setConfirmingDiscard(false)}
-              >
-                {t(lang, "cancel")}
-              </button>
-            </span>
-          ) : (
-            <button
-              type="button"
-              className="tertiary"
-              onClick={() => setConfirmingDiscard(true)}
-            >
-              {t(lang, "discardRecording")}
-            </button>
-          )}
-        </div>
-      ) : null}
-
-      {state.phase === "processing" ? (
-        <div className="recording-row" aria-busy="true">
-          <p role="status" className="grow">
-            <strong>{t(lang, "processingAudio")}</strong>{" "}
-            <span className="muted">{t(lang, "processingHelp")}</span>
-          </p>
-        </div>
-      ) : null}
-
-      {state.phase === "error" && state.error ? (
-        <div className="recording-row">
-          <p role="alert" className="error grow">
-            {t(lang, errorKey(state.error.kind))}
-          </p>
-          {state.error.retryable ? (
-            <button type="button" className="primary" onClick={retry}>
-              {state.recording
-                ? t(lang, "retryTranscription")
-                : t(lang, "retry")}
-            </button>
-          ) : null}
-          {state.recording ? (
-            <button type="button" className="tertiary" onClick={discard}>
-              {t(lang, "discardRecording")}
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => dispatch({ type: "reset" })}
-            >
-              {t(lang, "recordAgain")}
-            </button>
-          )}
-        </div>
-      ) : null}
-
-      {state.phase === "discarded" ? (
-        <div className="recording-row">
-          <p role="status" className="muted grow">
-            {t(lang, "recordingDiscarded")}
-          </p>
-          <button type="button" className="secondary" onClick={start}>
-            {t(lang, "recordAgain")}
-          </button>
-        </div>
-      ) : null}
     </section>
+  );
+}
+
+const WAVE_BARS = 28;
+
+/** Live microphone level as a ring of bars. Purely decorative: the recording
+ *  state is announced in text, and without an audio stream or Web Audio the
+ *  styled ring alone marks the live state. */
+function LiveWaveform({
+  stream,
+  paused,
+}: {
+  stream: MediaStream | null;
+  paused: boolean;
+}) {
+  const canvas = useRef<HTMLCanvasElement | null>(null);
+  const reduced = useRef(false);
+
+  useEffect(() => {
+    reduced.current =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }, []);
+
+  useEffect(() => {
+    const AudioCtx =
+      typeof window !== "undefined" && "AudioContext" in window
+        ? window.AudioContext
+        : null;
+    const el = canvas.current;
+    if (!el || !stream || !AudioCtx || paused || reduced.current) return;
+    const ctx = el.getContext("2d");
+    if (!ctx) return;
+    const size = el.width;
+    const centre = size / 2;
+    const accent = "#0e8f8a";
+    let audio: AudioContext | null = null;
+    let frame = 0;
+    try {
+      audio = new AudioCtx();
+      const source = audio.createMediaStreamSource(stream);
+      const analyser = audio.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const levels = new Float32Array(WAVE_BARS);
+      const tick = () => {
+        analyser.getByteFrequencyData(data);
+        ctx.clearRect(0, 0, size, size);
+        ctx.lineCap = "round";
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = accent;
+        for (let i = 0; i < WAVE_BARS; i += 1) {
+          const v = data[i % data.length] / 255;
+          levels[i] = levels[i] * 0.6 + v * 0.4;
+          const inner = size * 0.33;
+          const outer = inner + 4 + levels[i] * size * 0.12;
+          const angle = (i / WAVE_BARS) * Math.PI * 2 - Math.PI / 2;
+          ctx.beginPath();
+          ctx.moveTo(
+            centre + Math.cos(angle) * inner,
+            centre + Math.sin(angle) * inner,
+          );
+          ctx.lineTo(
+            centre + Math.cos(angle) * outer,
+            centre + Math.sin(angle) * outer,
+          );
+          ctx.stroke();
+        }
+        frame = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch {
+      // Without Web Audio the CSS ring alone conveys the live state.
+    }
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      void audio?.close().catch(() => undefined);
+    };
+  }, [stream, paused]);
+
+  return (
+    <canvas
+      ref={canvas}
+      className="rec-wave"
+      width={176}
+      height={176}
+      aria-hidden="true"
+    />
   );
 }
 

@@ -1023,7 +1023,7 @@ function TriageWorkspace({ visitId }: { visitId: string }) {
             </div>
 
             {editable ? (
-              <p className="visit-actions" style={{ justifyContent: "start" }}>
+              <p className="visit-actions sticky-actions">
                 <button
                   type="submit"
                   className={inTriage ? "secondary" : "primary"}
@@ -1066,7 +1066,7 @@ function TriageWorkspace({ visitId }: { visitId: string }) {
                 onKind={setRouteKind}
                 onTarget={setRouteTarget}
               />
-              <p className="visit-actions" style={{ justifyContent: "start" }}>
+              <p className="visit-actions sticky-actions">
                 <button
                   type="button"
                   className="primary"

@@ -58,6 +58,7 @@ const SOURCE_TYPES: &[&str] = &["ics_import", "device_sync"];
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/me", get(me))
+        .route("/me/home", get(home))
         .route(
             "/me/access-requests",
             get(list_requests).post(create_request),
@@ -178,6 +179,222 @@ async fn me(State(state): State<AppState>, ctx: AuthContext) -> Result<Json<Valu
         "user_id": ctx.user_id,
         "display_name": ctx.display_name,
         "patients": grants.iter().map(grants::grant_self_json).collect::<Vec<_>>(),
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Patient home
+// ---------------------------------------------------------------------------
+
+const HOME_LIST: i64 = 5;
+const HOME_RESULTS: i64 = 10;
+const NEW_RESULT_DAYS: i64 = 14;
+const PREPARE_HOURS: i64 = 48;
+
+async fn home_appointments(
+    conn: &mut PgConnection,
+    g: &GrantRow,
+    sql: &str,
+) -> Result<Vec<Value>, ApiError> {
+    let ids = sqlx::query_scalar::<_, Uuid>(sql)
+        .bind(g.tenant_id)
+        .bind(g.patient_id)
+        .bind(HOME_LIST)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut items = Vec::with_capacity(ids.len());
+    for id in ids {
+        let a = access::load_appointment_scoped(conn, g.tenant_id, id).await?;
+        let mut v = scheduling::appointment_json(&a);
+        v["resources"] = access::appointment_resources(&mut *conn, a.id).await?;
+        items.push(v);
+    }
+    scheduling::attach_scheduling_labels(conn, g.tenant_id, &mut items).await?;
+    Ok(items)
+}
+
+fn starts_at(v: &Value) -> Option<DateTime<Utc>> {
+    v["starts_at"]
+        .as_str()
+        .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+}
+
+/// `GET /api/v1/me/home`: everything the patient home shows, assembled on
+/// the server from the same grant-scoped sources as the detail surfaces so
+/// release rules, grant isolation and audit are applied once. The
+/// `next_action` is a deterministic ranking of what the patient can actually
+/// do now; nothing here is scored, predicted or generated.
+async fn home(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Query(q): Query<PatientQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (g, allowed) = scope(&state, &ctx, &mut conn, "home", q.patient_id).await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    let now = Utc::now();
+
+    let mut upcoming = home_appointments(
+        &mut conn,
+        &g,
+        "SELECT id FROM appointments
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'confirmed' AND ends_at >= now()
+         ORDER BY starts_at, id LIMIT $3",
+    )
+    .await?;
+    let recent = home_appointments(
+        &mut conn,
+        &g,
+        "SELECT id FROM appointments
+         WHERE tenant_id = $1 AND patient_id = $2
+           AND (ends_at < now() OR status <> 'confirmed')
+         ORDER BY starts_at DESC, id DESC LIMIT $3",
+    )
+    .await?;
+    // Counts and the ranked action come from the whole record, not from the
+    // few rows the home lists: the sixth appointment still needs confirming.
+    let (upcoming_total, to_confirm_total): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*),
+                COUNT(*) FILTER (WHERE confirmation_required AND patient_confirmed_at IS NULL)
+         FROM appointments
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'confirmed' AND ends_at >= now()",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let first_to_confirm = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM appointments
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'confirmed' AND ends_at >= now()
+           AND confirmation_required AND patient_confirmed_at IS NULL
+         ORDER BY starts_at, id LIMIT 1",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    // The appointment to confirm is always among the listed ones so the
+    // action can be taken from the home itself.
+    if let Some(id) = first_to_confirm {
+        if !upcoming.iter().any(|a| a["id"] == json!(id)) {
+            let a = access::load_appointment_scoped(&mut conn, g.tenant_id, id).await?;
+            let mut v = scheduling::appointment_json(&a);
+            v["resources"] = access::appointment_resources(&mut *conn, a.id).await?;
+            let mut extra = vec![v];
+            scheduling::attach_scheduling_labels(&mut conn, g.tenant_id, &mut extra).await?;
+            upcoming.extend(extra);
+            upcoming.sort_by_key(|a| (starts_at(a), a["id"].as_str().map(str::to_owned)));
+        }
+    }
+
+    let (open_requests_total, options_ready_total): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'options_ready')
+         FROM access_requests
+         WHERE tenant_id = $1 AND patient_id = $2
+           AND status IN ('draft', 'submitted', 'needs_clinical_triage', 'options_ready')",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let first_options_ready = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM access_requests
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'options_ready'
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let request_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM access_requests
+         WHERE tenant_id = $1 AND patient_id = $2
+           AND status IN ('draft', 'submitted', 'needs_clinical_triage', 'options_ready')
+         ORDER BY created_at DESC, id DESC LIMIT $3",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .bind(HOME_LIST)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut requests = Vec::with_capacity(request_ids.len());
+    for id in request_ids {
+        let r = access::load_request(&mut conn, g.tenant_id, id).await?;
+        requests.push(access::request_json(&r));
+    }
+
+    let patient_ids = [g.patient_id];
+    let unread = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM notifications
+         WHERE tenant_id = $1 AND patient_id = $2
+           AND status IN ('delivered', 'partially_delivered')
+           AND 'in_app' = ANY(channels) AND read_at IS NULL",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let notifications =
+        load_notifications(&mut conn, g.tenant_id, &patient_ids, None, false, HOME_LIST).await?;
+
+    let diagnostics =
+        crate::routes::diagnostics::self_service::summary(&mut conn, &g, HOME_RESULTS).await?;
+    let trends = crate::routes::diagnostics::self_service::released_trends(&mut conn, &g).await?;
+    let new_results = diagnostics["released"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|r| {
+                    r["released_at"]
+                        .as_str()
+                        .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+                        .is_some_and(|t| t > now - Duration::days(NEW_RESULT_DAYS))
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let under_review = diagnostics["under_review"].as_array().map_or(0, Vec::len);
+    let pending_orders = diagnostics["pending"].as_array().map_or(0, Vec::len);
+
+    let next_appointment = upcoming.first();
+    let soon = next_appointment
+        .is_some_and(|a| starts_at(a).is_some_and(|t| t <= now + Duration::hours(PREPARE_HOURS)));
+    let next_action = if let Some(id) = first_to_confirm {
+        json!({ "kind": "confirm_attendance", "appointment_id": id })
+    } else if let Some(id) = first_options_ready {
+        json!({ "kind": "review_options", "access_request_id": id })
+    } else if new_results > 0 {
+        json!({ "kind": "new_results", "count": new_results })
+    } else if soon {
+        json!({ "kind": "prepare_appointment", "appointment_id": next_appointment.map(|a| a["id"].clone()) })
+    } else if unread > 0 {
+        json!({ "kind": "read_notifications", "count": unread })
+    } else {
+        json!({ "kind": "none" })
+    };
+
+    Ok(Json(json!({
+        "generated_at": now,
+        "patient_id": g.patient_id,
+        "relationship": g.relationship,
+        "patient": { "given_name": g.patient_given_name, "family_name": g.patient_family_name },
+        "next_action": next_action,
+        "counts": {
+            "upcoming_appointments": upcoming_total,
+            "to_confirm": to_confirm_total,
+            "open_requests": open_requests_total,
+            "options_ready": options_ready_total,
+            "unread_notifications": unread,
+            "new_results": new_results,
+            "under_review": under_review,
+            "pending_orders": pending_orders,
+        },
+        "appointments": { "upcoming": upcoming, "recent": recent },
+        "requests": requests,
+        "notifications": notifications,
+        "diagnostics": diagnostics,
+        "trends": trends,
     })))
 }
 
@@ -2132,27 +2349,53 @@ async fn list_notifications(
         }
         None => grants.iter().map(|g| g.patient_id).collect(),
     };
+    let items = load_notifications(
+        &mut conn,
+        ctx.tenant_id,
+        &patient_ids,
+        if q.patient_id.is_none() {
+            Some(ctx.user_id)
+        } else {
+            None
+        },
+        q.unread_only.unwrap_or(false),
+        bounded_limit(q.limit),
+    )
+    .await?;
+    Ok(Json(json!({ "items": items })))
+}
+
+/// Delivered in-app notifications addressed to any of `patient_ids` or, when
+/// `user_id` is given, to the caller directly; rendered with the same
+/// PHI-minimized templates the delivery channels use.
+async fn load_notifications(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    patient_ids: &[Uuid],
+    user_id: Option<Uuid>,
+    unread_only: bool,
+    limit: i64,
+) -> Result<Vec<Value>, ApiError> {
     let rows = sqlx::query(
         "SELECT id, patient_id, kind, appointment_id, offer_id, payload, language, time_zone, status,
                 scheduled_for, delivered_at, read_at
          FROM notifications
          WHERE tenant_id = $1
-           AND (patient_id = ANY($2) OR ($3::uuid IS NULL AND user_id = $4))
+           AND (patient_id = ANY($2) OR ($3::uuid IS NOT NULL AND user_id = $3))
            AND status IN ('delivered', 'partially_delivered')
            AND 'in_app' = ANY(channels)
-           AND ($5::bool IS NOT TRUE OR read_at IS NULL)
+           AND ($4::bool IS NOT TRUE OR read_at IS NULL)
          ORDER BY COALESCE(delivered_at, scheduled_for) DESC, id DESC
-         LIMIT $6",
+         LIMIT $5",
     )
-    .bind(ctx.tenant_id)
-    .bind(&patient_ids)
-    .bind(q.patient_id)
-    .bind(ctx.user_id)
-    .bind(q.unread_only)
-    .bind(bounded_limit(q.limit))
+    .bind(tenant_id)
+    .bind(patient_ids)
+    .bind(user_id)
+    .bind(unread_only)
+    .bind(limit)
     .fetch_all(&mut *conn)
     .await?;
-    let items: Vec<Value> = rows
+    Ok(rows
         .iter()
         .map(|r| {
             let kind: String = r.get("kind");
@@ -2175,8 +2418,7 @@ async fn list_notifications(
                 "read_at": r.get::<Option<DateTime<Utc>>, _>("read_at"),
             })
         })
-        .collect();
-    Ok(Json(json!({ "items": items })))
+        .collect())
 }
 
 async fn read_notification(

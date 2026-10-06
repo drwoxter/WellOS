@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { signInAs } from "./helpers";
-import { COCKPIT_STORAGE_ITEM } from "../lib/cockpit";
+import { COCKPIT_STORAGE_ITEM, PREFERENCES_PATH } from "../lib/cockpit";
 
 /**
  * Smart consultation cockpit and AI scribe journey. Chromium's fake media
@@ -93,9 +93,12 @@ test("clinician records, reviews the scribe draft and signs from the cockpit", a
   await dock.getByRole("button", { name: "Resume" }).click();
   await page.waitForTimeout(600);
   await dock.getByRole("button", { name: "Finish" }).click();
-  await expect(dock.getByText("Draft ready for review")).toBeVisible({
-    timeout: 20_000,
-  });
+  await expect(dock.locator(".recording-status")).toHaveText(
+    "Draft ready for review",
+    {
+      timeout: 20_000,
+    },
+  );
 
   // Structured review: transcript with timecodes, flags, sections.
   const review = page.getByRole("region", { name: "dMind scribe draft" });
@@ -191,13 +194,15 @@ test("recording controls are keyboard operable and the workspace passes WCAG che
   await expectNoSeriousViolations(page);
 });
 
-test("dashboard cockpit customization is keyboard operable and stores layout only", async ({
+test("dashboard cockpit customization is keyboard operable and stores layout server-side", async ({
   page,
 }) => {
   await signInAs(page, "dr.garcia");
-  const customize = page.getByRole("button", { name: "Customize dashboard" });
-  await customize.focus();
+  const edit = page.getByRole("button", { name: "Edit layout" });
+  await edit.focus();
   await page.keyboard.press("Enter");
+  const panel = page.getByRole("region", { name: /Customize dashboard/ });
+  await expect(panel).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Hide: Draft consultations" }),
   ).toBeVisible();
@@ -205,28 +210,41 @@ test("dashboard cockpit customization is keyboard operable and stores layout onl
   await expect(
     page.getByRole("heading", { name: "Draft consultations" }),
   ).toHaveCount(0);
+  await expect(panel).toContainText("Preview — changes are not saved yet.");
   await page.getByRole("radio", { name: "Compact" }).check();
+  await page.getByRole("button", { name: "Save layout" }).click();
+  await expect(page.getByText("Layout saved.")).toBeVisible();
+
+  // The layout lives server-side and holds structure only, never patient data.
+  const res = await page.request.get(PREFERENCES_PATH);
+  expect(res.ok()).toBe(true);
+  const prefs = (await res.json()) as {
+    layout: { hidden: string[]; density: string } | null;
+    version: number;
+  };
+  expect(prefs.layout).not.toBeNull();
+  expect(prefs.version).toBeGreaterThan(0);
+  expect(JSON.stringify(prefs.layout)).not.toMatch(/Demopatient|SYN-/);
+  expect(prefs.layout?.density).toBe("compact");
+  // Physicians hide the triage/access widgets by default; the user's choice
+  // is added to that set.
+  expect(prefs.layout?.hidden).toEqual(
+    expect.arrayContaining(["triage", "access", "drafts"]),
+  );
+  expect(prefs.layout?.hidden).not.toContain("ready");
   const stored = await page.evaluate(
     (key) => window.localStorage.getItem(key),
     COCKPIT_STORAGE_ITEM,
   );
-  expect(stored).not.toBeNull();
-  expect(stored).not.toMatch(/Demopatient|SYN-/);
-  const layout = JSON.parse(stored ?? "{}") as {
-    hidden: string[];
-    density: string;
-  };
-  expect(layout.density).toBe("compact");
-  // Physicians hide the triage/access widgets by default; the user's choice
-  // is added to that set.
-  expect(layout.hidden).toEqual(
-    expect.arrayContaining(["triage", "access", "drafts"]),
-  );
-  expect(layout.hidden).not.toContain("ready");
+  expect(stored).toBeNull();
+
+  await page.getByRole("button", { name: "Edit layout" }).click();
   await page.getByRole("button", { name: "Restore role defaults" }).click();
   await expect(
     page.getByRole("heading", { name: "Draft consultations" }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "Save layout" }).click();
+  await expect(page.getByText("Layout saved.")).toBeVisible();
   await expectNoSeriousViolations(page);
 });
 

@@ -246,6 +246,18 @@ coverage incl. Spanish, keyboard, accessibility and 390 px. Hazards
 H-34–H-42 recorded. Not clinically validated: safety rules and criticality
 thresholds are synthetic fixtures requiring clinical sign-off.
 
+**Experience Reset v1** (UI/UX, no API or safety semantics changed):
+design tokens, primitives, icons and role-native shells (staff sidebar,
+patient bottom tabs) with a restrained dMind presence; patient home `/my`
+on the grant-derived `GET /api/v1/me/home`; clinical cockpit with
+server-side dashboard preferences (migration `0017`) and a central
+consultation recording control; scheduling master-detail with capacity
+heatmap and calendar, patient guided scheduling (top-3 valid options),
+access and triage workspaces; every remaining route migrated to the shared
+system; charts carry textual summaries and never encode criticality by
+colour alone; responsive at 1440/1024/390 px, 44 px touch targets,
+reduced-motion, axe checks and a visual-regression Playwright suite.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket

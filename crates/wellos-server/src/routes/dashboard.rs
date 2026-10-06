@@ -238,3 +238,224 @@ pub async fn cockpit(
         "generated_at": chrono::Utc::now(),
     })))
 }
+
+// --- Per-user cockpit layout ------------------------------------------------
+//
+// Presentation preferences only (widget order, hidden widgets, widget sizes
+// and density), keyed by (tenant, user). The document is validated against the
+// fixed widget catalogue so nothing but layout can ever be stored, and writes
+// are versioned so a stale tab cannot silently overwrite a newer layout.
+
+pub const WIDGETS: &[&str] = &[
+    "ready",
+    "alerts",
+    "triage",
+    "access",
+    "drafts",
+    "attention",
+    "results",
+    "tasks",
+    "ai",
+];
+const SIZES: &[&str] = &["half", "full"];
+const DENSITIES: &[&str] = &["compact", "expanded"];
+const MAX_LAYOUT_BYTES: usize = 4096;
+
+fn invalid(message: &str) -> ApiError {
+    ApiError::bad_request("invalid_layout", message)
+}
+
+/// Accepts only a complete, well-formed layout and returns it normalised:
+/// `order` lists every widget exactly once, `hidden` and `sizes` reference
+/// known widgets only, `density` is one of the supported values.
+pub fn validate_layout(layout: &Value) -> Result<Value, ApiError> {
+    if layout.to_string().len() > MAX_LAYOUT_BYTES {
+        return Err(invalid("layout too large"));
+    }
+    let obj = layout
+        .as_object()
+        .ok_or_else(|| invalid("layout must be an object"))?;
+    for key in obj.keys() {
+        if !matches!(key.as_str(), "order" | "hidden" | "sizes" | "density") {
+            return Err(invalid("unknown layout field"));
+        }
+    }
+    let order: Vec<&str> = obj
+        .get("order")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("order must be an array"))?
+        .iter()
+        .map(|w| {
+            w.as_str()
+                .ok_or_else(|| invalid("order entries must be strings"))
+        })
+        .collect::<Result<_, _>>()?;
+    if order.len() != WIDGETS.len() || WIDGETS.iter().any(|w| !order.contains(w)) {
+        return Err(invalid("order must list every widget exactly once"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if order.iter().any(|w| !seen.insert(*w)) {
+        return Err(invalid("order must list every widget exactly once"));
+    }
+    let hidden: Vec<&str> = obj
+        .get("hidden")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("hidden must be an array"))?
+        .iter()
+        .map(|w| {
+            w.as_str()
+                .ok_or_else(|| invalid("hidden entries must be strings"))
+        })
+        .collect::<Result<_, _>>()?;
+    if hidden.iter().any(|w| !WIDGETS.contains(w)) {
+        return Err(invalid("hidden references an unknown widget"));
+    }
+    let mut hidden_norm: Vec<&str> = Vec::new();
+    for w in hidden {
+        if !hidden_norm.contains(&w) {
+            hidden_norm.push(w);
+        }
+    }
+    let mut sizes = serde_json::Map::new();
+    if let Some(raw) = obj.get("sizes") {
+        let map = raw
+            .as_object()
+            .ok_or_else(|| invalid("sizes must be an object"))?;
+        for (w, size) in map {
+            if !WIDGETS.contains(&w.as_str()) {
+                return Err(invalid("sizes references an unknown widget"));
+            }
+            let size = size
+                .as_str()
+                .filter(|s| SIZES.contains(s))
+                .ok_or_else(|| invalid("unsupported widget size"))?;
+            sizes.insert(w.clone(), json!(size));
+        }
+    }
+    let density = obj
+        .get("density")
+        .and_then(Value::as_str)
+        .filter(|d| DENSITIES.contains(d))
+        .ok_or_else(|| invalid("unsupported density"))?;
+    Ok(json!({
+        "order": order,
+        "hidden": hidden_norm,
+        "sizes": sizes,
+        "density": density,
+    }))
+}
+
+/// Anyone who can populate at least one cockpit widget may keep a layout;
+/// service credentials have no dashboard.
+async fn authorize_preferences(state: &AppState, ctx: &AuthContext) -> Result<(), ApiError> {
+    if ctx.is_service {
+        return Err(ApiError::forbidden("service principals have no dashboard"));
+    }
+    let resource = ResourceCtx {
+        tenant_id: ctx.tenant_id,
+        patient_id: None,
+        facility_id: None,
+    };
+    let worklist =
+        crate::policy::authorize(&state.pool, ctx, actions::WORKLIST_READ, Some(&resource)).await?;
+    let action = if worklist.allowed {
+        actions::WORKLIST_READ
+    } else {
+        actions::VISIT_READ
+    };
+    guard(state, ctx, action, "dashboard_preferences", Some(resource))
+        .await?
+        .record_on_pool(state, ctx)
+        .await?;
+    Ok(())
+}
+
+fn preferences_json(row: Option<(Value, i32, chrono::DateTime<chrono::Utc>)>) -> Value {
+    match row {
+        None => json!({ "layout": Value::Null, "version": 0, "updated_at": Value::Null }),
+        Some((layout, version, updated_at)) => json!({
+            "layout": layout,
+            "version": version,
+            "updated_at": updated_at,
+        }),
+    }
+}
+
+pub async fn get_preferences(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+) -> Result<Json<Value>, ApiError> {
+    authorize_preferences(&state, &ctx).await?;
+    let row: Option<(Value, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT layout, version, updated_at FROM dashboard_preferences
+         WHERE tenant_id = $1 AND user_id = $2",
+    )
+    .bind(ctx.tenant_id)
+    .bind(ctx.user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(preferences_json(row)))
+}
+
+#[derive(serde::Deserialize)]
+pub struct PutPreferences {
+    pub layout: Value,
+    /// Version last seen by the client; `0` when no layout was stored yet.
+    #[serde(default)]
+    pub version: i32,
+}
+
+pub async fn put_preferences(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Json(body): Json<PutPreferences>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_preferences(&state, &ctx).await?;
+    let layout = validate_layout(&body.layout)?;
+    let mut tx = state.pool.begin().await.map_err(ApiError::internal)?;
+    let current: Option<(Value, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT layout, version, updated_at FROM dashboard_preferences
+         WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+    )
+    .bind(ctx.tenant_id)
+    .bind(ctx.user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(ApiError::internal)?;
+    let current_version = current.as_ref().map_or(0, |c| c.1);
+    if current_version != body.version {
+        return Err(ApiError::conflict(
+            "layout_conflict",
+            "the dashboard layout changed elsewhere; reload before saving",
+        ));
+    }
+    // Two first saves can both pass the check above (there is no row to
+    // lock yet); the second insert then waits on the unique index and must
+    // only update when the row still carries the version the client saw.
+    let row: Option<(Value, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "INSERT INTO dashboard_preferences (tenant_id, user_id, layout, version)
+         VALUES ($1, $2, $3, 1)
+         ON CONFLICT (tenant_id, user_id) DO UPDATE
+            SET layout = EXCLUDED.layout,
+                version = dashboard_preferences.version + 1,
+                updated_at = now()
+            WHERE dashboard_preferences.version = $4
+         RETURNING layout, version, updated_at",
+    )
+    .bind(ctx.tenant_id)
+    .bind(ctx.user_id)
+    .bind(&layout)
+    .bind(body.version)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(ApiError::internal)?;
+    let Some(row) = row else {
+        return Err(ApiError::conflict(
+            "layout_conflict",
+            "the dashboard layout changed elsewhere; reload before saving",
+        ));
+    };
+    tx.commit().await.map_err(ApiError::internal)?;
+    Ok(Json(preferences_json(Some(row))))
+}

@@ -32,6 +32,8 @@ export interface AudioRecorder {
   discard(): void;
   /** Captured time so far, excluding pauses. */
   elapsedMs(): number;
+  /** Live microphone stream while capturing, for level visualisation only. */
+  stream?(): MediaStream | null;
 }
 
 export type RecorderFactory = () => AudioRecorder;
@@ -80,7 +82,7 @@ export class Stopwatch {
 }
 
 class MediaStreamRecorder implements AudioRecorder {
-  private stream: MediaStream | null = null;
+  private stream_: MediaStream | null = null;
   private recorder: MediaRecorder | null = null;
   private chunks: BlobPart[] = [];
   private readonly clock = new Stopwatch();
@@ -88,7 +90,7 @@ class MediaStreamRecorder implements AudioRecorder {
   async start(): Promise<void> {
     if (!isRecordingSupported()) throw new RecorderError("unsupported");
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.stream_ = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
       const name = err instanceof Error ? err.name : "";
       if (name === "NotAllowedError" || name === "SecurityError") {
@@ -102,7 +104,7 @@ class MediaStreamRecorder implements AudioRecorder {
     const mimeType = pickMimeType();
     try {
       this.recorder = new MediaRecorder(
-        this.stream,
+        this.stream_,
         mimeType ? { mimeType } : undefined,
       );
     } catch (err) {
@@ -182,9 +184,13 @@ class MediaStreamRecorder implements AudioRecorder {
     return this.clock.elapsed();
   }
 
+  stream(): MediaStream | null {
+    return this.stream_;
+  }
+
   private release() {
-    this.stream?.getTracks().forEach((track) => track.stop());
-    this.stream = null;
+    this.stream_?.getTracks().forEach((track) => track.stop());
+    this.stream_ = null;
     this.recorder = null;
   }
 }

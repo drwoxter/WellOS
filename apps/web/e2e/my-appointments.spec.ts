@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { pickCombo, setLanguage } from "./helpers";
 
 /**
  * Patient self-service journey on the synthetic fixtures. `rep.alba` holds a
@@ -12,7 +13,8 @@ async function signInAsPatient(page: Page, username: string): Promise<void> {
   await page
     .getByRole("button", { name: new RegExp(`Sign in as ${username}`) })
     .click();
-  await expect(page).toHaveURL(/\/my\/appointments/);
+  await expect(page).toHaveURL(/\/my(\/|$)/);
+  await page.goto("/my/appointments");
   await expect(page.getByTestId("my-appointments")).toBeVisible();
 }
 
@@ -36,9 +38,7 @@ test("a patient requests, holds, confirms and cancels an appointment", async ({
   await page.getByTestId("find-best-appointment").click();
   const panel = page.getByRole("tabpanel");
   await expect(panel.getByText(/Patient: Alba Demopatient/)).toBeVisible();
-  await panel
-    .getByLabel("Service", { exact: true })
-    .selectOption({ label: "General medicine consultation" });
+  await pickCombo(panel, "Service", "General medicine consultation");
   await panel.getByTestId("find-best-appointment").click();
 
   // Stage 2: ranked valid options with a concise explanation.
@@ -70,6 +70,9 @@ test("a patient requests, holds, confirms and cancels an appointment", async ({
   // The appointment is listed with history and a calendar download, then
   // cancelled within policy with a reason.
   await page.getByRole("tab", { name: "Appointments" }).click();
+  const apptId = /appointments\/([0-9a-f-]+)\/ics/.exec(icsHref ?? "")?.[1];
+  const row = page.locator(`[data-testid="worklist-row"][data-id="${apptId}"]`);
+  await row.click();
   const card = page
     .getByTestId("appointment-card")
     .filter({ has: page.locator(`a[href="${icsHref}"]`) });
@@ -91,6 +94,7 @@ test("a patient requests, holds, confirms and cancels an appointment", async ({
     .getByRole("group", { name: "Range" })
     .getByRole("button", { name: "History" })
     .click();
+  await row.click();
   const cancelled = page
     .getByTestId("appointment-card")
     .filter({ hasText: "Cancellation reason: scheduling_conflict" })
@@ -141,7 +145,7 @@ test("self-service tabs are keyboard operable", async ({ page }) => {
 
 test("self-service is complete in Spanish", async ({ page }) => {
   await signInAsPatient(page, "rep.alba");
-  await page.getByLabel("Language").selectOption("es");
+  await setLanguage(page, "es");
   await expect(page.getByRole("heading", { name: "Mis citas" })).toBeVisible();
   await expect(
     page.getByRole("tab", { name: "Encontrar la mejor cita" }),

@@ -1,6 +1,9 @@
-// Dashboard cockpit layout: which widgets show, in what order and how dense.
-// Only this configuration is kept in browser storage — never patients,
-// results or any other clinical data.
+// Dashboard cockpit layout: which widgets show, in what order, at what size
+// and how dense. The layout is a per-user preference kept on the server
+// (tenant/user isolated) — never patients, results or any other clinical
+// data. A legacy browser-stored layout is migrated once and then dropped.
+
+import { apiFetch } from "@/lib/session";
 
 export const COCKPIT_WIDGETS = [
   "ready",
@@ -16,10 +19,12 @@ export const COCKPIT_WIDGETS = [
 
 export type CockpitWidget = (typeof COCKPIT_WIDGETS)[number];
 export type Density = "compact" | "expanded";
+export type WidgetSize = "half" | "full";
 
 export type CockpitConfig = {
   order: CockpitWidget[];
   hidden: CockpitWidget[];
+  sizes: Partial<Record<CockpitWidget, WidgetSize>>;
   density: Density;
 };
 
@@ -39,7 +44,10 @@ export const WORKLIST_WIDGETS: readonly CockpitWidget[] = [
   "ai",
 ];
 
+/** Legacy browser-only layout; read once for migration, then removed. */
 export const COCKPIT_STORAGE_ITEM = "wellos.cockpit.v2";
+
+export const PREFERENCES_PATH = "/api/v1/me/dashboard-preferences";
 
 export function defaultConfig(roles: string[]): CockpitConfig {
   if (roles.includes("physician")) {
@@ -56,6 +64,7 @@ export function defaultConfig(roles: string[]): CockpitConfig {
         "access",
       ],
       hidden: ["triage", "access"],
+      sizes: { ready: "full" },
       density: "expanded",
     };
   }
@@ -73,6 +82,7 @@ export function defaultConfig(roles: string[]): CockpitConfig {
         "drafts",
       ],
       hidden: ["access", "drafts", "ai"],
+      sizes: { triage: "full" },
       density: "compact",
     };
   }
@@ -88,6 +98,7 @@ export function defaultConfig(roles: string[]): CockpitConfig {
         "tasks",
         "ai",
       ],
+      sizes: { access: "full" },
       density: "expanded",
     };
   }
@@ -105,12 +116,14 @@ export function defaultConfig(roles: string[]): CockpitConfig {
         "access",
       ],
       hidden: ["drafts"],
+      sizes: { results: "full" },
       density: "compact",
     };
   }
   return {
     order: [...COCKPIT_WIDGETS],
     hidden: ["drafts", "attention", "ai"],
+    sizes: {},
     density: "compact",
   };
 }
@@ -121,59 +134,105 @@ function isWidget(x: unknown): x is CockpitWidget {
   );
 }
 
-/** Accepts only a well-formed layout; anything else yields the role default so
- *  a tampered or outdated value can never break the dashboard. */
+/** Accepts only a well-formed layout document; anything else yields the
+ *  fallback so a tampered or outdated value can never break the dashboard. */
+export function parseLayout(
+  parsed: unknown,
+  fallback: CockpitConfig,
+): CockpitConfig {
+  if (typeof parsed !== "object" || parsed === null) return fallback;
+  const p = parsed as Record<string, unknown>;
+  if (!Array.isArray(p.order) || !Array.isArray(p.hidden)) return fallback;
+  const order = p.order.filter(isWidget);
+  const hidden = p.hidden.filter(isWidget);
+  const density: Density = p.density === "compact" ? "compact" : "expanded";
+  const sizes: Partial<Record<CockpitWidget, WidgetSize>> = {};
+  if (typeof p.sizes === "object" && p.sizes !== null) {
+    for (const [w, size] of Object.entries(
+      p.sizes as Record<string, unknown>,
+    )) {
+      if (isWidget(w) && (size === "half" || size === "full")) sizes[w] = size;
+    }
+  }
+  // Every widget appears exactly once; newly introduced widgets are appended.
+  const seen = new Set<CockpitWidget>();
+  const complete: CockpitWidget[] = [];
+  for (const w of [...order, ...COCKPIT_WIDGETS]) {
+    if (!seen.has(w)) {
+      seen.add(w);
+      complete.push(w);
+    }
+  }
+  return {
+    order: complete,
+    hidden: Array.from(new Set(hidden)),
+    sizes,
+    density,
+  };
+}
+
 export function parseConfig(
   raw: string | null,
   fallback: CockpitConfig,
 ): CockpitConfig {
   if (!raw) return fallback;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return fallback;
-    const p = parsed as Record<string, unknown>;
-    if (!Array.isArray(p.order) || !Array.isArray(p.hidden)) return fallback;
-    const order = p.order.filter(isWidget);
-    const hidden = p.hidden.filter(isWidget);
-    const density: Density = p.density === "compact" ? "compact" : "expanded";
-    // Every widget appears exactly once; newly introduced widgets are appended.
-    const seen = new Set<CockpitWidget>();
-    const complete: CockpitWidget[] = [];
-    for (const w of [...order, ...COCKPIT_WIDGETS]) {
-      if (!seen.has(w)) {
-        seen.add(w);
-        complete.push(w);
-      }
-    }
-    return { order: complete, hidden: Array.from(new Set(hidden)), density };
+    return parseLayout(JSON.parse(raw), fallback);
   } catch {
     return fallback;
   }
 }
 
-export function loadConfig(
+/** A valid legacy browser layout, if one exists (migration source only). */
+export function readLegacyLocalConfig(
   storage: Pick<Storage, "getItem"> | null,
-  roles: string[],
-): CockpitConfig {
-  const fallback = defaultConfig(roles);
-  if (!storage) return fallback;
+): CockpitConfig | null {
+  if (!storage) return null;
   try {
-    return parseConfig(storage.getItem(COCKPIT_STORAGE_ITEM), fallback);
+    const raw = storage.getItem(COCKPIT_STORAGE_ITEM);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const p = parsed as Record<string, unknown>;
+    if (!Array.isArray(p.order) || !Array.isArray(p.hidden)) return null;
+    return parseLayout(parsed, defaultConfig([]));
   } catch {
-    return fallback;
+    return null;
   }
 }
 
-export function saveConfig(
-  storage: Pick<Storage, "setItem"> | null,
-  config: CockpitConfig,
+export function clearLegacyLocalConfig(
+  storage: Pick<Storage, "removeItem"> | null,
 ): void {
   try {
-    storage?.setItem(COCKPIT_STORAGE_ITEM, JSON.stringify(config));
+    storage?.removeItem(COCKPIT_STORAGE_ITEM);
   } catch {
-    // Storage may be unavailable (private mode, quota); the layout simply
-    // does not persist.
+    // Storage may be unavailable; nothing to clean up then.
   }
+}
+
+export type StoredPreferences = {
+  layout: unknown;
+  version: number;
+  updated_at: string | null;
+};
+
+export function loadPreferences(): Promise<StoredPreferences> {
+  return apiFetch<StoredPreferences>(PREFERENCES_PATH);
+}
+
+export function savePreferences(
+  layout: CockpitConfig,
+  version: number,
+): Promise<StoredPreferences> {
+  return apiFetch<StoredPreferences>(PREFERENCES_PATH, {
+    method: "PUT",
+    body: JSON.stringify({ layout, version }),
+  });
+}
+
+export function sameConfig(a: CockpitConfig, b: CockpitConfig): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 export function toggleHidden(
@@ -199,11 +258,41 @@ export function move(
   return { ...config, order };
 }
 
+/** Places `widget` immediately before `before` (or last when `before` is
+ *  null), as a drag-and-drop reorder does. */
+export function moveBefore(
+  config: CockpitConfig,
+  widget: CockpitWidget,
+  before: CockpitWidget | null,
+): CockpitConfig {
+  if (widget === before) return config;
+  const order = config.order.filter((w) => w !== widget);
+  const at = before ? order.indexOf(before) : -1;
+  if (at < 0) order.push(widget);
+  else order.splice(at, 0, widget);
+  return { ...config, order };
+}
+
 export function setDensity(
   config: CockpitConfig,
   density: Density,
 ): CockpitConfig {
   return { ...config, density };
+}
+
+export function setSize(
+  config: CockpitConfig,
+  widget: CockpitWidget,
+  size: WidgetSize,
+): CockpitConfig {
+  return { ...config, sizes: { ...config.sizes, [widget]: size } };
+}
+
+export function sizeOf(
+  config: CockpitConfig,
+  widget: CockpitWidget,
+): WidgetSize {
+  return config.sizes[widget] ?? "half";
 }
 
 /** Widgets the signed-in role can actually populate. */
@@ -223,4 +312,82 @@ export function visibleWidgets(
   return config.order.filter(
     (w) => !config.hidden.includes(w) && available.includes(w),
   );
+}
+
+export type Priority = {
+  key:
+    | "critical"
+    | "ready"
+    | "triage"
+    | "alerts"
+    | "overdue"
+    | "review"
+    | "attention"
+    | "drafts";
+  count: number;
+  href: string;
+  tone: "critical" | "warn" | "teal" | "neutral";
+};
+
+/** The top priorities for the signed-in professional, highest first; only
+ *  real non-zero counts qualify, so an empty list means nothing is pending. */
+export function topPriorities(
+  input: {
+    criticalOpen?: number;
+    ready?: number;
+    waitingTriage?: number;
+    highAlerts?: number;
+    overdueTasks?: number;
+    awaitingReview?: number;
+    attention?: number;
+    drafts?: number;
+  },
+  limit = 3,
+): Priority[] {
+  const all: Priority[] = [
+    {
+      key: "critical",
+      count: input.criticalOpen ?? 0,
+      href: "/results",
+      tone: "critical",
+    },
+    {
+      key: "alerts",
+      count: input.highAlerts ?? 0,
+      href: "#w-alerts",
+      tone: "critical",
+    },
+    { key: "ready", count: input.ready ?? 0, href: "#w-ready", tone: "teal" },
+    {
+      key: "triage",
+      count: input.waitingTriage ?? 0,
+      href: "#w-triage",
+      tone: "warn",
+    },
+    {
+      key: "overdue",
+      count: input.overdueTasks ?? 0,
+      href: "#w-tasks",
+      tone: "warn",
+    },
+    {
+      key: "review",
+      count: input.awaitingReview ?? 0,
+      href: "/results",
+      tone: "warn",
+    },
+    {
+      key: "attention",
+      count: input.attention ?? 0,
+      href: "#w-attention",
+      tone: "neutral",
+    },
+    {
+      key: "drafts",
+      count: input.drafts ?? 0,
+      href: "#w-drafts",
+      tone: "neutral",
+    },
+  ];
+  return all.filter((p) => p.count > 0).slice(0, limit);
 }

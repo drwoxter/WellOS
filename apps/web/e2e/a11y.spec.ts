@@ -92,10 +92,12 @@ test("patient self-service has no serious accessibility violations", async ({
 }) => {
   await page.goto("/");
   await page.getByRole("button", { name: /Sign in as rep\.alba/ }).click();
+  await expect(page).toHaveURL(/\/my(\/|$)/);
+  await page.goto("/my/appointments");
   await page.getByTestId("appointments-section").waitFor();
   await expectNoSeriousViolations(page);
   await page.getByTestId("find-best-appointment").click();
-  await page.getByLabel("Service", { exact: true }).waitFor();
+  await page.getByRole("combobox", { name: "Service" }).waitFor();
   await expectNoSeriousViolations(page);
   await page.getByRole("tab", { name: "Preferences" }).click();
   await page.getByTestId("preferences-form").waitFor();

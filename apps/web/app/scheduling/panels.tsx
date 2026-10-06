@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { apiFetch } from "@/lib/session";
 import { t, type Lang } from "@/lib/i18n";
 import { formatDateTime } from "@/lib/clinical";
@@ -20,7 +20,9 @@ import {
   type TransportRequest,
   type WaitlistEntry,
 } from "@/lib/access";
+import { ChartLegend, Heatmap, type HeatCell } from "@/components/ui/charts";
 import {
+  CatalogCombobox,
   ConfirmBox,
   MessageLine,
   PanelState,
@@ -407,6 +409,102 @@ async function loadForecasts(
   );
 }
 
+/**
+ * Day-by-day pressure map for one ready forecast: weeks as rows, weekdays as
+ * columns. The ratio demand/capacity is the deterministic forecast's own
+ * numbers; a day with zero capacity (closure, no availability) is marked
+ * closed rather than scored.
+ */
+function CapacityHeatmap({
+  lang,
+  forecast,
+}: {
+  lang: Lang;
+  forecast: Extract<ForecastOutput, { status: "ready" }>;
+}) {
+  const { rows, columns, summary } = useMemo(() => {
+    const byDate = new Map(forecast.days.map((d) => [d.date, d]));
+    const dates = forecast.days.map((d) => d.date).sort();
+    if (dates.length === 0) {
+      return { rows: [], columns: [], summary: "" };
+    }
+    const first = new Date(`${dates[0]}T00:00:00`);
+    const dow = (first.getDay() + 6) % 7;
+    first.setDate(first.getDate() - dow);
+    const last = new Date(`${dates[dates.length - 1]}T00:00:00`);
+    const fmtDay = new Intl.DateTimeFormat(lang === "es" ? "es-ES" : "en-GB", {
+      weekday: "short",
+    });
+    const fmtDate = new Intl.DateTimeFormat(lang === "es" ? "es-ES" : "en-GB", {
+      day: "numeric",
+      month: "short",
+    });
+    const columns = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(first);
+      d.setDate(d.getDate() + i);
+      return fmtDay.format(d);
+    });
+    const rows: { label: string; cells: HeatCell[] }[] = [];
+    const cursor = new Date(first);
+    while (cursor <= last) {
+      const cells: HeatCell[] = [];
+      const weekLabel = fmtDate.format(cursor);
+      for (let i = 0; i < 7; i++) {
+        const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}-${String(cursor.getDate()).padStart(2, "0")}`;
+        const d = byDate.get(key);
+        const dateLabel = fmtDate.format(cursor);
+        if (!d) {
+          cells.push({ value: null, text: "", title: dateLabel });
+        } else if (d.available_capacity <= 0) {
+          cells.push({
+            value: null,
+            text: "—",
+            title: t(lang, "heatmapClosed").replace("{date}", dateLabel),
+            closed: true,
+          });
+        } else {
+          const ratio = Math.min(1, d.expected_demand / d.available_capacity);
+          cells.push({
+            value: ratio,
+            text: `${Math.round(d.expected_demand)}/${d.available_capacity}`,
+            title: t(lang, "heatmapCell")
+              .replace("{date}", dateLabel)
+              .replace("{demand}", d.expected_demand.toFixed(1))
+              .replace("{cap}", String(d.available_capacity)),
+          });
+        }
+        cursor.setDate(cursor.getDate() + 1);
+      }
+      rows.push({ label: weekLabel, cells });
+    }
+    const summary = t(lang, "heatmapSummary")
+      .replace("{n}", String(forecast.pressure_days.length))
+      .replace("{total}", String(forecast.days.length));
+    return { rows, columns, summary };
+  }, [forecast, lang]);
+  if (rows.length === 0) return null;
+  return (
+    <div className="capacity-heatmap" data-testid="capacity-heatmap">
+      <h5>{t(lang, "heatmapTitle")}</h5>
+      <p className="muted">{t(lang, "heatmapHelp")}</p>
+      <Heatmap
+        rows={rows.map((r) => r.label)}
+        cols={columns}
+        cells={rows.map((r) => r.cells)}
+        title={t(lang, "heatmapTitle")}
+        summary={summary}
+      />
+      <ChartLegend
+        items={[
+          { tone: "ok", label: t(lang, "heatmapLegendLow") },
+          { tone: "critical", label: t(lang, "heatmapLegendHigh") },
+          { tone: "neutral", label: t(lang, "heatmapLegendClosed") },
+        ]}
+      />
+    </div>
+  );
+}
+
 function ForecastTable({
   lang,
   forecast,
@@ -429,6 +527,7 @@ function ForecastTable({
         {t(lang, "historyWeeks")}: {forecast.history_weeks} ·{" "}
         {t(lang, "pressureDays")}: {forecast.pressure_days.length}
       </p>
+      <CapacityHeatmap lang={lang} forecast={forecast} />
       <div className="table-wrap">
         <table>
           <thead>
@@ -549,21 +648,15 @@ export function CapacityPanel({
             </select>
           </div>
         ) : null}
-        <div>
-          <label htmlFor="cap-service">{t(lang, "service")}</label>
-          <select
-            id="cap-service"
-            value={newService}
-            onChange={(e) => setNewService(e.target.value)}
-          >
-            <option value="">{t(lang, "selectService")}</option>
-            {services.entries.map((s) => (
-              <option key={s.code} value={s.code}>
-                {nameFor(lang, services.entries, s.code)}
-              </option>
-            ))}
-          </select>
-        </div>
+        <CatalogCombobox
+          id="cap-service"
+          lang={lang}
+          label={t(lang, "service")}
+          entries={services.entries}
+          value={newService}
+          onChange={setNewService}
+          placeholder={t(lang, "selectService")}
+        />
         <button
           type="button"
           disabled={busy || !newService}

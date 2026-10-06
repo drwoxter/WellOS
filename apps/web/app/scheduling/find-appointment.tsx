@@ -20,6 +20,7 @@ import {
   type WeeklyWindow,
 } from "@/lib/access";
 import {
+  CatalogCombobox,
   MessageLine,
   OfferCard,
   RankingNotice,
@@ -108,6 +109,8 @@ export type IntentResult = {
 };
 
 const STAFF_BASE = "/api/v1";
+/** Patients see the leading recommendations first; the rest stay one click away. */
+const TOP_OPTIONS = 3;
 const ME_BASE = "/api/v1/me";
 
 function v(version: number) {
@@ -346,6 +349,7 @@ export function FindAppointment({
     reason: string;
   } | null>(null);
   const [overrideReason, setOverrideReason] = useState("");
+  const [showAllOffers, setShowAllOffers] = useState(false);
   const [triageReason, setTriageReason] = useState("");
   const [idemKey, setIdemKey] = useState(newKey);
 
@@ -535,12 +539,62 @@ export function FindAppointment({
   ];
   const stageIndex = stages.findIndex((s) => s.key === stage);
 
+  const limitOffers =
+    mode === "patient" && (result?.offers.length ?? 0) > TOP_OPTIONS;
+  const shownOffers =
+    result && limitOffers && !showAllOffers
+      ? result.offers.slice(0, TOP_OPTIONS)
+      : (result?.offers ?? []);
+  const hiddenOffers = result ? result.offers.length - shownOffers.length : 0;
+
   const rejected = useMemo(
     () =>
       Object.entries(result?.rejected_summary ?? {}).sort(
         (a, b) => b[1] - a[1],
       ),
     [result],
+  );
+
+  const preferenceFieldsets = (
+    <>
+      <fieldset>
+        <legend>{t(lang, "modality")}</legend>
+        <div className="chip-row">
+          {modalities.entries.map((m) => (
+            <label key={m.code} className="chip">
+              <input
+                type="checkbox"
+                checked={form.modality_codes.includes(m.code)}
+                onChange={() =>
+                  update("modality_codes", toggle(form.modality_codes, m.code))
+                }
+              />
+              {nameFor(lang, modalities.entries, m.code)}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      {facilities.length > 0 ? (
+        <fieldset>
+          <legend>{t(lang, "facilities")}</legend>
+          <div className="chip-row">
+            {facilities.map((f) => (
+              <label key={f.id} className="chip">
+                <input
+                  type="checkbox"
+                  checked={form.facility_ids.includes(f.id)}
+                  onChange={() =>
+                    update("facility_ids", toggle(form.facility_ids, f.id))
+                  }
+                />
+                {f.name}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ) : null}
+    </>
   );
 
   return (
@@ -624,6 +678,11 @@ export function FindAppointment({
 
           <div>
             <label htmlFor={`${ids}-text`}>{t(lang, "describeNeed")}</label>
+            {mode === "patient" ? (
+              <p className="muted" id={`${ids}-text-help`}>
+                {t(lang, "guidedNeedHelp")}
+              </p>
+            ) : null}
             <textarea
               id={`${ids}-text`}
               rows={3}
@@ -631,6 +690,9 @@ export function FindAppointment({
               value={form.free_text}
               onChange={(e) => update("free_text", e.target.value)}
               placeholder={t(lang, "describeNeedHint")}
+              aria-describedby={
+                mode === "patient" ? `${ids}-text-help` : undefined
+              }
             />
             <div className="visit-actions">
               <button
@@ -672,37 +734,28 @@ export function FindAppointment({
             ) : null}
           </div>
 
+          {mode === "patient" ? (
+            <h3 className="find-section-title">
+              {t(lang, "constraintsTitle")}
+            </h3>
+          ) : null}
           <div className="filters">
-            <div>
-              <label htmlFor={`${ids}-service`}>{t(lang, "service")}</label>
-              <select
-                id={`${ids}-service`}
-                value={form.service_code}
-                onChange={(e) => update("service_code", e.target.value)}
-              >
-                <option value="">—</option>
-                {services.entries.map((s) => (
-                  <option key={s.code} value={s.code}>
-                    {nameFor(lang, services.entries, s.code)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label htmlFor={`${ids}-specialty`}>{t(lang, "specialty")}</label>
-              <select
-                id={`${ids}-specialty`}
-                value={form.specialty_code}
-                onChange={(e) => update("specialty_code", e.target.value)}
-              >
-                <option value="">—</option>
-                {specialties.entries.map((s) => (
-                  <option key={s.code} value={s.code}>
-                    {nameFor(lang, specialties.entries, s.code)}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <CatalogCombobox
+              id={`${ids}-service`}
+              lang={lang}
+              label={t(lang, "service")}
+              entries={services.entries}
+              value={form.service_code}
+              onChange={(v) => update("service_code", v)}
+            />
+            <CatalogCombobox
+              id={`${ids}-specialty`}
+              lang={lang}
+              label={t(lang, "specialty")}
+              entries={specialties.entries}
+              value={form.specialty_code}
+              onChange={(v) => update("specialty_code", v)}
+            />
             <div>
               <label htmlFor={`${ids}-earliest`}>
                 {t(lang, "earliestDate")}
@@ -741,49 +794,11 @@ export function FindAppointment({
             ) : null}
           </div>
 
-          <fieldset>
-            <legend>{t(lang, "modality")}</legend>
-            <div className="chip-row">
-              {modalities.entries.map((m) => (
-                <label key={m.code} className="chip">
-                  <input
-                    type="checkbox"
-                    checked={form.modality_codes.includes(m.code)}
-                    onChange={() =>
-                      update(
-                        "modality_codes",
-                        toggle(form.modality_codes, m.code),
-                      )
-                    }
-                  />
-                  {nameFor(lang, modalities.entries, m.code)}
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          {facilities.length > 0 ? (
-            <fieldset>
-              <legend>{t(lang, "facilities")}</legend>
-              <div className="chip-row">
-                {facilities.map((f) => (
-                  <label key={f.id} className="chip">
-                    <input
-                      type="checkbox"
-                      checked={form.facility_ids.includes(f.id)}
-                      onChange={() =>
-                        update("facility_ids", toggle(form.facility_ids, f.id))
-                      }
-                    />
-                    {f.name}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-          ) : null}
+          {mode === "staff" ? preferenceFieldsets : null}
 
           <details className="secondary">
             <summary>{t(lang, "morePreferences")}</summary>
+            {mode === "patient" ? preferenceFieldsets : null}
             <WindowsEditor
               lang={lang}
               idPrefix={`${ids}-win`}
@@ -941,20 +956,42 @@ export function FindAppointment({
                   {t(lang, "noOptions")}
                 </p>
               ) : (
-                <ul
-                  className="result-list offers"
-                  aria-label={t(lang, "stageOptions")}
-                >
-                  {result.offers.map((o) => (
-                    <OfferCard
-                      key={o.id}
-                      lang={lang}
-                      offer={o}
-                      busy={busy}
-                      onAction={onOffer}
-                    />
-                  ))}
-                </ul>
+                <>
+                  {mode === "patient" ? (
+                    <p className="muted">{t(lang, "topOptionsHelp")}</p>
+                  ) : null}
+                  <ul
+                    className="result-list offers"
+                    aria-label={t(lang, "stageOptions")}
+                  >
+                    {shownOffers.map((o) => (
+                      <OfferCard
+                        key={o.id}
+                        lang={lang}
+                        offer={o}
+                        busy={busy}
+                        onAction={onOffer}
+                      />
+                    ))}
+                  </ul>
+                  {hiddenOffers > 0 || (showAllOffers && limitOffers) ? (
+                    <p className="offers-more">
+                      <button
+                        type="button"
+                        className="secondary"
+                        aria-expanded={showAllOffers}
+                        onClick={() => setShowAllOffers((v) => !v)}
+                      >
+                        {showAllOffers
+                          ? t(lang, "showFewerOptions")
+                          : t(lang, "showMoreOptions").replace(
+                              "{n}",
+                              String(hiddenOffers),
+                            )}
+                      </button>
+                    </p>
+                  ) : null}
+                </>
               )}
               {rejected.length > 0 ? (
                 <details className="secondary">

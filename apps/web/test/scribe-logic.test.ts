@@ -17,10 +17,15 @@ import {
   COCKPIT_WIDGETS,
   availableWidgets,
   defaultConfig,
-  loadConfig,
+  moveBefore,
+  parseLayout,
+  readLegacyLocalConfig,
+  clearLegacyLocalConfig,
+  setSize,
+  sizeOf,
+  topPriorities,
   move,
   parseConfig,
-  saveConfig,
   setDensity,
   toggleHidden,
   visibleWidgets,
@@ -377,23 +382,83 @@ describe("dashboard cockpit configuration", () => {
     expect(parsed.density).toBe("compact");
   });
 
-  it("round-trips through storage and stores layout only", () => {
+  it("reorders by drop target and sizes widgets", () => {
+    let cfg = defaultConfig(["physician"]);
+    cfg = moveBefore(cfg, "ai", "ready");
+    expect(cfg.order.slice(0, 3)).toEqual(["ai", "ready", "alerts"]);
+    cfg = moveBefore(cfg, "ai", null);
+    expect(cfg.order[cfg.order.length - 1]).toBe("ai");
+    expect(moveBefore(cfg, "ai", "ai")).toBe(cfg);
+    expect(sizeOf(cfg, "ready")).toBe("full");
+    expect(sizeOf(cfg, "tasks")).toBe("half");
+    cfg = setSize(cfg, "tasks", "full");
+    expect(sizeOf(cfg, "tasks")).toBe("full");
+  });
+
+  it("accepts server layouts strictly and migrates only a valid legacy copy", () => {
+    const fallback = defaultConfig(["physician"]);
+    expect(parseLayout(null, fallback)).toBe(fallback);
+    expect(parseLayout({ order: [], hidden: "x" }, fallback)).toBe(fallback);
+    const parsed = parseLayout(
+      {
+        order: ["tasks"],
+        hidden: ["ai"],
+        sizes: { tasks: "full", bogus: "full", ai: "huge" },
+        density: "compact",
+      },
+      fallback,
+    );
+    expect(parsed.order[0]).toBe("tasks");
+    expect(parsed.order).toHaveLength(COCKPIT_WIDGETS.length);
+    expect(parsed.sizes).toEqual({ tasks: "full" });
+    expect(parsed.density).toBe("compact");
+
     const store = new Map<string, string>();
     const storage = {
       getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
     };
-    const cfg = setDensity(
-      toggleHidden(defaultConfig(["physician"]), "tasks"),
-      "compact",
+    expect(readLegacyLocalConfig(storage)).toBeNull();
+    store.set(COCKPIT_STORAGE_ITEM, "{not json");
+    expect(readLegacyLocalConfig(storage)).toBeNull();
+    store.set(COCKPIT_STORAGE_ITEM, JSON.stringify({ order: "x" }));
+    expect(readLegacyLocalConfig(storage)).toBeNull();
+    store.set(
+      COCKPIT_STORAGE_ITEM,
+      JSON.stringify({
+        order: ["results"],
+        hidden: ["ai"],
+        density: "compact",
+      }),
     );
-    saveConfig(storage, cfg);
-    expect(loadConfig(storage, ["physician"])).toEqual(cfg);
-    expect(
-      Object.keys(JSON.parse(store.get(COCKPIT_STORAGE_ITEM)!)).sort(),
-    ).toEqual(["density", "hidden", "order"]);
-    expect(loadConfig(null, ["physician"])).toEqual(
-      defaultConfig(["physician"]),
-    );
+    const legacy = readLegacyLocalConfig(storage);
+    expect(legacy?.order[0]).toBe("results");
+    expect(legacy?.hidden).toEqual(["ai"]);
+    expect(legacy?.sizes).toEqual({});
+    clearLegacyLocalConfig(storage);
+    expect(store.has(COCKPIT_STORAGE_ITEM)).toBe(false);
+    expect(readLegacyLocalConfig(null)).toBeNull();
+  });
+
+  it("ranks real non-zero priorities, most urgent first, at most three", () => {
+    expect(topPriorities({})).toEqual([]);
+    const top = topPriorities({
+      criticalOpen: 0,
+      ready: 2,
+      waitingTriage: 4,
+      highAlerts: 1,
+      overdueTasks: 3,
+      drafts: 5,
+    });
+    expect(top.map((p) => p.key)).toEqual(["alerts", "ready", "triage"]);
+    expect(top[0]).toMatchObject({
+      count: 1,
+      href: "#w-alerts",
+      tone: "critical",
+    });
+    expect(topPriorities({ criticalOpen: 1 })[0]).toMatchObject({
+      key: "critical",
+      href: "/results",
+    });
   });
 });

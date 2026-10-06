@@ -1,5 +1,6 @@
 "use client";
 
+import { EmptyState } from "@/components/ui/primitives";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
@@ -307,46 +308,50 @@ export default function RequestDetailPage() {
                 {t(lang, "dataQualityIssues")}: {d.issue}
               </p>
             ))}
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">{t(lang, "value")}</th>
-                    <th scope="col">{t(lang, "referenceRange")}</th>
-                    <th scope="col">{t(lang, "state")}</th>
-                    <th scope="col">{t(lang, "collected")}</th>
-                    <th scope="col">{t(lang, "received")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.observations.map((o) => (
-                    <tr key={o.id}>
-                      <td>
-                        <strong>
-                          {o.value} {o.unit}
-                        </strong>
-                      </td>
-                      <td>{o.reference_range ?? "—"}</td>
-                      <td>
-                        {o.status === "amended-superseded" ? (
-                          <span className="badge warn">
-                            {t(lang, "supersededBy")}
-                          </span>
-                        ) : o.amends ? (
-                          <span className="badge neutral">
-                            {t(lang, "amendmentOf")}
-                          </span>
-                        ) : (
-                          <span className="badge ok">{o.status}</span>
-                        )}
-                      </td>
-                      <td>{formatDateTime(lang, o.effective_at)}</td>
-                      <td>{formatDateTime(lang, o.received_at)}</td>
+            {data.observations.length === 0 ? (
+              <EmptyState inline title={t(lang, "noObservationsYet")} />
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">{t(lang, "value")}</th>
+                      <th scope="col">{t(lang, "referenceRange")}</th>
+                      <th scope="col">{t(lang, "state")}</th>
+                      <th scope="col">{t(lang, "collected")}</th>
+                      <th scope="col">{t(lang, "received")}</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {data.observations.map((o) => (
+                      <tr key={o.id}>
+                        <td>
+                          <strong>
+                            {o.value} {o.unit}
+                          </strong>
+                        </td>
+                        <td>{o.reference_range ?? "—"}</td>
+                        <td>
+                          {o.status === "amended-superseded" ? (
+                            <span className="badge warn">
+                              {t(lang, "supersededBy")}
+                            </span>
+                          ) : o.amends ? (
+                            <span className="badge neutral">
+                              {t(lang, "amendmentOf")}
+                            </span>
+                          ) : (
+                            <span className="badge ok">{o.status}</span>
+                          )}
+                        </td>
+                        <td>{formatDateTime(lang, o.effective_at)}</td>
+                        <td>{formatDateTime(lang, o.received_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
           {nextAction && canRunNextAction ? (

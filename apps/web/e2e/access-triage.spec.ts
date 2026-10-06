@@ -1,6 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { signInAs, signInAsRegistration, signOut } from "./helpers";
+import {
+  setLanguage,
+  signInAs,
+  signInAsRegistration,
+  signOut,
+} from "./helpers";
 
 /**
  * Care-team golden path: development login → register a new synthetic patient
@@ -281,6 +286,10 @@ test("access board and triage workspace are keyboard operable with no serious a1
   await expect(redFlag).toBeChecked({ checked: !before });
   await page.keyboard.press("Space");
   await expect(redFlag).toBeChecked({ checked: before });
+  // WCAG 2.2 AA 2.5.8: each checkbox is a 24 px pointer target on its own.
+  const box = await redFlag.boundingBox();
+  expect(box?.width ?? 0).toBeGreaterThanOrEqual(24);
+  expect(box?.height ?? 0).toBeGreaterThanOrEqual(24);
 
   const triageScan = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag22aa"])
@@ -297,7 +306,7 @@ test("access board and triage workspace switch to Spanish", async ({
 }) => {
   await signInAs(page, "nurse.kim");
   await page.goto("/access");
-  await page.getByLabel("Language").first().selectOption("es");
+  await setLanguage(page, "es");
   await expect(
     page.getByRole("heading", { name: "Acceso de pacientes" }).first(),
   ).toBeVisible();

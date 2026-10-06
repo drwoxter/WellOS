@@ -28,6 +28,8 @@ import {
   useAction,
   useCatalog,
   useLoader,
+  Worklist,
+  WorklistRow,
 } from "../../scheduling/shared";
 import {
   FindAppointment,
@@ -464,6 +466,7 @@ function AppointmentsSection({
   refreshKey: number;
 }) {
   const [range, setRange] = useState<"upcoming" | "past">("upcoming");
+  const services = useCatalog("clinical_service");
   const appts = useLoader(
     () =>
       apiFetch<Items<Appointment>>(
@@ -528,8 +531,30 @@ function AppointmentsSection({
         }
       >
         {(d) => (
-          <ul className="stack">
-            {d.items.map((a) => (
+          <Worklist
+            lang={lang}
+            label={t(lang, "myAppointmentsTab")}
+            items={d.items}
+            keyOf={(a) => a.id}
+            renderRow={(a) => (
+              <WorklistRow
+                title={nameFor(lang, services.entries, a.service_code)}
+                meta={formatDateTime(lang, a.starts_at)}
+                badges={
+                  <StatusBadge
+                    label={appointmentStatusLabel(lang, a.status)}
+                    tone={
+                      a.status === "confirmed" || a.status === "rescheduled"
+                        ? "ok"
+                        : a.status === "cancelled"
+                          ? "warn"
+                          : "neutral"
+                    }
+                  />
+                }
+              />
+            )}
+            renderDetail={(a) => (
               <AppointmentCard
                 key={`${a.id}:${a.version}`}
                 lang={lang}
@@ -583,8 +608,8 @@ function AppointmentsSection({
                   }, "transportCancelled")
                 }
               />
-            ))}
-          </ul>
+            )}
+          />
         )}
       </PanelState>
     </div>
@@ -722,6 +747,10 @@ export default function MyAppointmentsPage() {
   const me = useLoader(() => apiFetch<Me>(ME), "me", authenticated === true);
   const [patientId, setPatientId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("appointments");
+  useEffect(() => {
+    const wanted = new URLSearchParams(window.location.search).get("tab");
+    if (wanted && (TABS as string[]).includes(wanted)) setTab(wanted as Tab);
+  }, []);
   const [refreshKey, setRefreshKey] = useState(0);
   const [findSeed, setFindSeed] = useState<{
     key: number;

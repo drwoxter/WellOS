@@ -1,0 +1,512 @@
+/* ---------- Authenticated application shells ----------
+   .shell.role-clinical / .shell.role-operational: collapsible desktop rail.
+   .shell.role-patient: mobile-first, bottom navigation, centred column. */
+
+.shell {
+  display: flex;
+  min-height: 100dvh;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100dvh;
+  width: var(--rail-w);
+  flex: 0 0 var(--rail-w);
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--ink-900) 0%, var(--ink-800) 100%);
+  color: #e8eef5;
+  padding: 0.9rem 0.7rem;
+  transition:
+    width var(--dur) var(--ease),
+    flex-basis var(--dur) var(--ease);
+  overflow: hidden;
+}
+.shell.rail-collapsed .sidebar {
+  width: var(--rail-w-collapsed);
+  flex-basis: var(--rail-w-collapsed);
+}
+
+.sidebar .brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.3rem 0.5rem 0.9rem;
+  color: #fff;
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.brand-mark {
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 2rem;
+  border-radius: 10px;
+  background: linear-gradient(
+    135deg,
+    var(--teal-400),
+    var(--teal-600) 60%,
+    var(--indigo-500)
+  );
+  display: grid;
+  place-items: center;
+  color: #fff;
+  box-shadow: 0 6px 16px -8px rgba(60, 193, 207, 0.8);
+}
+.brand-mark svg {
+  width: 1.2rem;
+  height: 1.2rem;
+}
+.shell.rail-collapsed .sidebar .brand-text,
+.shell.rail-collapsed .sidebar .nav-group-label,
+.shell.rail-collapsed .sidebar .navlink-label,
+.shell.rail-collapsed .sidebar .shell-context {
+  display: none;
+}
+
+.sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.nav-group-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(232, 238, 245, 0.55);
+  padding: 0.8rem 0.6rem 0.25rem;
+  font-weight: 650;
+}
+
+.navlink {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.6rem;
+  min-height: 2.6rem;
+  border-radius: var(--r-md);
+  color: rgba(232, 238, 245, 0.84);
+  text-decoration: none;
+  font-weight: 550;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  position: relative;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+.navlink svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  flex: 0 0 1.2rem;
+  opacity: 0.9;
+}
+.navlink:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+}
+.navlink:active {
+  transform: scale(0.98);
+}
+.navlink[aria-current="page"] {
+  background: rgba(60, 193, 207, 0.16);
+  color: #fff;
+}
+.navlink[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: -0.7rem;
+  top: 0.55rem;
+  bottom: 0.55rem;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--teal-400);
+}
+/* Route content reuses `.navlink` on light surfaces as an inline text link:
+   it must wrap inside its column and never paint over neighbouring content. */
+main .navlink {
+  position: static;
+  min-width: 0;
+  min-height: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+  font-weight: 500;
+}
+main .navlink:hover {
+  background: var(--surface-3);
+  color: var(--fg-strong);
+}
+main .navlink[aria-current="page"] {
+  background: var(--primary);
+  color: #fff;
+}
+main .navlink[aria-current="page"]::before {
+  content: none;
+}
+
+.navlink.dmind svg {
+  color: var(--violet-400);
+}
+.navlink .navlink-count {
+  margin-left: auto;
+  font-size: 0.72rem;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: var(--r-pill);
+  padding: 0.05rem 0.5rem;
+}
+.sidebar :focus-visible {
+  outline-color: var(--teal-400);
+}
+
+.sidebar .spacer {
+  flex: 1 1 auto;
+}
+
+.shell-context {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0.8rem 0.6rem 0.2rem;
+  font-size: 0.8rem;
+  color: rgba(232, 238, 245, 0.7);
+  line-height: 1.4;
+}
+.shell-context .who {
+  color: #fff;
+  font-weight: 600;
+}
+
+.rail-toggle {
+  margin-top: 0.4rem;
+  color: rgba(232, 238, 245, 0.75);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: transparent;
+  width: 100%;
+  justify-content: flex-start;
+  gap: 0.65rem;
+  padding-inline: 0.6rem;
+}
+.rail-toggle:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+.shell.rail-collapsed .rail-toggle {
+  justify-content: center;
+  padding-inline: 0;
+}
+.shell.rail-collapsed .rail-toggle .navlink-label {
+  display: none;
+}
+
+.shell-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  min-height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1.25rem;
+  background: color-mix(in srgb, var(--canvas) 78%, white);
+  backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.topbar .page-title {
+  font-size: 1rem;
+  font-weight: 650;
+  margin: 0;
+  color: var(--fg-strong);
+}
+.topbar .facility {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.topbar .topbar-spacer {
+  flex: 1 1 auto;
+}
+.topbar .synthetic-chip {
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: var(--amber-700);
+  background: var(--amber-100);
+  border-radius: var(--r-pill);
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+}
+
+/* User menu */
+.user-menu {
+  position: relative;
+}
+.user-menu-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 0.25rem 0.7rem 0.25rem 0.3rem;
+  min-height: 2.5rem;
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 0.86rem;
+  max-width: 16rem;
+}
+.user-menu-button:hover:not(:disabled) {
+  box-shadow: var(--shadow-1);
+  border-color: var(--border-strong);
+}
+.user-menu-button .user-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.avatar {
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--primary), var(--indigo-500));
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  flex: 0 0 auto;
+}
+.user-menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.4rem);
+  width: min(20rem, calc(100vw - 2rem));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+  padding: 0.75rem;
+  z-index: 60;
+  animation: pop-in var(--dur) var(--ease);
+  transform-origin: top right;
+}
+.user-menu-panel .menu-head {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.25rem 0.25rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+}
+.user-menu-panel .menu-head .avatar {
+  width: 2.4rem;
+  height: 2.4rem;
+  font-size: 0.95rem;
+}
+.user-menu-panel .menu-head .who {
+  font-weight: 650;
+  line-height: 1.25;
+}
+.user-menu-panel .menu-head .roles {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.user-menu-panel label {
+  margin-top: 0.5rem;
+}
+.user-menu-panel .menu-footer {
+  margin-top: 0.75rem;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Mobile / compact navigation (also the patient bottom navigation). */
+.mobile-nav {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .shell {
+    flex-direction: column;
+  }
+  .sidebar {
+    display: none;
+  }
+  .topbar {
+    padding: 0.5rem 0.9rem;
+  }
+  .topbar .facility {
+    display: none;
+  }
+  .mobile-nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    min-height: var(--bottom-nav-h);
+    padding: 0.3rem 0.4rem calc(0.3rem + env(safe-area-inset-bottom));
+    background: color-mix(in srgb, var(--surface) 92%, var(--canvas));
+    backdrop-filter: saturate(1.4) blur(12px);
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -8px 24px -18px rgba(16, 32, 58, 0.35);
+  }
+  .mobile-nav .navlink {
+    flex-direction: column;
+    gap: 0.15rem;
+    justify-content: center;
+    min-height: 3.2rem;
+    padding: 0.3rem 0.2rem;
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 600;
+    border-radius: var(--r-md);
+  }
+  .mobile-nav .navlink svg {
+    width: 1.35rem;
+    height: 1.35rem;
+    flex-basis: 1.35rem;
+  }
+  .mobile-nav .navlink:hover {
+    background: var(--surface-3);
+    color: var(--fg);
+  }
+  .mobile-nav .navlink[aria-current="page"] {
+    color: var(--primary-strong);
+    background: var(--primary-softer);
+  }
+  .mobile-nav .navlink[aria-current="page"]::before {
+    display: none;
+  }
+  .mobile-nav .navlink .navlink-count {
+    position: absolute;
+    top: 0.2rem;
+    right: calc(50% - 1.3rem);
+    margin: 0;
+    background: var(--red-600);
+    color: #fff;
+  }
+  main {
+    padding: 1rem 0.9rem calc(var(--bottom-nav-h) + 1rem);
+  }
+}
+
+/* Patient shell: calm, centred, mobile-first. */
+.shell.role-patient .sidebar {
+  background: linear-gradient(180deg, var(--ink-900) 0%, var(--teal-700) 160%);
+}
+.shell.role-patient main {
+  width: 100%;
+  max-width: 64rem;
+  margin: 0 auto;
+}
+
+/* Page header shared by all routes. */
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  margin: 0 0 1rem;
+}
+.page-head h1,
+.page-head h2 {
+  margin: 0;
+}
+.page-head .page-sub {
+  color: var(--muted);
+  margin: 0.2rem 0 0;
+  max-width: 60ch;
+}
+.page-head .actions {
+  align-items: center;
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Rail toggle keeps its light-on-ink colours regardless of the generic
+   .ghost button rules. */
+.sidebar .rail-toggle,
+.sidebar .rail-toggle:hover:not(:disabled) {
+  color: rgba(232, 238, 245, 0.85);
+}
+.sidebar .rail-toggle svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+.topbar-brand {
+  display: none;
+}
+.topbar {
+  min-width: 0;
+}
+.user-menu {
+  max-width: 100%;
+  flex-shrink: 0;
+}
+@media (max-width: 760px) {
+  .topbar-brand {
+    display: inline-flex;
+    padding: 0;
+    margin: 0;
+  }
+  .topbar .page-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .user-menu-button .user-name {
+    display: none;
+  }
+  .user-menu-panel {
+    right: 0;
+    left: auto;
+    width: min(20rem, calc(100vw - 1.5rem));
+  }
+}

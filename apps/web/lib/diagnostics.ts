@@ -1007,28 +1007,40 @@ export function releaseReport(
 // Patient self-service
 // ---------------------------------------------------------------------------
 
+export type MyReleasedComponent = {
+  id: string;
+  code: string;
+  display: string;
+  value: ResultValue | null;
+  value_text: string | null;
+  reference_range: string | null;
+  interpretation: string;
+  effective_at: string | null;
+};
+
+/**
+ * One released report as `GET /api/v1/me/diagnostics` emits it: the order
+ * title, the conclusion and the approved explanation. Component values are
+ * only part of the single-report view (`components`).
+ */
 export type MyReleasedResult = {
   id: string;
   service_request_id: string;
   patient_id: string;
-  display: string;
-  code: string | null;
+  order_display: string;
   category_code: string | null;
   modality_code: string | null;
   status: string;
   version: number;
   criticality: string;
   conclusion: string | null;
-  value: ResultValue | null;
-  value_text: string | null;
-  interpretation: string | null;
-  reference_range: string | null;
   issued_at: string | null;
   effective_at: string | null;
   released_at: string;
   notified: boolean;
   explanation_en: string | null;
   explanation_es: string | null;
+  components?: MyReleasedComponent[];
   documents?: ClinicalDocument[];
 };
 

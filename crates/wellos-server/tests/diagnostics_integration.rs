@@ -1759,6 +1759,32 @@ async fn critical_report_review_release_and_patient_privacy() {
         StatusCode::NOT_FOUND,
         "unreleased reports are invisible to the patient: {v}"
     );
+    // The patient home applies the same release rule: status only, no content.
+    let (st, home) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/home?patient_id={p}"),
+        REP,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{home}");
+    assert_eq!(
+        home["diagnostics"]["released"].as_array().unwrap().len(),
+        0,
+        "{home}"
+    );
+    assert_eq!(home["counts"]["new_results"], 0, "{home}");
+    assert!(
+        home["diagnostics"]["under_review"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["service_request_id"] == acc["id"]),
+        "{home}"
+    );
+    assert!(home["trends"].as_array().unwrap().is_empty(), "{home}");
+    assert!(!home.to_string().contains("clinical_assessment"), "{home}");
 
     // Explanation draft must be approved and its text supplied explicitly.
     let (st, expl) = call(
@@ -1894,6 +1920,41 @@ async fn critical_report_review_release_and_patient_privacy() {
         !text.contains("clinical_assessment"),
         "internal review text never reaches the patient view: {mine}"
     );
+    // Once released, the home shows the result as new, with the approved
+    // explanation and without any reviewer-only text.
+    let (st, home) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/home?patient_id={p}"),
+        REP,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{home}");
+    let released = home["diagnostics"]["released"].as_array().unwrap();
+    assert!(released.iter().any(|r| r["id"] == report["id"]), "{home}");
+    // The list form carries the order title and explanation only; component
+    // values belong to the single-report view.
+    assert!(
+        released.iter().all(|r| r["order_display"].is_string()
+            && r.get("display").is_none()
+            && r.get("value").is_none()),
+        "{home}"
+    );
+    assert_eq!(home["counts"]["new_results"], released.len(), "{home}");
+    assert_eq!(home["next_action"]["kind"], "new_results", "{home}");
+    let text = home.to_string();
+    assert!(text.contains("explanation"), "{home}");
+    assert!(!text.contains("clinical_assessment"), "{home}");
+    let (st, v) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/me/home?patient_id={p}"),
+        "dev-rep.alba",
+        None,
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "{v}");
     // Another representative without a grant sees nothing for this patient.
     let (st, v) = call(
         &state,

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signInAs } from "./helpers";
+import { setLanguage, signInAs } from "./helpers";
 
 /**
  * dMind Clinical Orders & Diagnostics journeys on the synthetic fixtures:
@@ -28,7 +28,9 @@ async function signInAsPatient(page: Page, username: string): Promise<void> {
   await page
     .getByRole("button", { name: new RegExp(`Sign in as ${username}`) })
     .click();
-  await expect(page).toHaveURL(/\/my\/appointments/);
+  await expect(page).toHaveURL(/\/my(\/|$)/);
+  await page.goto("/my/appointments");
+  await expect(page.getByTestId("my-appointments")).toBeVisible();
 }
 
 test.describe.configure({ mode: "serial" });
@@ -192,7 +194,10 @@ test("administrator adds a runtime orderable that clinicians can find", async ({
 
 test("patient reads released results in Spanish", async ({ page }) => {
   await signInAsPatient(page, "rep.alba");
-  await page.getByRole("link", { name: "My tests" }).first().click();
+  await page
+    .getByRole("link", { name: /^(My tests|Health)$/ })
+    .first()
+    .click();
   await expect(page).toHaveURL(/\/my\/diagnostics/);
   const released = page.getByTestId("my-dx-released");
   await expect(released).toBeVisible();
@@ -202,7 +207,7 @@ test("patient reads released results in Spanish", async ({ page }) => {
   await expect(page.getByTestId("dx-release")).toHaveCount(0);
   await expect(page.getByText(/criticality_rules|input_hash/)).toHaveCount(0);
 
-  await page.getByLabel("Language").first().selectOption("es");
+  await setLanguage(page, "es");
   await expect(
     page.getByRole("heading", { name: "Resultados liberados" }),
   ).toBeVisible();
