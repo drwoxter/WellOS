@@ -25,8 +25,6 @@ use uuid::Uuid;
 const LAST_PRE_EVALUATION_MIGRATION: i64 = 17;
 const GATE_DATABASE: &str = "wellos_upgrade_gate_0018";
 
-/// `(code_loinc, loop_state, status, version, orderable_code, category_code,
-
 fn database_url() -> String {
     std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://wellos:wellos_dev@localhost:5432/wellos".to_string())
