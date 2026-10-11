@@ -409,15 +409,17 @@ pub fn status_str(s: CaseStatus) -> &'static str {
 }
 
 /// Prior executions with identical provenance that a new run may reuse
-/// instead of calling the provider: only schema-valid successful outputs,
-/// never failures, so a recovered provider is always re-asked.
+/// instead of calling the provider: the newest schema-valid successful
+/// output per input, never failures, so a recovered provider is always
+/// re-asked.
 pub async fn cached_executions(
     pool: &PgPool,
     tenant_id: Uuid,
     config_hash: &str,
 ) -> Result<Vec<CachedExecution>, ApiError> {
     let rows = sqlx::query(
-        "SELECT e.input_hash, e.prompt_version, e.provider, e.model, e.model_version,
+        "SELECT DISTINCT ON (e.input_hash)
+                e.input_hash, e.prompt_version, e.provider, e.model, e.model_version,
                 e.provider_output, e.failure_code
          FROM dmind_eval_executions e
          JOIN dmind_eval_runs r ON r.id = e.run_id
@@ -426,7 +428,7 @@ pub async fn cached_executions(
            AND e.execution_kind IN ('fresh','retried')
            AND e.status IN ('passed','needs_review')
            AND e.provider_output IS NOT NULL
-         ORDER BY e.started_at DESC LIMIT 2000",
+         ORDER BY e.input_hash, e.started_at DESC LIMIT 2000",
     )
     .bind(tenant_id)
     .bind(config_hash)
