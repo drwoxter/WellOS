@@ -26,7 +26,6 @@ const LAST_PRE_EVALUATION_MIGRATION: i64 = 17;
 const GATE_DATABASE: &str = "wellos_upgrade_gate_0018";
 
 /// `(code_loinc, loop_state, status, version, orderable_code, category_code,
-/// order_status, fulfilment_mode, completed_at, source_system, orderable_id)`.
 
 fn database_url() -> String {
     std::env::var("DATABASE_URL")
@@ -148,7 +147,7 @@ async fn pre_0018_database_gains_synthetic_only_append_only_evaluation_tables() 
 
     wellos_server::run_migrations(&pool).await.unwrap();
     let applied_after = scalar_i64(&pool, "SELECT COUNT(*) FROM _sqlx_migrations").await;
-    assert!(applied_after >= LAST_PRE_EVALUATION_MIGRATION + 1);
+    assert!(applied_after > LAST_PRE_EVALUATION_MIGRATION);
     for table in [
         "dmind_eval_suites",
         "dmind_eval_cases",
