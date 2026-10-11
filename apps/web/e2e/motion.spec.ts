@@ -88,9 +88,34 @@ test("reduced motion removes tilt, ripple and page choreography", async ({
   expect(await card.evaluate((el) => getComputedStyle(el).transform)).toBe(
     "none",
   );
-  await card.click();
+  // Press feedback must not move the control either.
+  const cardBox = await card.boundingBox();
+  if (!cardBox) throw new Error("role card has no box");
+  await page.mouse.move(
+    cardBox.x + cardBox.width / 2,
+    cardBox.y + cardBox.height / 2,
+  );
+  await page.mouse.down();
+  await page.waitForTimeout(100);
+  expect(await card.evaluate((el) => getComputedStyle(el).transform)).toBe(
+    "none",
+  );
+  await page.mouse.up();
   await expect(page).toHaveURL(/\/dashboard$/);
   const main = page.getByRole("main");
+  const primary = page
+    .locator("main button:not(:disabled)")
+    .locator("visible=true")
+    .first();
+  const pBox = await primary.boundingBox();
+  if (!pBox) throw new Error("primary button has no box");
+  await page.mouse.move(pBox.x + pBox.width / 2, pBox.y + pBox.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(100);
+  expect(await primary.evaluate((el) => getComputedStyle(el).transform)).toBe(
+    "none",
+  );
+  await page.mouse.up();
   const anims = await main.evaluate((el) => [
     getComputedStyle(el).animationName,
     ...Array.from(el.children)

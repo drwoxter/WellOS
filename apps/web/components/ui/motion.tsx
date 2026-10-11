@@ -83,8 +83,10 @@ function clearTilt(el: HTMLElement): void {
  * Document-level motion driver. Elements opt in with `data-tilt` (pointer-
  * tracking 3D tilt + specular highlight) and every button, `.button`,
  * `.role-card` and `.priority-tile` gets a ripple from the press point. Pure
- * presentation: nothing here changes focus, activation or semantics, and it
- * stays inert under prefers-reduced-motion or on coarse pointers.
+ * presentation: nothing here changes focus, activation or semantics. Under
+ * prefers-reduced-motion everything is inert; on coarse pointers the tilt is
+ * off (no hover) while the press ripple stays as touch feedback. Disabled
+ * buttons never tilt or ripple.
  */
 export function attachMotion(root: Document = document): () => void {
   let active: HTMLElement | null = null;
@@ -93,10 +95,20 @@ export function attachMotion(root: Document = document): () => void {
   const decorative = () =>
     !matches(REDUCED_MOTION_QUERY) && !matches(COARSE_POINTER_QUERY);
 
+  const release = () => {
+    if (active) clearTilt(active);
+    active = null;
+  };
+  const tiltable = (el: HTMLElement | null): HTMLElement | null =>
+    el && !(el instanceof HTMLButtonElement && el.disabled) ? el : null;
+
   const onMove = (e: PointerEvent) => {
-    if (!decorative()) return;
+    if (!decorative()) {
+      release();
+      return;
+    }
     const target = e.target instanceof Element ? e.target : null;
-    const el = target?.closest<HTMLElement>("[data-tilt]") ?? null;
+    const el = tiltable(target?.closest<HTMLElement>("[data-tilt]") ?? null);
     if (active && active !== el) clearTilt(active);
     active = el;
     if (el) applyTilt(el, e);
@@ -132,14 +144,23 @@ export function attachMotion(root: Document = document): () => void {
     );
   };
 
+  const view = root.defaultView;
+  const queries =
+    view && typeof view.matchMedia === "function"
+      ? [REDUCED_MOTION_QUERY, COARSE_POINTER_QUERY].map((q) =>
+          view.matchMedia(q),
+        )
+      : [];
   root.addEventListener("pointermove", onMove, { passive: true });
   root.addEventListener("pointerout", onLeave, { passive: true });
   root.addEventListener("pointerdown", onDown, { passive: true });
+  for (const mq of queries) mq.addEventListener("change", release);
   return () => {
     root.removeEventListener("pointermove", onMove);
     root.removeEventListener("pointerout", onLeave);
     root.removeEventListener("pointerdown", onDown);
-    if (active) clearTilt(active);
+    for (const mq of queries) mq.removeEventListener("change", release);
+    release();
   };
 }
 

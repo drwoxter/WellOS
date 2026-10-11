@@ -301,7 +301,7 @@ textarea:focus {
 .priority-count,
 .kpi .num {
   display: inline-block;
-  animation: pop-in var(--dur-slower) var(--ease-spring) both;
+  animation: num-pop var(--dur-slower) var(--ease-spring) both;
 }
 
 /* Pills and chips respond to touch. */
@@ -337,8 +337,8 @@ textarea:focus {
 }
 
 /* Tilt wins over the plain hover lift while the pointer is tracked. */
-[data-tilt].is-tilting,
-[data-tilt].is-tilting:hover,
+[data-tilt].is-tilting:not(:disabled),
+[data-tilt].is-tilting:hover:not(:disabled),
 .role-card[data-tilt].is-tilting:hover:not(:disabled),
 .priority-tile[data-tilt].is-tilting:hover {
   transform: perspective(var(--perspective)) rotateX(var(--rx, 0deg))
@@ -507,7 +507,7 @@ body::before {
     0 6px 16px -6px rgba(160, 90, 0, 0.85);
 }
 .dmind-presence.ready .dmind-orb svg {
-  animation: pop-in var(--dur-slower) var(--ease-spring) both;
+  animation: num-pop var(--dur-slower) var(--ease-spring) both;
 }
 .dmind-launcher {
   box-shadow:
@@ -553,7 +553,7 @@ body::before {
     transform: rotate(360deg);
   }
 }
-@keyframes pop-in {
+@keyframes num-pop {
   from {
     transform: scale(0.72) translateY(4px);
   }
@@ -697,6 +697,19 @@ body::before {
   .pill:hover,
   .tabs button[aria-selected="true"],
   .tabs .tab[aria-selected="true"] {
+    transform: none;
+  }
+  button:active:not(:disabled),
+  a.button:active,
+  button.primary:active:not(:disabled),
+  a.button.primary:active,
+  .primary-cta:active:not(:disabled),
+  button.tertiary:active:not(:disabled),
+  button.linklike:active:not(:disabled),
+  button.ghost:active:not(:disabled),
+  .role-card:active:not(:disabled),
+  .priority-tile:active,
+  .mobile-nav .navlink:active svg {
     transform: none;
   }
   [data-tilt]::before {

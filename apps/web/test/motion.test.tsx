@@ -2,17 +2,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { attachMotion, MotionLayer, tiltFor } from "@/components/ui/motion";
 
+const mediaListeners = new Map<string, Set<() => void>>();
+
 function mockMedia(matching: Set<string>) {
+  mediaListeners.clear();
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     writable: true,
     value: (q: string) => ({
-      matches: matching.has(q),
+      get matches() {
+        return matching.has(q);
+      },
       media: q,
-      addEventListener: () => {},
-      removeEventListener: () => {},
+      addEventListener: (_: string, fn: () => void) => {
+        if (!mediaListeners.has(q)) mediaListeners.set(q, new Set());
+        mediaListeners.get(q)!.add(fn);
+      },
+      removeEventListener: (_: string, fn: () => void) => {
+        mediaListeners.get(q)?.delete(fn);
+      },
     }),
   });
+  return {
+    set(q: string, on: boolean) {
+      if (on) matching.add(q);
+      else matching.delete(q);
+      mediaListeners.get(q)?.forEach((fn) => fn());
+    },
+  };
 }
 
 /* jsdom has no PointerEvent; the driver only reads MouseEvent fields. */
@@ -153,5 +170,54 @@ describe("attachMotion", () => {
       }),
     );
     expect(el.classList.contains("is-pressed")).toBe(false);
+  });
+  it("never tilts a disabled button and drops the tilt when it becomes disabled", () => {
+    mockMedia(new Set());
+    const el = document.createElement("button");
+    el.setAttribute("data-tilt", "");
+    box(el);
+    document.body.appendChild(el);
+    detach = attachMotion(document);
+    el.disabled = true;
+    el.dispatchEvent(pointer("pointermove", { clientX: 10, clientY: 10 }));
+    expect(el.classList.contains("is-tilting")).toBe(false);
+    expect(el.style.getPropertyValue("--rx")).toBe("");
+
+    el.disabled = false;
+    el.dispatchEvent(pointer("pointermove", { clientX: 10, clientY: 10 }));
+    expect(el.classList.contains("is-tilting")).toBe(true);
+    el.disabled = true;
+    el.dispatchEvent(pointer("pointermove", { clientX: 20, clientY: 10 }));
+    expect(el.classList.contains("is-tilting")).toBe(false);
+  });
+
+  it("clears a live tilt when reduced motion or a coarse pointer switches on", () => {
+    const media = mockMedia(new Set());
+    const el = document.createElement("div");
+    el.setAttribute("data-tilt", "");
+    box(el);
+    document.body.appendChild(el);
+    detach = attachMotion(document);
+    el.dispatchEvent(pointer("pointermove", { clientX: 10, clientY: 10 }));
+    expect(el.classList.contains("is-tilting")).toBe(true);
+
+    media.set("(prefers-reduced-motion: reduce)", true);
+    expect(el.classList.contains("is-tilting")).toBe(false);
+    expect(el.style.getPropertyValue("--mx")).toBe("");
+    media.set("(prefers-reduced-motion: reduce)", false);
+    expect(el.classList.contains("is-tilting")).toBe(false);
+
+    el.dispatchEvent(pointer("pointermove", { clientX: 10, clientY: 10 }));
+    expect(el.classList.contains("is-tilting")).toBe(true);
+    media.set("(pointer: coarse)", true);
+    expect(el.classList.contains("is-tilting")).toBe(false);
+
+    // A move that arrives while decoration is off also clears stale state.
+    media.set("(pointer: coarse)", false);
+    el.dispatchEvent(pointer("pointermove", { clientX: 10, clientY: 10 }));
+    expect(el.classList.contains("is-tilting")).toBe(true);
+    media.set("(prefers-reduced-motion: reduce)", true);
+    el.dispatchEvent(pointer("pointermove", { clientX: 12, clientY: 10 }));
+    expect(el.classList.contains("is-tilting")).toBe(false);
   });
 });
