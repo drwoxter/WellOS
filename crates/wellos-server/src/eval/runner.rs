@@ -14,7 +14,7 @@ use dmind_gateway::{CapabilityState, GatewayError, ModelGateway, Operation, Usag
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{watch, Mutex, Semaphore};
 
 use super::corpus::{Corpus, EvalCase};
 use super::ops::CaseOutput;
@@ -82,6 +82,14 @@ pub struct Budget {
     /// pricing is configured, which live mode refuses.
     pub max_estimated_cost: Option<Decimal>,
     pub pricing: Option<Pricing>,
+    /// Worst-case completion size reserved for every in-flight call so
+    /// concurrent calls cannot jointly overshoot the token or cost ceilings.
+    #[serde(default = "default_output_per_call")]
+    pub max_output_tokens_per_call: u64,
+}
+
+fn default_output_per_call() -> u64 {
+    4_000
 }
 
 impl Budget {
@@ -93,12 +101,20 @@ impl Budget {
             max_output_tokens: 1_000_000,
             max_estimated_cost: None,
             pricing: None,
+            max_output_tokens_per_call: default_output_per_call(),
         }
     }
 
     pub fn validate(&self, mode: Mode) -> Result<(), String> {
         if self.max_calls == 0 {
             return Err("max_calls must be at least 1".into());
+        }
+        if self.max_output_tokens_per_call == 0
+            || self.max_output_tokens_per_call > self.max_output_tokens
+        {
+            return Err(
+                "max_output_tokens_per_call must be between 1 and max_output_tokens".into(),
+            );
         }
         if self.max_concurrency == 0 || self.max_concurrency > 16 {
             return Err("max_concurrency must be between 1 and 16".into());
@@ -327,6 +343,11 @@ impl ProviderFingerprint {
             "model_version": info.model_version,
             "external": status.external,
             "synthetic": status.synthetic,
+            "config": gateway.config_fingerprint(),
+            "prompts": Operation::ALL
+                .iter()
+                .map(|op| gateway.prompt_version(*op))
+                .collect::<Vec<_>>(),
         }));
         ProviderFingerprint {
             provider: info.provider,
@@ -351,12 +372,129 @@ pub struct Runner<'a> {
 }
 
 struct Spend {
+    /// HTTP attempts charged so far (first attempts plus transient retries).
     calls: u32,
     input_tokens: u64,
     output_tokens: u64,
     cost: Decimal,
+    /// Worst-case allowances held by in-flight calls; released on completion.
+    reserved_calls: u32,
+    reserved_input: u64,
+    reserved_output: u64,
+    reserved_cost: Decimal,
+    retries_accounted: u64,
     abort: Option<AbortReason>,
     reused: HashMap<String, (Result<CaseOutput, String>, u32)>,
+    inflight: HashMap<String, watch::Sender<bool>>,
+}
+
+impl Spend {
+    fn new() -> Self {
+        Spend {
+            calls: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: Decimal::ZERO,
+            reserved_calls: 0,
+            reserved_input: 0,
+            reserved_output: 0,
+            reserved_cost: Decimal::ZERO,
+            retries_accounted: 0,
+            abort: None,
+            reused: HashMap::new(),
+            inflight: HashMap::new(),
+        }
+    }
+
+    fn reservation_cost(budget: &Budget, estimated_input: u64) -> Decimal {
+        budget
+            .pricing
+            .as_ref()
+            .map(|p| {
+                p.estimate(&Usage {
+                    prompt_tokens: Some(estimated_input),
+                    completion_tokens: Some(budget.max_output_tokens_per_call),
+                    total_tokens: None,
+                })
+            })
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    /// Reserve the worst case of one logical call (`attempts` HTTP attempts,
+    /// the estimated input and a full `max_output_tokens_per_call`
+    /// completion) or record the ceiling that would be exceeded.
+    fn reserve(
+        &mut self,
+        budget: &Budget,
+        estimated_input: u64,
+        attempts: u32,
+    ) -> Result<(), AbortReason> {
+        if let Some(a) = &self.abort {
+            return Err(a.clone());
+        }
+        let cost = Self::reservation_cost(budget, estimated_input);
+        let reason = if self.calls + self.reserved_calls + attempts.max(1) > budget.max_calls {
+            Some(AbortReason::CallCeiling(budget.max_calls))
+        } else if self.input_tokens + self.reserved_input + estimated_input
+            > budget.max_input_tokens
+        {
+            Some(AbortReason::InputTokenCeiling(budget.max_input_tokens))
+        } else if self.output_tokens + self.reserved_output + budget.max_output_tokens_per_call
+            > budget.max_output_tokens
+        {
+            Some(AbortReason::OutputTokenCeiling(budget.max_output_tokens))
+        } else if matches!((budget.max_estimated_cost, &budget.pricing), (Some(max), Some(_)) if self.cost + self.reserved_cost + cost > max)
+        {
+            Some(AbortReason::CostCeiling(
+                budget.max_estimated_cost.unwrap_or_default(),
+            ))
+        } else {
+            None
+        };
+        if let Some(r) = reason {
+            self.abort = Some(r.clone());
+            return Err(r);
+        }
+        self.reserved_calls += attempts.max(1);
+        self.reserved_input += estimated_input;
+        self.reserved_output += budget.max_output_tokens_per_call;
+        self.reserved_cost += cost;
+        Ok(())
+    }
+
+    /// Replace a reservation with what the call actually consumed. Every
+    /// transient retry the gateway performed since the last settlement is
+    /// charged against the call ceiling; returns that retry count.
+    fn settle(
+        &mut self,
+        budget: &Budget,
+        estimated_input: u64,
+        attempts: u32,
+        usage: Option<&Usage>,
+        gateway_retries_total: u64,
+    ) -> u32 {
+        self.reserved_calls = self.reserved_calls.saturating_sub(attempts.max(1));
+        self.reserved_input = self.reserved_input.saturating_sub(estimated_input);
+        self.reserved_output = self
+            .reserved_output
+            .saturating_sub(budget.max_output_tokens_per_call);
+        self.reserved_cost -= Self::reservation_cost(budget, estimated_input);
+        let new_retries = gateway_retries_total.saturating_sub(self.retries_accounted);
+        self.retries_accounted = gateway_retries_total;
+        let retries = new_retries.min(u32::MAX as u64) as u32;
+        self.calls = self.calls.saturating_add(1).saturating_add(retries);
+        match usage {
+            Some(u) => {
+                self.input_tokens += u.prompt_tokens.unwrap_or(estimated_input);
+                self.output_tokens += u.completion_tokens.unwrap_or(0);
+                if let Some(p) = &budget.pricing {
+                    self.cost += p.estimate(u);
+                }
+            }
+            None => self.input_tokens += estimated_input,
+        }
+        retries
+    }
 }
 
 impl<'a> Runner<'a> {
@@ -416,14 +554,7 @@ impl<'a> Runner<'a> {
             return Err("offline mode refuses an external provider".into());
         }
         let selected: Vec<&EvalCase> = self.corpus.select(self.operations.as_deref());
-        let spend = Arc::new(Mutex::new(Spend {
-            calls: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            cost: Decimal::ZERO,
-            abort: None,
-            reused: HashMap::new(),
-        }));
+        let spend = Arc::new(Mutex::new(Spend::new()));
         let semaphore = Arc::new(Semaphore::new(self.budget.max_concurrency as usize));
         let mut records = Vec::with_capacity(selected.len());
         let sequential = self.budget.max_concurrency == 1;
@@ -547,7 +678,25 @@ async fn run_case(
                     && c.model == fingerprint.model
                     && c.model_version == fingerprint.model_version
             });
-            let prior = { spend.lock().await.reused.get(&reuse_key).cloned() };
+            // Identical inputs share one provider call: the first case marks
+            // the key in flight under the lock, later ones wait for its result.
+            let mut waiter: Option<watch::Receiver<bool>> = None;
+            let mut prior = None;
+            loop {
+                if let Some(mut rx) = waiter.take() {
+                    let _ = rx.changed().await;
+                }
+                let s = spend.lock().await;
+                if let Some(p) = s.reused.get(&reuse_key).cloned() {
+                    prior = Some(p);
+                    break;
+                }
+                if let Some(tx) = s.inflight.get(&reuse_key) {
+                    waiter = Some(tx.subscribe());
+                    continue;
+                }
+                break;
+            }
             if let Some((prior, retries)) = prior {
                 kind = ExecutionKind::Reused;
                 retry_count = retries;
@@ -572,30 +721,18 @@ async fn run_case(
                 let estimated_input = serde_json::to_vec(&case.input)
                     .map(|b| b.len().div_ceil(4) as u64)
                     .unwrap_or(0);
-                // Ceiling check happens under the lock so concurrent cases
-                // cannot both consume the last call.
+                let attempts = gateway.max_attempts();
+                // Reservation happens under the lock so concurrent cases
+                // cannot jointly overshoot a ceiling.
                 let allowed = {
                     let mut s = spend.lock().await;
-                    if s.abort.is_some() {
-                        false
-                    } else if s.calls >= budget.max_calls {
-                        s.abort = Some(AbortReason::CallCeiling(budget.max_calls));
-                        false
-                    } else if s.input_tokens + estimated_input > budget.max_input_tokens {
-                        s.abort = Some(AbortReason::InputTokenCeiling(budget.max_input_tokens));
-                        false
-                    } else if s.output_tokens >= budget.max_output_tokens {
-                        s.abort = Some(AbortReason::OutputTokenCeiling(budget.max_output_tokens));
-                        false
-                    } else if matches!((budget.max_estimated_cost, &budget.pricing), (Some(max), Some(_)) if s.cost >= max)
-                    {
-                        s.abort = Some(AbortReason::CostCeiling(
-                            budget.max_estimated_cost.unwrap_or_default(),
-                        ));
-                        false
-                    } else {
-                        s.calls += 1;
-                        true
+                    match s.reserve(budget, estimated_input, attempts) {
+                        Ok(()) => {
+                            let (tx, _rx) = watch::channel(false);
+                            s.inflight.insert(reuse_key.clone(), tx);
+                            true
+                        }
+                        Err(_) => false,
                     }
                 };
                 if !allowed {
@@ -604,37 +741,35 @@ async fn run_case(
                         "run aborted before this call".into(),
                     ))
                 } else {
-                    let retries_before = gateway.retries_total();
                     let started = Instant::now();
                     let result = case.input.execute(gateway).await;
                     latency_ms = Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32);
+                    let mut s = spend.lock().await;
+                    let retries = s.settle(
+                        budget,
+                        estimated_input,
+                        attempts,
+                        result.as_ref().ok().and_then(|o| o.usage.as_ref()),
+                        gateway.retries_total(),
+                    );
                     if sequential {
-                        retry_count =
-                            (gateway.retries_total() - retries_before).min(u32::MAX as u64) as u32;
+                        retry_count = retries;
                     }
                     kind = if retry_count > 0 {
                         ExecutionKind::Retried
                     } else {
                         ExecutionKind::Fresh
                     };
-                    let mut s = spend.lock().await;
-                    match result.as_ref().ok().and_then(|o| o.usage.as_ref()) {
-                        Some(u) => {
-                            s.input_tokens += u.prompt_tokens.unwrap_or(estimated_input);
-                            s.output_tokens += u.completion_tokens.unwrap_or(0);
-                            if let Some(p) = &budget.pricing {
-                                s.cost += p.estimate(u);
-                            }
-                        }
-                        None => s.input_tokens += estimated_input,
-                    }
                     s.reused.insert(
-                        reuse_key,
+                        reuse_key.clone(),
                         (
                             result.as_ref().map(Clone::clone).map_err(error_code),
                             retry_count,
                         ),
                     );
+                    if let Some(tx) = s.inflight.remove(&reuse_key) {
+                        let _ = tx.send(true);
+                    }
                     result
                 }
             }
@@ -951,6 +1086,171 @@ mod tests {
             second.totals.passed + second.totals.needs_review,
             first.totals.passed + first.totals.needs_review
         );
+    }
+
+    #[test]
+    fn reservations_hold_the_worst_case_of_every_inflight_call() {
+        let mut budget = Budget::offline_default();
+        budget.max_calls = 5;
+        budget.max_input_tokens = 150;
+        budget.max_output_tokens = 1_000;
+        budget.max_output_tokens_per_call = 400;
+        budget.pricing = Some(Pricing {
+            currency: "EUR".into(),
+            input_per_1k_tokens: Decimal::new(1, 0),
+            output_per_1k_tokens: Decimal::new(1, 0),
+            effective_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        });
+        budget.max_estimated_cost = Some(Decimal::new(1, 0));
+
+        // A provider that may retry twice books three attempts up front.
+        let mut s = Spend::new();
+        s.reserve(&budget, 10, 3).unwrap();
+        assert_eq!(
+            (s.reserved_calls, s.reserved_input, s.reserved_output),
+            (3, 10, 400)
+        );
+        assert!(matches!(
+            s.reserve(&budget, 10, 3),
+            Err(AbortReason::CallCeiling(5))
+        ));
+
+        // Two in-flight calls jointly exceed the output ceiling (400 + 400 + 400 > 1000).
+        let mut s = Spend::new();
+        s.reserve(&budget, 10, 1).unwrap();
+        s.reserve(&budget, 10, 1).unwrap();
+        assert!(matches!(
+            s.reserve(&budget, 10, 1),
+            Err(AbortReason::OutputTokenCeiling(1_000))
+        ));
+
+        // Input reservations count before the provider reports usage.
+        let mut s = Spend::new();
+        s.reserve(&budget, 100, 1).unwrap();
+        assert!(matches!(
+            s.reserve(&budget, 60, 1),
+            Err(AbortReason::InputTokenCeiling(150))
+        ));
+
+        // Cost: each call reserves (10 input + 100 output) / 1000 = 0.11 EUR;
+        // the third would pass a 0.30 EUR ceiling while tokens still fit.
+        let mut cheap = budget.clone();
+        cheap.max_output_tokens_per_call = 100;
+        cheap.max_estimated_cost = Some(Decimal::new(30, 2));
+        let mut s = Spend::new();
+        s.reserve(&cheap, 10, 1).unwrap();
+        s.reserve(&cheap, 10, 1).unwrap();
+        assert!(matches!(
+            s.reserve(&cheap, 10, 1),
+            Err(AbortReason::CostCeiling(_))
+        ));
+
+        // Settlement swaps the reservation for actual usage and charges every
+        // retry the gateway performed against the call ceiling.
+        let mut s = Spend::new();
+        s.reserve(&budget, 10, 3).unwrap();
+        let usage = Usage {
+            prompt_tokens: Some(12),
+            completion_tokens: Some(30),
+            total_tokens: Some(42),
+        };
+        let retries = s.settle(&budget, 10, 3, Some(&usage), 2);
+        assert_eq!(retries, 2);
+        assert_eq!(s.calls, 3);
+        assert_eq!(
+            (s.reserved_calls, s.reserved_input, s.reserved_output),
+            (0, 0, 0)
+        );
+        assert_eq!(s.reserved_cost, Decimal::ZERO);
+        assert_eq!((s.input_tokens, s.output_tokens), (12, 30));
+        assert_eq!(s.cost, Decimal::new(42, 3));
+        // Only two attempts remain: a provider that may retry twice no longer fits.
+        assert!(matches!(
+            s.reserve(&budget, 10, 3),
+            Err(AbortReason::CallCeiling(5))
+        ));
+    }
+
+    #[test]
+    fn per_call_output_reservation_must_fit_the_run_ceiling() {
+        let mut budget = Budget::offline_default();
+        budget.max_output_tokens = 100;
+        budget.max_output_tokens_per_call = 101;
+        assert!(budget
+            .validate(Mode::Offline)
+            .unwrap_err()
+            .contains("max_output_tokens_per_call"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_inputs_share_one_provider_call() {
+        let mut corpus = Corpus::load().unwrap();
+        // Three extra cases with byte-identical inputs dispatched together.
+        let template = corpus.cases[0].clone();
+        for n in 0..3 {
+            let mut dup = template.clone();
+            dup.key = format!("{}-dup-{n}", template.key);
+            corpus.cases.push(dup);
+        }
+        let gateway: Arc<dyn ModelGateway> = Arc::new(FakeProvider::new());
+        let mut r = runner(&corpus, Mode::Offline);
+        r.budget.max_concurrency = 8;
+        let outcome = r.execute(gateway).await.unwrap();
+        let distinct_inputs: std::collections::BTreeSet<&str> = outcome
+            .executions
+            .iter()
+            .map(|e| e.input_hash.as_str())
+            .collect();
+        let fresh = outcome
+            .executions
+            .iter()
+            .filter(|e| e.execution_kind == ExecutionKind::Fresh)
+            .count();
+        assert_eq!(distinct_inputs.len() + 3, outcome.executions.len());
+        assert_eq!(fresh, distinct_inputs.len());
+        assert_eq!(outcome.totals.provider_calls, fresh as u32);
+        assert!(outcome
+            .executions
+            .iter()
+            .filter(|e| e.execution_kind == ExecutionKind::Reused)
+            .all(|e| e.provider_output.is_some() || e.failure_code.is_some()));
+    }
+
+    #[test]
+    fn fingerprint_changes_with_endpoint_or_limits_without_leaking_secrets() {
+        use dmind_gateway::openai::{OpenAiCompatibleModel, OpenAiCompatibleModelConfig};
+        let cfg = |endpoint: &str, max_retries: u32| OpenAiCompatibleModelConfig {
+            endpoint: endpoint.into(),
+            model: "gpt-eval".into(),
+            api_key: "sk-test-secret-never-logged".into(),
+            connect_timeout: std::time::Duration::from_secs(1),
+            timeout: std::time::Duration::from_secs(5),
+            max_retries,
+            retry_backoff: std::time::Duration::from_millis(10),
+            max_response_bytes: 65_536,
+            max_concurrency: 2,
+            queue_timeout: std::time::Duration::from_secs(1),
+        };
+        let a =
+            OpenAiCompatibleModel::new(cfg("https://a.example/v1/chat/completions", 2)).unwrap();
+        let b =
+            OpenAiCompatibleModel::new(cfg("https://b.example/v1/chat/completions", 2)).unwrap();
+        let c =
+            OpenAiCompatibleModel::new(cfg("https://a.example/v1/chat/completions", 0)).unwrap();
+        let fa = ProviderFingerprint::of(&a);
+        let fb = ProviderFingerprint::of(&b);
+        let fc = ProviderFingerprint::of(&c);
+        assert_eq!(
+            (fa.provider.as_str(), fa.model.as_str()),
+            (fb.provider.as_str(), fb.model.as_str())
+        );
+        assert_ne!(fa.config_hash, fb.config_hash);
+        assert_ne!(fa.config_hash, fc.config_hash);
+        assert_eq!(fa.config_hash, ProviderFingerprint::of(&a).config_hash);
+        let dumped = serde_json::to_string(&fa).unwrap();
+        assert!(!dumped.contains("sk-test"));
+        assert_eq!(a.max_attempts(), 3);
+        assert_eq!(c.max_attempts(), 1);
     }
 
     #[test]

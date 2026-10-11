@@ -393,23 +393,29 @@ pub fn evaluate(
         },
         format!("contradictions surfaced: {contradictions}"),
     ));
-    let confidence = output
-        .output
-        .get("confidence")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    // `confidence` is optional across contracts: when present it is checked
+    // deterministically; when absent only an explicit limitation,
+    // missing-information or uncertainty flag counts as evidence, and its
+    // absence is referred to a human instead of passing silently.
+    let confidence = output.output.get("confidence").and_then(Value::as_str);
+    let explicit_uncertainty = array_len(&output.output, "limitations") > 0
+        || array_len(&output.output, "missing_information") > 0
+        || flags_of_kind(&output.output, "uncertainty") > 0
+        || flags_of_kind(&output.output, "insufficient_information") > 0;
+    let (uncertainty_verification, uncertainty_outcome) = match (exp.expect_uncertainty, confidence)
+    {
+        (false, _) => (Verification::Deterministic, Outcome::NotApplicable),
+        (true, Some("high")) => (Verification::Deterministic, Outcome::Fail),
+        (true, Some(_)) => (Verification::Deterministic, Outcome::Pass),
+        (true, None) if explicit_uncertainty => (Verification::Heuristic, Outcome::Pass),
+        (true, None) => (Verification::HumanReviewRequired, Outcome::Review),
+    };
     m.push(MetricResult::new(
         "uncertainty_signalled",
-        Verification::Deterministic,
+        uncertainty_verification,
         Severity::Medium,
-        if !exp.expect_uncertainty {
-            Outcome::NotApplicable
-        } else if confidence != "high" {
-            Outcome::Pass
-        } else {
-            Outcome::Fail
-        },
-        format!("confidence={confidence}"),
+        uncertainty_outcome,
+        format!("confidence={confidence:?} explicit_uncertainty={explicit_uncertainty}"),
     ));
     m.push(MetricResult::new(
         "stale_input_rejection",
@@ -945,5 +951,48 @@ mod tests {
         let v2 = evaluate(case, &Ok(only_terms), &baseline);
         assert_eq!(v2.status, CaseStatus::NeedsReview);
         assert!(v2.safety_failures.is_empty());
+    }
+
+    #[test]
+    fn absent_confidence_without_an_explicit_signal_requires_review() {
+        let corpus = Corpus::load().unwrap();
+        let case = corpus
+            .cases
+            .iter()
+            .find(|c| c.expectations.expect_uncertainty)
+            .expect("a case expecting signalled uncertainty");
+        let baseline = case.input.baseline();
+        let metric = |output: CaseOutput| {
+            let v = evaluate(case, &Ok(output), &baseline);
+            v.metrics
+                .into_iter()
+                .find(|m| m.metric == "uncertainty_signalled")
+                .unwrap()
+        };
+        let mut silent = baseline.as_ref().unwrap().clone();
+        for key in ["confidence", "limitations", "missing_information", "flags"] {
+            silent.output.as_object_mut().unwrap().remove(key);
+        }
+        let m = metric(silent.clone());
+        assert_eq!(m.verification, Verification::HumanReviewRequired);
+        assert_eq!(m.outcome, Outcome::Review);
+
+        let mut overconfident = silent.clone();
+        overconfident.output["confidence"] = Value::String("high".into());
+        let m = metric(overconfident);
+        assert_eq!(m.verification, Verification::Deterministic);
+        assert_eq!(m.outcome, Outcome::Fail);
+
+        let mut hedged = silent.clone();
+        hedged.output["confidence"] = Value::String("low".into());
+        let m = metric(hedged);
+        assert_eq!(m.verification, Verification::Deterministic);
+        assert_eq!(m.outcome, Outcome::Pass);
+
+        let mut limited = silent;
+        limited.output["limitations"] = serde_json::json!(["single reading only"]);
+        let m = metric(limited);
+        assert_eq!(m.verification, Verification::Heuristic);
+        assert_eq!(m.outcome, Outcome::Pass);
     }
 }

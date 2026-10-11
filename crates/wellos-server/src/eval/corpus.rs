@@ -4,6 +4,15 @@
 //! invented identifiers. The JSON files under `eval-corpus/<version>/` are
 //! compiled into the binary so the corpus hash is reproducible and a case
 //! can never be edited without a version bump showing in every run.
+//!
+//! Scope: corpus cases describe *clinical inputs and expected behaviour*
+//! (stale inputs, contradictions, missing prerequisites, critical and negative
+//! findings, prompt injection, unsafe autonomous actions, cross-tenant
+//! evidence, deterministic fallback). Provider *transport* failure modes —
+//! timeouts, 429/5xx, connection loss, retry exhaustion, circuit/concurrency
+//! limits, budget exhaustion — are not cases: they are exercised by the
+//! controlled local HTTP server tests in `dmind-gateway` and by the runner's
+//! ceiling tests, because they depend on the transport, not on the input.
 
 use super::ops::CaseInput;
 use dmind_gateway::{hash_json, Operation};
@@ -213,9 +222,59 @@ pub struct Corpus {
     pub cases: Vec<EvalCase>,
 }
 
+/// UUID namespaces reserved for synthetic fixtures; any identifier in the
+/// corpus outside them is treated as potentially real and refused.
+pub const SYNTHETIC_UUID_NAMESPACES: [&str; 5] = [
+    "11111111-1111-4111-8111-",
+    "22222222-2222-4222-8222-",
+    "33333333-3333-4333-8333-",
+    "44444444-4444-4444-8444-",
+    "55555555-5555-4555-8555-",
+];
+
+fn uuid_like_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+        .filter(|t| {
+            t.len() == 36
+                && t.bytes()
+                    .enumerate()
+                    .all(|(i, b)| matches!(i, 8 | 13 | 18 | 23) == (b == b'-'))
+        })
+}
+
+/// Structural proof that a case references only synthetic fixtures: every
+/// UUID-shaped identifier in the serialized request must live in a reserved
+/// synthetic namespace. This cannot judge free text; it refuses real record
+/// identifiers, which is what the live gate relies on.
+pub fn verify_case_synthetic(key: &str, input: &serde_json::Value) -> Result<(), String> {
+    let text = input.to_string();
+    for token in uuid_like_tokens(&text) {
+        let lower = token.to_ascii_lowercase();
+        if !SYNTHETIC_UUID_NAMESPACES
+            .iter()
+            .any(|ns| lower.starts_with(ns))
+        {
+            return Err(format!(
+                "case {key}: identifier {token} is outside the synthetic namespaces"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Corpus {
     /// Parse and validate the compiled-in corpus. Fails loudly on any
     /// malformed case so a broken corpus cannot silently shrink coverage.
+    /// Every case must pass [`verify_case_synthetic`]; the live gate derives
+    /// `patients_synthetic` from this instead of asserting it.
+    pub fn verify_synthetic(&self) -> Result<(), String> {
+        for case in &self.cases {
+            let input = serde_json::to_value(&case.input).map_err(|e| e.to_string())?;
+            verify_case_synthetic(&case.key, &input)?;
+        }
+        Ok(())
+    }
+
     pub fn load() -> Result<Corpus, String> {
         let mut cases = Vec::new();
         let mut keys = std::collections::BTreeSet::new();
@@ -359,6 +418,19 @@ mod tests {
         let corpus = Corpus::load().expect("corpus valid");
         assert!(corpus.cases.len() >= 4 * Operation::ALL.len());
         assert_eq!(corpus.languages(), vec!["en".to_string(), "es".to_string()]);
+    }
+
+    #[test]
+    fn synthetic_verification_refuses_identifiers_outside_the_fixture_namespaces() {
+        let corpus = Corpus::load().unwrap();
+        corpus.verify_synthetic().unwrap();
+        let ok = serde_json::json!({ "patient_id": "44444444-4444-4444-8444-444444444442" });
+        verify_case_synthetic("ok", &ok).unwrap();
+        let real_looking = serde_json::json!({
+            "facts": [["observation:obs-1", "Patient 7c9e6679-7425-40de-944b-e07fc1f90ae7 potassium 5.6"]]
+        });
+        let err = verify_case_synthetic("leak", &real_looking).unwrap_err();
+        assert!(err.contains("outside the synthetic namespaces"), "{err}");
     }
 
     #[test]

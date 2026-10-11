@@ -245,12 +245,30 @@ pub enum GatewayError {
     Disabled(String),
 }
 
-/// The typed operations a gateway implements. Used to look up the prompt
-/// version a provider would apply *before* executing, so an identical prior
-/// execution can be reused instead of spending provider credit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Operation {
+/// Declares the governed operation catalogue once: the enum and
+/// `Operation::ALL` are generated from the same variant list, so a variant
+/// cannot exist without being registered (and evaluated).
+macro_rules! operations {
+    ($($variant:ident),+ $(,)?) => {
+        /// The typed operations a gateway implements. Used to look up the prompt
+        /// version a provider would apply *before* executing, so an identical prior
+        /// execution can be reused instead of spending provider credit.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum Operation {
+            $($variant,)+
+        }
+
+        impl Operation {
+            /// Every registered governed operation, in declaration order.
+            /// Evaluation coverage is derived from this list, which the
+            /// `operations!` macro keeps identical to the variant set.
+            pub const ALL: &'static [Operation] = &[$(Operation::$variant,)+];
+        }
+    };
+}
+
+operations! {
     ResultSummary,
     TriageProposal,
     RiskSummary,
@@ -265,23 +283,6 @@ pub enum Operation {
 }
 
 impl Operation {
-    /// Every registered governed operation, in registration order. Evaluation
-    /// coverage is derived from this list; a new variant that is not added
-    /// here fails `all_is_exhaustive` below.
-    pub const ALL: &'static [Operation] = &[
-        Operation::ResultSummary,
-        Operation::TriageProposal,
-        Operation::RiskSummary,
-        Operation::NoteDraft,
-        Operation::AccessIntent,
-        Operation::AppointmentRanking,
-        Operation::CancellationRecovery,
-        Operation::CapacityExplanation,
-        Operation::DiagnosticOrderSuggestion,
-        Operation::DiagnosticResultSynthesis,
-        Operation::PatientResultExplanation,
-    ];
-
     /// Stable snake_case identifier (the serde representation).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -341,6 +342,20 @@ pub trait ModelGateway: Send + Sync {
     /// (monotonic; safe metadata only). Providers without retries report 0.
     fn retries_total(&self) -> u64 {
         0
+    }
+
+    /// Secret-free hash of the behaviour-changing configuration behind this
+    /// provider (endpoint, limits, prompt versions). Two providers that serve
+    /// the same model through different configurations must differ here so
+    /// evaluation caches keyed on provider identity are not shared.
+    fn config_fingerprint(&self) -> String {
+        String::new()
+    }
+
+    /// Maximum HTTP attempts one logical call may take (first attempt plus
+    /// transient retries). Budget reservations assume the worst case.
+    fn max_attempts(&self) -> u32 {
+        1
     }
 
     /// Prompt/template family this provider applies to `op`; recorded on

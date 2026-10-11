@@ -15,6 +15,7 @@ import {
   statusLabel,
   statusTone,
   type EvalRun,
+  type EvalRunPage,
   type EvalSuites,
 } from "@/lib/eval";
 import {
@@ -100,7 +101,7 @@ function EvaluationsCockpit() {
           emptyKey="evalNoRuns"
           isEmpty={(d) => d.runs.length === 0}
         >
-          {(d) => <RunTable runs={d.runs} />}
+          {(d) => <RunList firstPage={d} />}
         </PanelState>
       </Card>
     </div>
@@ -264,6 +265,49 @@ function NewRunCard({
         <MessageLine message={message} />
       </form>
     </Card>
+  );
+}
+
+/** Keyset-paginated run list: the first page comes from the loader, older
+ * pages are appended on demand so no run is unreachable from the cockpit. */
+function RunList({ firstPage }: { firstPage: EvalRunPage }) {
+  const { lang } = useSession();
+  const [older, setOlder] = useState<EvalRun[]>([]);
+  const [cursor, setCursor] = useState<string | null>(firstPage.next_cursor);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const loadMore = async () => {
+    if (!cursor || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const page = await loadRuns(cursor);
+      setOlder((prev) => [...prev, ...page.runs]);
+      setCursor(page.next_cursor);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <RunTable runs={[...firstPage.runs, ...older]} />
+      <MessageLine message={error ? { kind: "error", text: error } : null} />
+      {cursor ? (
+        <div className="actions">
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={loadMore}
+            disabled={busy}
+            aria-busy={busy}
+          >
+            {t(lang, "evalLoadMore")}
+          </button>
+        </div>
+      ) : null}
+    </>
   );
 }
 

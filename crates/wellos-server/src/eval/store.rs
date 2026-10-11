@@ -30,14 +30,14 @@ pub async fn require_synthetic_tenant(pool: &PgPool, tenant_id: Uuid) -> Result<
 
 /// Find or append the suite row for this exact corpus (key, version, rubric,
 /// hash). Cases are appended alongside a new suite row.
-pub async fn ensure_suite(
+async fn find_suite(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     corpus: &Corpus,
     rubric_version: &str,
-) -> Result<Uuid, ApiError> {
-    let hash = corpus.hash();
-    let existing: Option<(Uuid,)> = sqlx::query_as(
+    hash: &str,
+) -> Result<Option<Uuid>, ApiError> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM dmind_eval_suites
          WHERE tenant_id = $1 AND suite_key = $2 AND suite_version = $3
            AND rubric_version = $4 AND corpus_hash = $5",
@@ -46,19 +46,32 @@ pub async fn ensure_suite(
     .bind(corpus.suite_key)
     .bind(corpus.version)
     .bind(rubric_version)
-    .bind(&hash)
+    .bind(hash)
     .fetch_optional(&mut **tx)
     .await?;
-    if let Some((id,)) = existing {
+    Ok(row.map(|(id,)| id))
+}
+
+pub async fn ensure_suite(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    corpus: &Corpus,
+    rubric_version: &str,
+) -> Result<Uuid, ApiError> {
+    let hash = corpus.hash();
+    if let Some(id) = find_suite(tx, tenant_id, corpus, rubric_version, &hash).await? {
         return Ok(id);
     }
-    let id = Uuid::now_v7();
-    sqlx::query(
+    // Concurrent first registrations race on (tenant, key, version): the
+    // loser sees no row back and re-reads the winner's suite.
+    let inserted: Option<(Uuid,)> = sqlx::query_as(
         "INSERT INTO dmind_eval_suites
          (id, tenant_id, suite_key, suite_version, rubric_version, languages, case_count, corpus_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (tenant_id, suite_key, suite_version) DO NOTHING
+         RETURNING id",
     )
-    .bind(id)
+    .bind(Uuid::now_v7())
     .bind(tenant_id)
     .bind(corpus.suite_key)
     .bind(corpus.version)
@@ -66,8 +79,21 @@ pub async fn ensure_suite(
     .bind(corpus.languages())
     .bind(corpus.cases.len() as i32)
     .bind(&hash)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
+    let id = match inserted {
+        Some((id,)) => id,
+        None => {
+            return find_suite(tx, tenant_id, corpus, rubric_version, &hash)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::conflict(
+                        "suite_version_conflict",
+                        "suite version already registered with a different corpus or rubric",
+                    )
+                })
+        }
+    };
     for case in &corpus.cases {
         sqlx::query(
             "INSERT INTO dmind_eval_cases
@@ -101,28 +127,21 @@ pub async fn ensure_fingerprint(
 ) -> Result<Uuid, ApiError> {
     let pricing_json = pricing
         .map(|p| json!({ "currency": p.currency, "input_per_1k_tokens": p.input_per_1k_tokens, "output_per_1k_tokens": p.output_per_1k_tokens }));
-    let existing: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM dmind_eval_provider_fingerprints
-         WHERE tenant_id = $1 AND config_hash = $2 AND pricing IS NOT DISTINCT FROM $3
-           AND pricing_effective_date IS NOT DISTINCT FROM $4",
-    )
-    .bind(tenant_id)
-    .bind(&fp.config_hash)
-    .bind(&pricing_json)
-    .bind(pricing.map(|p| p.effective_date))
-    .fetch_optional(&mut **tx)
-    .await?;
-    if let Some((id,)) = existing {
+    let effective = pricing.map(|p| p.effective_date);
+    if let Some(id) =
+        find_fingerprint(tx, tenant_id, &fp.config_hash, &pricing_json, effective).await?
+    {
         return Ok(id);
     }
-    let id = Uuid::now_v7();
-    sqlx::query(
+    let inserted: Option<(Uuid,)> = sqlx::query_as(
         "INSERT INTO dmind_eval_provider_fingerprints
          (id, tenant_id, provider, model, model_version, external, synthetic_provider, config_hash,
           pricing, pricing_effective_date)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (tenant_id, config_hash) DO NOTHING
+         RETURNING id",
     )
-    .bind(id)
+    .bind(Uuid::now_v7())
     .bind(tenant_id)
     .bind(&fp.provider)
     .bind(&fp.model)
@@ -131,10 +150,41 @@ pub async fn ensure_fingerprint(
     .bind(fp.synthetic_provider)
     .bind(&fp.config_hash)
     .bind(&pricing_json)
-    .bind(pricing.map(|p| p.effective_date))
-    .execute(&mut **tx)
+    .bind(effective)
+    .fetch_optional(&mut **tx)
     .await?;
-    Ok(id)
+    match inserted {
+        Some((id,)) => Ok(id),
+        None => find_fingerprint(tx, tenant_id, &fp.config_hash, &pricing_json, effective)
+            .await?
+            .ok_or_else(|| {
+                ApiError::conflict(
+                    "fingerprint_pricing_conflict",
+                    "provider fingerprint already registered with different pricing",
+                )
+            }),
+    }
+}
+
+async fn find_fingerprint(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    config_hash: &str,
+    pricing_json: &Option<Value>,
+    effective: Option<chrono::NaiveDate>,
+) -> Result<Option<Uuid>, ApiError> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM dmind_eval_provider_fingerprints
+         WHERE tenant_id = $1 AND config_hash = $2 AND pricing IS NOT DISTINCT FROM $3
+           AND pricing_effective_date IS NOT DISTINCT FROM $4",
+    )
+    .bind(tenant_id)
+    .bind(config_hash)
+    .bind(pricing_json)
+    .bind(effective)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|(id,)| id))
 }
 
 /// Append a planned run. `gate` is the evaluated live gate (or `{}`).
@@ -359,7 +409,8 @@ pub fn status_str(s: CaseStatus) -> &'static str {
 }
 
 /// Prior executions with identical provenance that a new run may reuse
-/// instead of calling the provider (only successful or terminal results).
+/// instead of calling the provider: only schema-valid successful outputs,
+/// never failures, so a recovered provider is always re-asked.
 pub async fn cached_executions(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -373,7 +424,8 @@ pub async fn cached_executions(
          JOIN dmind_eval_provider_fingerprints f ON f.id = r.fingerprint_id
          WHERE e.tenant_id = $1 AND f.config_hash = $2
            AND e.execution_kind IN ('fresh','retried')
-           AND e.status IN ('passed','needs_review','failed')
+           AND e.status IN ('passed','needs_review')
+           AND e.provider_output IS NOT NULL
          ORDER BY e.started_at DESC LIMIT 2000",
     )
     .bind(tenant_id)

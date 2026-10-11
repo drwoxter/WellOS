@@ -106,6 +106,28 @@ pub async fn suites(
 #[derive(Deserialize)]
 pub struct ListQuery {
     pub limit: Option<i64>,
+    /// Opaque keyset cursor returned as `next_cursor`: rows strictly older
+    /// than `<created_at RFC 3339>|<run id>` in the stable listing order.
+    pub cursor: Option<String>,
+}
+
+fn parse_cursor(raw: &str) -> Result<(chrono::DateTime<chrono::Utc>, Uuid), ApiError> {
+    let invalid = || ApiError::bad_request("validation_error", "invalid cursor");
+    let (ts, id) = raw.split_once('|').ok_or_else(invalid)?;
+    let ts = chrono::DateTime::parse_from_rfc3339(ts)
+        .map_err(|_| invalid())?
+        .with_timezone(&chrono::Utc);
+    let id = Uuid::parse_str(id).map_err(|_| invalid())?;
+    Ok((ts, id))
+}
+
+fn cursor_of(r: &sqlx::postgres::PgRow) -> String {
+    format!(
+        "{}|{}",
+        r.get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        r.get::<Uuid, _>("id")
+    )
 }
 
 fn run_json(r: &sqlx::postgres::PgRow) -> Value {
@@ -161,14 +183,42 @@ pub async fn list_runs(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &ctx, actions::DMIND_EVAL_READ).await?;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let rows = sqlx::query(&format!("{RUN_SELECT} ORDER BY r.created_at DESC LIMIT $2"))
-        .bind(ctx.tenant_id)
-        .bind(limit)
-        .fetch_all(&state.pool)
-        .await?;
-    Ok(Json(
-        json!({ "runs": rows.iter().map(run_json).collect::<Vec<_>>() }),
-    ))
+    let cursor = q.cursor.as_deref().map(parse_cursor).transpose()?;
+    // Keyset pagination on (created_at, id): stable under concurrent inserts,
+    // tenant-scoped by RUN_SELECT; one extra row tells whether more exist.
+    let mut rows = match cursor {
+        Some((ts, id)) => {
+            sqlx::query(&format!(
+                "{RUN_SELECT} AND (r.created_at, r.id) < ($3, $4) \
+                 ORDER BY r.created_at DESC, r.id DESC LIMIT $2"
+            ))
+            .bind(ctx.tenant_id)
+            .bind(limit + 1)
+            .bind(ts)
+            .bind(id)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        None => {
+            sqlx::query(&format!(
+                "{RUN_SELECT} ORDER BY r.created_at DESC, r.id DESC LIMIT $2"
+            ))
+            .bind(ctx.tenant_id)
+            .bind(limit + 1)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
+    let next_cursor = if rows.len() as i64 > limit {
+        rows.truncate(limit as usize);
+        rows.last().map(cursor_of)
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "runs": rows.iter().map(run_json).collect::<Vec<_>>(),
+        "next_cursor": next_cursor,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -179,6 +229,8 @@ pub struct CreateRun {
     #[serde(default = "default_true")]
     pub stop_on_high_severity: bool,
     pub max_calls: Option<u32>,
+    #[serde(default)]
+    pub reuse_cache: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -190,7 +242,14 @@ pub async fn create_run(
     ctx: AuthContext,
     Json(body): Json<CreateRun>,
 ) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
-    authorize(&state, &ctx, actions::DMIND_EVAL_MANAGE).await?;
+    let allowed = guard(
+        &state,
+        &ctx,
+        actions::DMIND_EVAL_MANAGE,
+        "dmind_evaluation",
+        tenant_ctx(&ctx),
+    )
+    .await?;
     store::require_synthetic_tenant(&state.pool, ctx.tenant_id).await?;
     let mode = Mode::parse(&body.mode).ok_or_else(|| {
         ApiError::bad_request("validation_error", "mode must be dry-run or offline")
@@ -215,10 +274,14 @@ pub async fn create_run(
         max_output_tokens: 200_000,
         max_estimated_cost: None,
         pricing: None,
+        max_output_tokens_per_call: 2_000,
     };
     let fingerprint = eval::runner::ProviderFingerprint::of(state.gateway.as_ref());
-    let cache =
-        store::cached_executions(&state.pool, ctx.tenant_id, &fingerprint.config_hash).await?;
+    let cache = if body.reuse_cache.unwrap_or(true) {
+        store::cached_executions(&state.pool, ctx.tenant_id, &fingerprint.config_hash).await?
+    } else {
+        Vec::new()
+    };
     let runner = Runner {
         corpus: &corpus,
         operations: if operations.is_empty() {
@@ -234,7 +297,7 @@ pub async fn create_run(
             allow_external_ai: state.runtime.allow_external_ai,
             eval_live_enabled: false,
             tenant_synthetic: true,
-            patients_synthetic: true,
+            patients_synthetic: corpus.verify_synthetic().is_ok(),
             explicit_confirmation: false,
         }),
         cache,
@@ -264,6 +327,7 @@ pub async fn create_run(
         gate,
     )
     .await?;
+    allowed.record_on_pool(&state, &ctx).await?;
     let summary = eval::report::summarize(&outcome);
     Ok((
         axum::http::StatusCode::CREATED,
@@ -375,7 +439,14 @@ pub async fn create_review(
     Path(execution_id): Path<Uuid>,
     Json(body): Json<CreateReview>,
 ) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
-    authorize(&state, &ctx, actions::DMIND_EVAL_MANAGE).await?;
+    let allowed = guard(
+        &state,
+        &ctx,
+        actions::DMIND_EVAL_MANAGE,
+        "dmind_evaluation",
+        tenant_ctx(&ctx),
+    )
+    .await?;
     if !REVIEW_DECISIONS.contains(&body.decision.as_str()) {
         return Err(ApiError::bad_request(
             "validation_error",
@@ -406,6 +477,17 @@ pub async fn create_review(
     if exists.is_none() {
         return Err(ApiError::not_found());
     }
+    // The review is attributed to the rubric that scored this execution's
+    // run, not to whatever rubric the server currently compiles.
+    let (rubric_version,): (String,) = sqlx::query_as(
+        "SELECT s.rubric_version FROM dmind_eval_executions e
+         JOIN dmind_eval_runs r ON r.id = e.run_id
+         JOIN dmind_eval_suites s ON s.id = r.suite_id
+         WHERE e.id = $1",
+    )
+    .bind(execution_id)
+    .fetch_one(&mut *tx)
+    .await?;
     let (version,): (i32,) = sqlx::query_as(
         "SELECT COALESCE(MAX(version), 0) + 1 FROM dmind_eval_reviews WHERE execution_id = $1",
     )
@@ -422,7 +504,7 @@ pub async fn create_review(
     .bind(ctx.tenant_id)
     .bind(execution_id)
     .bind(ctx.user_id)
-    .bind(eval::rubric::RUBRIC_VERSION)
+    .bind(&rubric_version)
     .bind(&body.decision)
     .bind(comment)
     .bind(version)
@@ -435,6 +517,7 @@ pub async fn create_review(
         ),
         _ => ApiError::from(e),
     })?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
     tx.commit().await?;
     Ok((
         axum::http::StatusCode::CREATED,
@@ -444,7 +527,7 @@ pub async fn create_review(
             "decision": body.decision,
             "comment": comment,
             "version": version,
-            "rubric_version": eval::rubric::RUBRIC_VERSION,
+            "rubric_version": rubric_version,
         })),
     ))
 }

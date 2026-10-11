@@ -29,7 +29,7 @@ use wellos_domain::ai::{
     Confidence, ProviderInfo, ScribeFlag, ScribeFlagKind, ScribeSection, TranscriptSegment,
 };
 
-#[cfg(feature = "dev-fixtures")]
+#[cfg(any(feature = "dev-fixtures", test))]
 use crate::CapabilityState;
 use crate::{CapabilityStatus, ProviderHealth};
 

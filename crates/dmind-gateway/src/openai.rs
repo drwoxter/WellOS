@@ -484,6 +484,25 @@ impl ModelGateway for OpenAiCompatibleModel {
         }
     }
 
+    fn config_fingerprint(&self) -> String {
+        let prompts: Vec<String> = Operation::ALL
+            .iter()
+            .map(|op| self.prompt_version(*op))
+            .collect();
+        crate::hash_json(&json!({
+            "endpoint": self.cfg.endpoint,
+            "model": self.cfg.model,
+            "timeout_ms": self.cfg.timeout.as_millis() as u64,
+            "max_retries": self.cfg.max_retries,
+            "max_response_bytes": self.cfg.max_response_bytes,
+            "prompts": prompts,
+        }))
+    }
+
+    fn max_attempts(&self) -> u32 {
+        self.cfg.max_retries.saturating_add(1)
+    }
+
     fn status(&self) -> CapabilityStatus {
         let (state, reason) = self.health.state();
         CapabilityStatus {

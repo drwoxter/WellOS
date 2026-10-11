@@ -50,7 +50,13 @@ Preconditions, all enforced by the CLI before the first network call:
 3. `--provider env` with a configured provider; `--confirm-live` passed;
 4. budget: `--max-calls`, `--max-cost` with `--currency`, `--price-in`,
    `--price-out` (per 1k tokens) and `--price-date YYYY-MM-DD`;
-5. ceilings: `--max-input-tokens`, `--max-output-tokens`, `--max-concurrency`;
+5. ceilings: `--max-input-tokens`, `--max-output-tokens`,
+   `--max-output-per-call` (worst-case output reserved per in-flight call,
+   must fit the run ceiling), `--max-concurrency`; every reservation —
+   provider attempts (`max_retries + 1`), estimated input, per-call output
+   and their cost — is booked under the budget lock before dispatch and
+   settled against actual usage afterwards; `--no-cache` disables cross-run
+   reuse (only successful, schema-valid outputs are ever reused);
 6. tenant (`--tenant-id`) is synthetic when persisting.
 
 ```

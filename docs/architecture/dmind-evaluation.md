@@ -54,6 +54,15 @@ deterministic baselines             ─┘      │                             
 * Transport protections are the production ones: timeout, no redirects, host
   allowlist, bounded response size, bounded retries with health accounting,
   provider-health gating after consecutive failures, and a concurrency cap.
+* Coverage split: corpus cases cover clinical input/behaviour categories
+  (stale, contradiction, missing prerequisites, critical/negative findings,
+  injection, unsafe autonomy, cross-tenant evidence, deterministic fallback,
+  malformed/oversized responses through the fixture provider). Transport
+  failure modes (timeout, 429, 5xx, connection loss, retry exhaustion,
+  circuit/concurrency limits) and budget exhaustion are **not** corpus cases;
+  they are verified by the controlled local HTTP server tests in
+  `crates/dmind-gateway/src/openai.rs` and the runner ceiling tests in
+  `crates/wellos-server/src/eval/runner.rs`.
 * Logs and persisted rows contain hashes, safe metadata and evidence
   references only — never prompts, secrets or endpoints. Provider identity is
   a `config_hash` fingerprint.

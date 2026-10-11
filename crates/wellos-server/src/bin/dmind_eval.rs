@@ -29,6 +29,8 @@ usage: dmind-eval [options]
   --max-concurrency <n>         default 2 (1..16)
   --max-input-tokens <n>        default 400000
   --max-output-tokens <n>       default 200000
+  --max-output-per-call <n>     worst-case output reserved per in-flight call (default 4000)
+  --no-cache                    do not reuse prior successful executions across runs
   --max-cost <decimal>          maximum estimated spend (required for live)
   --currency <ISO>              pricing currency (default USD)
   --price-in <per 1k tokens>    input price (required for live)
@@ -55,6 +57,7 @@ struct Args {
     html: Option<String>,
     persist: bool,
     list: bool,
+    reuse_cache: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -73,12 +76,14 @@ fn parse_args() -> Result<Args, String> {
             max_output_tokens: 200_000,
             max_estimated_cost: None,
             pricing: None,
+            max_output_tokens_per_call: 2_000,
         },
         stop_on_high_severity: true,
         json: None,
         html: None,
         persist: false,
         list: false,
+        reuse_cache: true,
     };
     let mut currency = "USD".to_string();
     let mut price_in: Option<Decimal> = None;
@@ -111,6 +116,10 @@ fn parse_args() -> Result<Args, String> {
             "--max-calls" => a.budget.max_calls = num(&val("--max-calls")?)?,
             "--max-concurrency" => a.budget.max_concurrency = num(&val("--max-concurrency")?)?,
             "--max-input-tokens" => a.budget.max_input_tokens = num(&val("--max-input-tokens")?)?,
+            "--max-output-per-call" => {
+                a.budget.max_output_tokens_per_call = num(&val("--max-output-per-call")?)?
+            }
+            "--no-cache" => a.reuse_cache = false,
             "--max-output-tokens" => {
                 a.budget.max_output_tokens = num(&val("--max-output-tokens")?)?
             }
@@ -238,7 +247,7 @@ async fn run() -> Result<ExitCode, String> {
         allow_external_ai: cfg.allow_external_ai,
         eval_live_enabled: env_true("WELLOS_EVAL_LIVE"),
         tenant_synthetic,
-        patients_synthetic: true, // compiled-in corpus; validated synthetic at load
+        patients_synthetic: corpus.verify_synthetic().is_ok(),
         explicit_confirmation: args.confirm_live,
     };
 

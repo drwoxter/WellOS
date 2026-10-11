@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import EvaluationsPage from "@/app/admin/dmind/evaluations/page";
 import EvaluationRunPage from "@/app/admin/dmind/evaluations/[id]/page";
 import { SessionProvider } from "@/lib/session";
@@ -180,7 +186,20 @@ function setup(
       );
     }
     if (url === "/api/v1/admin/dmind/evaluations/runs")
-      return Promise.resolve(jsonResponse({ runs: [RUN] }));
+      return Promise.resolve(
+        jsonResponse({
+          runs: [RUN],
+          next_cursor: "2026-10-01T00:00:00Z|run-1",
+        }),
+      );
+    if (
+      url ===
+      "/api/v1/admin/dmind/evaluations/runs?cursor=" +
+        encodeURIComponent("2026-10-01T00:00:00Z|run-1")
+    )
+      return Promise.resolve(
+        jsonResponse({ runs: [{ ...RUN, id: "run-0" }], next_cursor: null }),
+      );
     if (url === "/api/v1/admin/dmind/evaluations/runs/run-1")
       return Promise.resolve(
         jsonResponse({
@@ -306,6 +325,22 @@ describe("dMind evaluation cockpit", () => {
     expect(
       screen.queryByRole("form", { name: "Record review" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("pages older runs through the cursor until the list is complete", async () => {
+    const { fetchMock } = setup(["clinical_administrator"]);
+    const table = await screen.findByTestId("eval-run-table");
+    expect(within(table).getAllByRole("row")).toHaveLength(2);
+    const more = screen.getByRole("button", { name: "Load older runs" });
+    fireEvent.click(more);
+    await waitFor(() =>
+      expect(within(table).getAllByRole("row")).toHaveLength(3),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Load older runs" }),
+    ).toBeNull();
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(urls.filter((u) => u.includes("/runs?cursor="))).toHaveLength(1);
   });
 
   it("derives tones and pass rates deterministically", () => {

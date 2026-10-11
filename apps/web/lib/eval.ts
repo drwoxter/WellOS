@@ -178,8 +178,11 @@ export function loadSuites(): Promise<EvalSuites> {
   return ops(`${BASE}/suites`);
 }
 
-export function loadRuns(): Promise<{ runs: EvalRun[] }> {
-  return ops(`${BASE}/runs`);
+export type EvalRunPage = { runs: EvalRun[]; next_cursor: string | null };
+
+export function loadRuns(cursor?: string): Promise<EvalRunPage> {
+  const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+  return ops(`${BASE}/runs${q}`);
 }
 
 export function loadRun(id: string): Promise<EvalRunDetail> {

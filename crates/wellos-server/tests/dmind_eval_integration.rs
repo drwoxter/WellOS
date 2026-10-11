@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 use tower::ServiceExt;
+use uuid::Uuid;
 use wellos_server::state::AppState;
 
 const ADMIN: &str = "dev-admin.silva";
@@ -48,12 +49,23 @@ async fn send(
     path: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    send_for(state, method, token, path, body, "operations").await
+}
+
+async fn send_for(
+    state: &AppState,
+    method: &str,
+    token: &str,
+    path: &str,
+    body: Option<Value>,
+    purpose: &str,
+) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
         .uri(path)
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/json")
-        .header("x-purpose-of-use", "operations")
+        .header("x-purpose-of-use", purpose)
         .body(Body::from(
             body.map(|v| v.to_string().into_bytes()).unwrap_or_default(),
         ))
@@ -330,4 +342,248 @@ async fn unknown_operation_and_bad_mode_are_rejected() {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// Allow audits recorded under the `quality` purpose: only the audit section
+/// below sends it, so concurrent tests (all `operations`) cannot skew counts.
+async fn allow_audits(pool: &PgPool, action: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events
+         WHERE action = $1 AND decision = 'allow' AND purpose_of_use = 'quality'",
+    )
+    .bind(action)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Duplicate a row of `table` with the JSON overrides applied, bypassing no
+/// constraint: the copy goes through the same INSERT path as production.
+async fn clone_row(pool: &PgPool, table: &str, id: Uuid, overrides: Value) -> Uuid {
+    let new_id = Uuid::now_v7();
+    let mut overrides = overrides;
+    overrides["id"] = json!(new_id);
+    sqlx::query(&format!(
+        "INSERT INTO {table} SELECT (jsonb_populate_record(NULL::{table}, to_jsonb(t) || $2)).* \
+         FROM {table} t WHERE t.id = $1"
+    ))
+    .bind(id)
+    .bind(overrides)
+    .execute(pool)
+    .await
+    .unwrap();
+    new_id
+}
+
+#[tokio::test]
+async fn review_rubric_follows_the_run_audit_follows_the_mutation_and_failures_are_not_cached() {
+    let state = test_state().await;
+    let (s, created) = send(
+        &state,
+        "POST",
+        ADMIN,
+        &format!("{BASE}/runs"),
+        Some(json!({ "mode": "offline", "operations": ["risk_summary"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{created}");
+    let run_id: Uuid = created["run_id"].as_str().unwrap().parse().unwrap();
+    let (execution_id, suite_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT e.id, r.suite_id FROM dmind_eval_executions e
+         JOIN dmind_eval_runs r ON r.id = e.run_id
+         WHERE e.run_id = $1 AND e.provider_output IS NOT NULL LIMIT 1",
+    )
+    .bind(run_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    // A run scored by an older rubric: reviews must carry that rubric, not
+    // the one the server compiles today.
+    let legacy_suite = clone_row(
+        &state.pool,
+        "dmind_eval_suites",
+        suite_id,
+        json!({ "suite_version": format!("0.0.1-legacy-{}", Uuid::now_v7()), "rubric_version": "dmind-eval-rubric.v0-legacy" }),
+    )
+    .await;
+    let legacy_run = clone_row(
+        &state.pool,
+        "dmind_eval_runs",
+        run_id,
+        json!({ "suite_id": legacy_suite }),
+    )
+    .await;
+    let legacy_execution = clone_row(
+        &state.pool,
+        "dmind_eval_executions",
+        execution_id,
+        json!({ "run_id": legacy_run }),
+    )
+    .await;
+    let (s, review) = send(
+        &state,
+        "POST",
+        ADMIN,
+        &format!("{BASE}/executions/{legacy_execution}/reviews"),
+        Some(json!({ "decision": "accept_result", "comment": "" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{review}");
+    assert_eq!(review["rubric_version"], "dmind-eval-rubric.v0-legacy");
+    let (stored,): (String,) =
+        sqlx::query_as("SELECT rubric_version FROM dmind_eval_reviews WHERE execution_id = $1")
+            .bind(legacy_execution)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, "dmind-eval-rubric.v0-legacy");
+
+    // A rejected mutation leaves no "allow" audit row for the manage action.
+    let before = allow_audits(&state.pool, "dmind_eval.manage").await;
+    let (s, _) = send_for(
+        &state,
+        "POST",
+        ADMIN,
+        &format!("{BASE}/executions/{execution_id}/reviews"),
+        Some(json!({ "decision": "approve_everything", "comment": "" })),
+        "quality",
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = send_for(
+        &state,
+        "POST",
+        ADMIN,
+        &format!("{BASE}/executions/{}/reviews", Uuid::now_v7()),
+        Some(json!({ "decision": "accept_result", "comment": "" })),
+        "quality",
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = send_for(
+        &state,
+        "POST",
+        ADMIN,
+        &format!("{BASE}/runs"),
+        Some(json!({ "mode": "offline", "operations": ["prescribe"] })),
+        "quality",
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(allow_audits(&state.pool, "dmind_eval.manage").await, before);
+    let (s, _) = send_for(
+        &state,
+        "POST",
+        ADMIN,
+        &format!("{BASE}/executions/{execution_id}/reviews"),
+        Some(json!({ "decision": "accept_result", "comment": "" })),
+        "quality",
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(
+        allow_audits(&state.pool, "dmind_eval.manage").await,
+        before + 1
+    );
+
+    // A failed provider output is never replayed into a later run.
+    let (fingerprint_hash,): (String,) = sqlx::query_as(
+        "SELECT f.config_hash FROM dmind_eval_runs r
+         JOIN dmind_eval_provider_fingerprints f ON f.id = r.fingerprint_id WHERE r.id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    let (tenant_id,): (Uuid,) =
+        sqlx::query_as("SELECT tenant_id FROM dmind_eval_runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let (input_hash,): (String,) =
+        sqlx::query_as("SELECT input_hash FROM dmind_eval_executions WHERE id = $1")
+            .bind(execution_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let failed_run = clone_row(&state.pool, "dmind_eval_runs", run_id, json!({})).await;
+    clone_row(
+        &state.pool,
+        "dmind_eval_executions",
+        execution_id,
+        json!({ "run_id": failed_run, "status": "failed", "provider_output": null, "failure_code": "schema_invalid" }),
+    )
+    .await;
+    let cache =
+        wellos_server::eval::store::cached_executions(&state.pool, tenant_id, &fingerprint_hash)
+            .await
+            .unwrap();
+    let same_input: Vec<_> = cache
+        .iter()
+        .filter(|c| c.input_hash == input_hash)
+        .collect();
+    assert_eq!(same_input.len(), 1, "failed duplicate must not be cached");
+    assert!(same_input[0].provider_output.is_some());
+    assert!(cache.iter().all(|c| c.provider_output.is_some()));
+}
+
+#[tokio::test]
+async fn run_listing_pages_by_cursor_in_stable_order() {
+    let state = test_state().await;
+    let mut created_ids = Vec::new();
+    for _ in 0..3 {
+        let (s, created) = send(
+            &state,
+            "POST",
+            ADMIN,
+            &format!("{BASE}/runs"),
+            Some(json!({ "mode": "dry-run", "operations": ["note_draft"] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{created}");
+        created_ids.push(created["run_id"].as_str().unwrap().to_string());
+    }
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let path = match &cursor {
+            Some(c) => format!("{BASE}/runs?limit=2&cursor={}", urlencoding(c)),
+            None => format!("{BASE}/runs?limit=2"),
+        };
+        let (s, page) = send(&state, "GET", ADMIN, &path, None).await;
+        assert_eq!(s, StatusCode::OK, "{page}");
+        let runs = page["runs"].as_array().unwrap();
+        assert!(runs.len() <= 2);
+        seen.extend(runs.iter().map(|r| r["id"].as_str().unwrap().to_string()));
+        pages += 1;
+        match page["next_cursor"].as_str() {
+            Some(c) => cursor = Some(c.to_string()),
+            None => break,
+        }
+        assert!(pages < 1000);
+    }
+    assert!(pages >= 2);
+    let unique: std::collections::BTreeSet<&String> = seen.iter().collect();
+    assert_eq!(unique.len(), seen.len(), "no run repeats across pages");
+    for id in &created_ids {
+        assert!(seen.contains(id), "run {id} unreachable through pagination");
+    }
+    let (s, _) = send(
+        &state,
+        "GET",
+        ADMIN,
+        &format!("{BASE}/runs?cursor=not-a-cursor"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+fn urlencoding(s: &str) -> String {
+    s.replace('+', "%2B")
+        .replace('|', "%7C")
+        .replace(':', "%3A")
 }
