@@ -1,0 +1,705 @@
+/* ---------- Motion & depth layer ----------
+   Lit, raised surfaces (layered shadows + top highlight), pressable 3D
+   buttons, pointer-tracking tilt (driven by data-tilt + CSS variables set in
+   components/ui/motion.tsx), page-enter choreography and dMind presence
+   motion. Everything decorative is removed under prefers-reduced-motion; no
+   state is ever conveyed by motion alone. */
+
+/* Buttons: raised edge, lift on hover, press down on :active. */
+button,
+.button,
+a.button {
+  position: relative;
+  isolation: isolate;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur) var(--ease-out),
+    transform var(--dur) var(--ease-spring),
+    filter var(--dur-fast) var(--ease);
+}
+button.secondary,
+a.button.secondary,
+a.button,
+button.danger {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 2px 0 var(--border),
+    0 3px 8px -4px rgba(16, 32, 58, 0.18);
+}
+button.secondary:hover:not(:disabled),
+a.button:hover,
+button.danger:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 3px 0 var(--border-strong),
+    0 10px 20px -10px rgba(16, 32, 58, 0.3);
+}
+button.primary,
+a.button.primary,
+.primary-cta,
+button.primary.cta {
+  overflow: hidden;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.12),
+    0 3px 0 var(--primary-strong),
+    0 10px 22px -10px color-mix(in srgb, var(--primary) 70%, transparent);
+}
+button.primary:hover:not(:disabled),
+a.button.primary:hover,
+.primary-cta:hover:not(:disabled) {
+  transform: translateY(-2px);
+  filter: brightness(1.06) saturate(1.05);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.12),
+    0 5px 0 var(--primary-strong),
+    0 18px 34px -14px color-mix(in srgb, var(--primary) 85%, transparent);
+}
+/* Sheen sweep across the primary surface. */
+button.primary::before,
+a.button.primary::before,
+.primary-cta::before {
+  content: "";
+  position: absolute;
+  inset: -40% auto -40% -60%;
+  width: 45%;
+  transform: skewX(-20deg) translateX(-20%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.35),
+    transparent
+  );
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+button.primary:hover:not(:disabled)::before,
+a.button.primary:hover::before,
+.primary-cta:hover:not(:disabled)::before {
+  animation: sheen 900ms var(--ease-out) 1;
+}
+/* Press: the edge collapses and the button sinks. */
+button:active:not(:disabled),
+a.button:active,
+button.secondary:active:not(:disabled),
+button.danger:active:not(:disabled) {
+  transform: translateY(1px) scale(0.985);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 0 0 var(--border),
+    0 1px 3px -1px rgba(16, 32, 58, 0.25);
+  transition-duration: 70ms;
+}
+button.primary:active:not(:disabled),
+a.button.primary:active,
+.primary-cta:active:not(:disabled) {
+  transform: translateY(2px) scale(0.985);
+  filter: brightness(0.97);
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.22),
+    0 0 0 var(--primary-strong),
+    0 4px 10px -8px color-mix(in srgb, var(--primary) 70%, transparent);
+}
+button.tertiary:active:not(:disabled),
+button.linklike:active:not(:disabled),
+button.ghost:active:not(:disabled) {
+  transform: scale(0.97);
+  box-shadow: none;
+}
+button:disabled,
+button.primary:disabled,
+.primary-cta:disabled {
+  transform: none;
+  filter: none;
+  box-shadow: none;
+}
+
+/* Ripple from the pointer position (--px/--py set by MotionLayer; centre
+   fallback). Only on surfaces that clip their content. */
+button.primary::after,
+a.button.primary::after,
+.primary-cta::after,
+.role-card::after,
+.priority-tile::after {
+  content: "";
+  position: absolute;
+  left: var(--px, 50%);
+  top: var(--py, 50%);
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  transform: scale(0);
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+.role-card::after,
+.priority-tile::after {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+}
+.is-pressed::after {
+  animation: ripple 620ms var(--ease-out) 1;
+}
+
+/* Busy buttons show a spinner next to their (unchanged) label. */
+button[aria-busy="true"] {
+  cursor: progress;
+}
+button[aria-busy="true"]::before {
+  content: "";
+  position: static;
+  inset: auto;
+  width: 0.9em;
+  height: 0.9em;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  opacity: 0.85;
+  transform: none;
+  background: none;
+  animation: spin 760ms linear infinite;
+}
+
+/* Focus ring breathes in rather than popping. */
+:focus-visible {
+  transition: outline-offset var(--dur-fast) var(--ease);
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+select,
+textarea {
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur) var(--ease-out),
+    transform var(--dur) var(--ease-out);
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus,
+select:focus,
+textarea:focus {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+/* ---------- Surfaces: lit depth, lift, tilt ---------- */
+.card,
+.surface,
+.dmind-panel,
+.stat-tile,
+.list-row,
+.role-card,
+.priority-tile,
+.cockpit-cell {
+  box-shadow: var(--depth-1);
+  transition:
+    box-shadow var(--dur-slow) var(--ease-out),
+    transform var(--dur-slow) var(--ease-out),
+    border-color var(--dur) var(--ease),
+    background-color var(--dur) var(--ease);
+}
+.card.tone-critical {
+  box-shadow:
+    var(--depth-1),
+    inset 4px 0 0 var(--red-600);
+}
+.card.tone-warn {
+  box-shadow:
+    var(--depth-1),
+    inset 4px 0 0 var(--amber-600);
+}
+.card.tone-ok {
+  box-shadow:
+    var(--depth-1),
+    inset 4px 0 0 var(--mint-600);
+}
+.card.interactive:hover,
+.surface.interactive:hover,
+.list-row:hover,
+.stat-tile:is(a):hover {
+  transform: translateY(-3px);
+  box-shadow: var(--depth-2);
+}
+.list-row:hover {
+  transform: translateY(-2px) translateX(2px);
+}
+
+/* Tilt follows the pointer: --rx/--ry/--mx/--my come from MotionLayer. */
+[data-tilt] {
+  position: relative;
+  overflow: hidden;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
+[data-tilt].is-tilting {
+  transform: perspective(var(--perspective)) rotateX(var(--rx, 0deg))
+    rotateY(var(--ry, 0deg)) translateY(-3px) scale(1.012);
+  box-shadow: var(--depth-3);
+  transition:
+    box-shadow var(--dur-slow) var(--ease-out),
+    transform 90ms linear;
+}
+/* Specular highlight tracking the pointer. */
+[data-tilt]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    22rem 22rem at var(--mx, 50%) var(--my, 50%),
+    rgba(255, 255, 255, 0.45),
+    transparent 60%
+  );
+  opacity: 0;
+  transition: opacity var(--dur-slow) var(--ease);
+  pointer-events: none;
+  z-index: 0;
+}
+[data-tilt].is-tilting::before {
+  opacity: 1;
+}
+[data-tilt] > * {
+  position: relative;
+  z-index: 1;
+}
+.role-card:hover:not(:disabled) {
+  transform: translateY(-3px);
+  box-shadow: var(--depth-2);
+}
+.role-card:active:not(:disabled) {
+  transform: translateY(0) scale(0.99);
+  box-shadow: var(--depth-1);
+}
+.priority-tile {
+  transition:
+    transform var(--dur-slow) var(--ease-out),
+    box-shadow var(--dur-slow) var(--ease-out),
+    border-color var(--dur) var(--ease);
+}
+.priority-tile:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--depth-2);
+}
+.priority-tile:active {
+  transform: translateY(0) scale(0.985);
+}
+.priority-rank {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    0 2px 6px -2px rgba(16, 32, 58, 0.6);
+}
+.priority-tile:hover .priority-rank {
+  animation: wiggle 520ms var(--ease-spring) 1;
+}
+
+/* Numbers pop in when they appear. */
+.stat-tile .num,
+.priority-count,
+.kpi .num {
+  display: inline-block;
+  animation: pop-in var(--dur-slower) var(--ease-spring) both;
+}
+
+/* Pills and chips respond to touch. */
+.pill,
+.chip {
+  transition:
+    transform var(--dur-fast) var(--ease-spring),
+    box-shadow var(--dur-fast) var(--ease);
+}
+.chip:hover:not(:disabled),
+.pill:hover {
+  transform: translateY(-1px);
+}
+.chip[aria-pressed="true"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 2px 0 var(--primary-strong);
+}
+
+/* Tabs: active tab sits proud of the strip. */
+.tabs button,
+.tabs .tab {
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur) var(--ease-spring),
+    box-shadow var(--dur) var(--ease-out);
+}
+.tabs button[aria-selected="true"],
+.tabs .tab[aria-selected="true"] {
+  box-shadow: var(--depth-1);
+  transform: translateY(-1px);
+}
+
+/* Tilt wins over the plain hover lift while the pointer is tracked. */
+[data-tilt].is-tilting,
+[data-tilt].is-tilting:hover,
+.role-card[data-tilt].is-tilting:hover:not(:disabled),
+.priority-tile[data-tilt].is-tilting:hover {
+  transform: perspective(var(--perspective)) rotateX(var(--rx, 0deg))
+    rotateY(var(--ry, 0deg)) translateY(-4px) scale(1.015);
+  box-shadow: var(--depth-3);
+}
+
+/* ---------- Canvas: slow aurora drift behind every page ---------- */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -20%;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      50rem 28rem at 80% 10%,
+      var(--mesh-a, rgba(21, 163, 181, 0.18)),
+      transparent 60%
+    ),
+    radial-gradient(
+      40rem 26rem at 10% 90%,
+      var(--mesh-b, rgba(109, 97, 232, 0.12)),
+      transparent 60%
+    );
+  filter: blur(10px);
+  animation: aurora 28s ease-in-out infinite alternate;
+}
+
+/* ---------- Hero: drifting mesh and a glossy floating sphere ---------- */
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: -40%;
+  background:
+    radial-gradient(
+      30rem 18rem at 70% 30%,
+      rgba(60, 193, 207, 0.35),
+      transparent 60%
+    ),
+    radial-gradient(
+      26rem 18rem at 20% 80%,
+      rgba(155, 140, 247, 0.35),
+      transparent 60%
+    );
+  animation: mesh-drift 22s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+.hero::after {
+  content: "";
+  position: absolute;
+  right: 6%;
+  top: -2.4rem;
+  width: 9rem;
+  height: 9rem;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 30% 28%,
+    rgba(255, 255, 255, 0.9),
+    rgba(169, 227, 234, 0.75) 22%,
+    rgba(21, 163, 181, 0.55) 55%,
+    rgba(11, 21, 38, 0.1) 75%
+  );
+  box-shadow:
+    inset -12px -16px 30px rgba(7, 16, 29, 0.45),
+    0 30px 50px -24px rgba(0, 0, 0, 0.6);
+  opacity: 0.55;
+  animation: float 7s ease-in-out infinite;
+  pointer-events: none;
+}
+.hero > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---------- Shell: glass topbar, lively rail ---------- */
+.topbar {
+  box-shadow: 0 8px 24px -20px rgba(16, 32, 58, 0.5);
+  backdrop-filter: saturate(1.6) blur(14px);
+}
+.sidebar .navlink {
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur) var(--ease-spring),
+    box-shadow var(--dur) var(--ease);
+}
+.sidebar .navlink:hover {
+  transform: translateX(3px);
+}
+.sidebar .navlink:hover svg {
+  transform: scale(1.12) rotate(-4deg);
+}
+.sidebar .navlink svg {
+  transition: transform var(--dur) var(--ease-spring);
+}
+.sidebar .navlink[aria-current="page"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 8px 18px -12px rgba(60, 193, 207, 0.7);
+}
+.sidebar .navlink[aria-current="page"]::before {
+  animation: bar-in var(--dur-slow) var(--ease-out) both;
+}
+.brand-mark {
+  transition: transform var(--dur-slow) var(--ease-spring);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset -3px -4px 8px rgba(7, 16, 29, 0.35),
+    0 8px 18px -8px rgba(60, 193, 207, 0.9);
+}
+.brand:hover .brand-mark {
+  transform: rotate(-8deg) scale(1.08);
+}
+.avatar {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset -2px -3px 6px rgba(7, 16, 29, 0.3);
+}
+.mobile-nav .navlink svg {
+  transition: transform var(--dur) var(--ease-spring);
+}
+.mobile-nav .navlink:active svg {
+  transform: scale(0.85);
+}
+
+/* ---------- Page choreography ----------
+   Content rises into place without any opacity ramp, so text contrast is
+   identical at every frame (axe audits run while this plays). */
+.page-enter > * {
+  animation: rise var(--dur-slower) var(--ease-out) both;
+}
+.page-enter > :nth-child(2) {
+  animation-delay: 40ms;
+}
+.page-enter > :nth-child(3) {
+  animation-delay: 80ms;
+}
+.page-enter > :nth-child(4) {
+  animation-delay: 120ms;
+}
+.page-enter > :nth-child(5) {
+  animation-delay: 160ms;
+}
+.page-enter > :nth-child(n + 6) {
+  animation-delay: 200ms;
+}
+
+/* ---------- dMind: glossy orb, floating launcher ---------- */
+.dmind-orb {
+  box-shadow:
+    inset 2px 2px 5px rgba(255, 255, 255, 0.55),
+    inset -3px -4px 7px rgba(32, 20, 90, 0.35),
+    0 6px 16px -6px rgba(109, 97, 232, 0.85);
+}
+.dmind-presence.ready .dmind-orb {
+  box-shadow:
+    inset 2px 2px 5px rgba(255, 255, 255, 0.55),
+    inset -3px -4px 7px rgba(10, 60, 40, 0.35),
+    0 6px 16px -6px rgba(28, 143, 99, 0.85);
+}
+.dmind-presence.attention .dmind-orb {
+  box-shadow:
+    inset 2px 2px 5px rgba(255, 255, 255, 0.55),
+    inset -3px -4px 7px rgba(90, 50, 0, 0.35),
+    0 6px 16px -6px rgba(160, 90, 0, 0.85);
+}
+.dmind-presence.ready .dmind-orb svg {
+  animation: pop-in var(--dur-slower) var(--ease-spring) both;
+}
+.dmind-launcher {
+  box-shadow:
+    var(--depth-2),
+    0 0 0 0 rgba(109, 97, 232, 0.3);
+  animation: launcher-float 5s ease-in-out infinite;
+}
+.dmind-launcher:hover:not(:disabled) {
+  animation-play-state: paused;
+  transform: translateY(-3px) scale(1.03);
+  box-shadow: var(--depth-3), var(--glow-dmind);
+}
+.dmind-launcher[aria-expanded="true"] {
+  animation: none;
+}
+
+/* ---------- Keyframes ---------- */
+@keyframes sheen {
+  from {
+    opacity: 0;
+    transform: skewX(-20deg) translateX(-60%);
+  }
+  30% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: skewX(-20deg) translateX(420%);
+  }
+}
+@keyframes ripple {
+  from {
+    transform: scale(0);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(32);
+    opacity: 0;
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes pop-in {
+  from {
+    transform: scale(0.72) translateY(4px);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes rise {
+  from {
+    transform: translateY(14px);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes wiggle {
+  0% {
+    transform: rotate(0);
+  }
+  35% {
+    transform: rotate(-12deg) scale(1.1);
+  }
+  70% {
+    transform: rotate(8deg);
+  }
+  100% {
+    transform: none;
+  }
+}
+@keyframes mesh-drift {
+  from {
+    transform: translate3d(-4%, -3%, 0) rotate(0deg);
+  }
+  to {
+    transform: translate3d(5%, 4%, 0) rotate(6deg);
+  }
+}
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0);
+  }
+  50% {
+    transform: translateY(-10px) rotate(6deg);
+  }
+}
+@keyframes launcher-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+@keyframes bar-in {
+  from {
+    transform: translateY(-50%) scaleY(0);
+  }
+  to {
+    transform: translateY(-50%) scaleY(1);
+  }
+}
+@keyframes aurora {
+  from {
+    transform: translate3d(-3%, -2%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(3%, 3%, 0) scale(1.08);
+  }
+}
+
+/* Coarse pointers: no hover lift, keep press feedback. */
+@media (hover: none) {
+  .card.interactive:hover,
+  .list-row:hover,
+  .priority-tile:hover,
+  .role-card:hover:not(:disabled),
+  .sidebar .navlink:hover {
+    transform: none;
+  }
+}
+
+/* ---------- Reduced motion: depth stays, movement goes ---------- */
+@media (prefers-reduced-motion: reduce) {
+  body::before,
+  .hero::before,
+  .hero::after,
+  .dmind-launcher,
+  .dmind-presence.ready .dmind-orb svg,
+  .sidebar .navlink[aria-current="page"]::before,
+  .priority-tile:hover .priority-rank,
+  .stat-tile .num,
+  .priority-count,
+  .kpi .num,
+  .page-enter > *,
+  .is-pressed::after,
+  button.primary:hover:not(:disabled)::before,
+  a.button.primary:hover::before,
+  .primary-cta:hover:not(:disabled)::before {
+    animation: none !important;
+  }
+  button[aria-busy="true"]::before {
+    animation: none !important;
+    border-right-color: currentColor;
+    opacity: 0.5;
+  }
+  .priority-tile,
+  .cockpit-cell,
+  [data-tilt],
+  .sidebar .navlink,
+  .sidebar .navlink svg,
+  .brand-mark,
+  .pill,
+  .chip,
+  .tabs button,
+  .tabs .tab {
+    transition: none;
+  }
+  [data-tilt].is-tilting,
+  [data-tilt].is-tilting:hover,
+  .role-card[data-tilt].is-tilting:hover:not(:disabled),
+  .priority-tile[data-tilt].is-tilting:hover,
+  .card.interactive:hover,
+  .surface.interactive:hover,
+  .list-row:hover,
+  .stat-tile:is(a):hover,
+  .role-card:hover:not(:disabled),
+  .priority-tile:hover,
+  .sidebar .navlink:hover,
+  .sidebar .navlink:hover svg,
+  .brand:hover .brand-mark,
+  button.primary:hover:not(:disabled),
+  a.button.primary:hover,
+  .primary-cta:hover:not(:disabled),
+  button.secondary:hover:not(:disabled),
+  a.button:hover,
+  button.danger:hover:not(:disabled),
+  .dmind-launcher:hover:not(:disabled),
+  .chip:hover:not(:disabled),
+  .pill:hover,
+  .tabs button[aria-selected="true"],
+  .tabs .tab[aria-selected="true"] {
+    transform: none;
+  }
+  [data-tilt]::before {
+    display: none;
+  }
+}
