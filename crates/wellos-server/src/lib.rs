@@ -4,6 +4,7 @@ pub mod auth;
 pub mod capacity;
 pub mod crypto;
 pub mod error;
+pub mod eval;
 pub mod notify;
 pub mod objectstore;
 pub mod oidc;

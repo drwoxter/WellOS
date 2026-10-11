@@ -252,6 +252,71 @@ pub enum Operation {
     PatientResultExplanation,
 }
 
+impl Operation {
+    /// Every registered governed operation, in registration order. Evaluation
+    /// coverage is derived from this list; a new variant that is not added
+    /// here fails `all_is_exhaustive` below.
+    pub const ALL: &'static [Operation] = &[
+        Operation::ResultSummary,
+        Operation::TriageProposal,
+        Operation::RiskSummary,
+        Operation::NoteDraft,
+        Operation::AccessIntent,
+        Operation::AppointmentRanking,
+        Operation::CancellationRecovery,
+        Operation::CapacityExplanation,
+        Operation::DiagnosticOrderSuggestion,
+        Operation::DiagnosticResultSynthesis,
+        Operation::PatientResultExplanation,
+    ];
+
+    /// Stable snake_case identifier (the serde representation).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Operation::ResultSummary => "result_summary",
+            Operation::TriageProposal => "triage_proposal",
+            Operation::RiskSummary => "risk_summary",
+            Operation::NoteDraft => "note_draft",
+            Operation::AccessIntent => "access_intent",
+            Operation::AppointmentRanking => "appointment_ranking",
+            Operation::CancellationRecovery => "cancellation_recovery",
+            Operation::CapacityExplanation => "capacity_explanation",
+            Operation::DiagnosticOrderSuggestion => "diagnostic_order_suggestion",
+            Operation::DiagnosticResultSynthesis => "diagnostic_result_synthesis",
+            Operation::PatientResultExplanation => "patient_result_explanation",
+        }
+    }
+
+    /// Output schema identifier the operation's typed contract carries.
+    pub fn output_schema(self) -> &'static str {
+        match self {
+            Operation::ResultSummary => "result-summary.v1",
+            Operation::TriageProposal => wellos_domain::triage::TRIAGE_PROPOSAL_SCHEMA,
+            Operation::RiskSummary => wellos_domain::risk::RISK_SUMMARY_SCHEMA,
+            Operation::NoteDraft => wellos_domain::ai::SCRIBE_DRAFT_SCHEMA,
+            Operation::AccessIntent => wellos_domain::access_ai::ACCESS_INTENT_SCHEMA,
+            Operation::AppointmentRanking => wellos_domain::access_ai::APPOINTMENT_RANKING_SCHEMA,
+            Operation::CancellationRecovery => {
+                wellos_domain::access_ai::CANCELLATION_RECOVERY_SCHEMA
+            }
+            Operation::CapacityExplanation => wellos_domain::access_ai::CAPACITY_EXPLANATION_SCHEMA,
+            Operation::DiagnosticOrderSuggestion => {
+                wellos_domain::diagnostics_ai::ORDER_SUGGESTION_SCHEMA
+            }
+            Operation::DiagnosticResultSynthesis => {
+                wellos_domain::diagnostics_ai::RESULT_SYNTHESIS_SCHEMA
+            }
+            Operation::PatientResultExplanation => {
+                wellos_domain::diagnostics_ai::PATIENT_EXPLANATION_SCHEMA
+            }
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Operation> {
+        Operation::ALL.iter().copied().find(|op| op.as_str() == raw)
+    }
+}
+
 #[async_trait]
 pub trait ModelGateway: Send + Sync {
     /// Provenance identity of the provider (no secrets).
@@ -469,4 +534,37 @@ pub fn hash_json<T: Serialize>(value: &T) -> String {
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(value).expect("serializable"));
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::Operation;
+
+    #[test]
+    fn all_is_exhaustive() {
+        // Adding a variant without listing it in `ALL` breaks this match,
+        // and a listed variant that is missing breaks the count.
+        for op in Operation::ALL {
+            let _: () = match op {
+                Operation::ResultSummary
+                | Operation::TriageProposal
+                | Operation::RiskSummary
+                | Operation::NoteDraft
+                | Operation::AccessIntent
+                | Operation::AppointmentRanking
+                | Operation::CancellationRecovery
+                | Operation::CapacityExplanation
+                | Operation::DiagnosticOrderSuggestion
+                | Operation::DiagnosticResultSynthesis
+                | Operation::PatientResultExplanation => {}
+            };
+            assert_eq!(
+                serde_json::to_value(op).unwrap(),
+                serde_json::Value::String(op.as_str().into())
+            );
+            assert_eq!(Operation::parse(op.as_str()), Some(*op));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        assert!(Operation::ALL.iter().all(|op| seen.insert(op.as_str())));
+    }
 }

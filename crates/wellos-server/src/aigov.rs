@@ -125,6 +125,34 @@ pub enum ReuseScope {
     },
 }
 
+/// Every governance artifact type with the gateway operation it executes.
+/// Kept next to [`ReuseScope`] so the evaluation registry is derived from
+/// governance rather than maintained separately; `scope_catalog_is_complete`
+/// pins it to the enum.
+pub const ARTIFACT_TYPES: &[(&str, Operation)] = &[
+    ("result_summary", Operation::ResultSummary),
+    ("encounter_summary", Operation::ResultSummary),
+    ("scribe_draft", Operation::NoteDraft),
+    ("triage_proposal", Operation::TriageProposal),
+    ("risk_summary", Operation::RiskSummary),
+    ("access_intent", Operation::AccessIntent),
+    ("appointment_ranking", Operation::AppointmentRanking),
+    ("cancellation_recovery", Operation::CancellationRecovery),
+    ("capacity_explanation", Operation::CapacityExplanation),
+    (
+        "diagnostic_order_suggestion",
+        Operation::DiagnosticOrderSuggestion,
+    ),
+    (
+        "diagnostic_result_synthesis",
+        Operation::DiagnosticResultSynthesis,
+    ),
+    (
+        "patient_result_explanation",
+        Operation::PatientResultExplanation,
+    ),
+];
+
 impl ReuseScope {
     pub fn artifact_type(self) -> &'static str {
         match self {
@@ -686,5 +714,64 @@ pub fn gateway_error(err: GatewayError) -> ApiError {
         GatewayError::PolicyDenied(reason) => {
             ApiError::new(StatusCode::FORBIDDEN, "ai_policy_denied", reason)
         }
+    }
+}
+
+#[cfg(test)]
+mod scope_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn scope_catalog_is_complete() {
+        let id = Uuid::nil();
+        let scopes = [
+            ReuseScope::ResultSummary { observation_id: id },
+            ReuseScope::EncounterSummary { encounter_id: id },
+            ReuseScope::ScribeDraft { encounter_id: id },
+            ReuseScope::TriageProposal { visit_id: id },
+            ReuseScope::RiskSummary {
+                risk_assessment_id: id,
+            },
+            ReuseScope::AccessIntent {
+                access_request_id: id,
+            },
+            ReuseScope::AppointmentRanking { matcher_run_id: id },
+            ReuseScope::CancellationRecovery {
+                cancellation_event_id: id,
+            },
+            ReuseScope::CapacityExplanation {
+                capacity_forecast_id: id,
+            },
+            ReuseScope::DiagnosticOrderSuggestion { encounter_id: id },
+            ReuseScope::DiagnosticResultSynthesis {
+                diagnostic_report_id: id,
+            },
+            ReuseScope::PatientResultExplanation {
+                diagnostic_report_id: id,
+            },
+        ];
+        // A new ReuseScope variant must be added to both lists.
+        for s in &scopes {
+            let _: () = match s {
+                ReuseScope::ResultSummary { .. }
+                | ReuseScope::EncounterSummary { .. }
+                | ReuseScope::ScribeDraft { .. }
+                | ReuseScope::TriageProposal { .. }
+                | ReuseScope::RiskSummary { .. }
+                | ReuseScope::AccessIntent { .. }
+                | ReuseScope::AppointmentRanking { .. }
+                | ReuseScope::CancellationRecovery { .. }
+                | ReuseScope::CapacityExplanation { .. }
+                | ReuseScope::DiagnosticOrderSuggestion { .. }
+                | ReuseScope::DiagnosticResultSynthesis { .. }
+                | ReuseScope::PatientResultExplanation { .. } => {}
+            };
+            let entry = ARTIFACT_TYPES
+                .iter()
+                .find(|(t, _)| *t == s.artifact_type())
+                .unwrap_or_else(|| panic!("{} missing from ARTIFACT_TYPES", s.artifact_type()));
+            assert_eq!(entry.1, s.operation());
+        }
+        assert_eq!(ARTIFACT_TYPES.len(), scopes.len());
     }
 }
