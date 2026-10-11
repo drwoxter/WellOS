@@ -12,6 +12,7 @@ pub mod dev;
 pub mod diagnostics;
 pub mod encounter_docs;
 pub mod encounters;
+pub mod eval;
 pub mod extract;
 pub mod fhir;
 pub mod grants;
@@ -165,6 +166,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/service-requests/:id/close", post(loops::close))
         .route("/api/v1/worklist", get(loops::worklist))
         .route("/api/v1/worklist/summary", get(loops::worklist_summary))
+        .route("/api/v1/admin/dmind/evaluations/suites", get(eval::suites))
+        .route(
+            "/api/v1/admin/dmind/evaluations/runs",
+            get(eval::list_runs).post(eval::create_run),
+        )
+        .route(
+            "/api/v1/admin/dmind/evaluations/runs/:run_id",
+            get(eval::run_detail),
+        )
+        .route(
+            "/api/v1/admin/dmind/evaluations/executions/:execution_id/reviews",
+            post(eval::create_review),
+        )
         .route("/api/v1/dashboard/cockpit", get(dashboard::cockpit))
         .route(
             "/api/v1/me/dashboard-preferences",

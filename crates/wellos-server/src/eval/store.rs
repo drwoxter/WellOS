@@ -338,6 +338,16 @@ fn snake<T: serde::Serialize>(v: &T) -> Result<String, ApiError> {
         .ok_or_else(|| ApiError::internal("enum did not serialize to a string"))
 }
 
+/// Terminal run state and abort reason recorded for an outcome.
+pub fn run_status(outcome: &RunOutcome) -> (&'static str, Option<String>) {
+    match (&outcome.abort, outcome.plan.mode) {
+        (_, Mode::DryRun) => ("aborted", Some("dry_run".to_string())),
+        (Some(a), _) => ("aborted", Some(format!("{a:?}"))),
+        (None, _) if outcome.totals.failed > 0 => ("failed", None),
+        (None, _) => ("completed", None),
+    }
+}
+
 pub fn status_str(s: CaseStatus) -> &'static str {
     match s {
         CaseStatus::Passed => "passed",
@@ -425,12 +435,7 @@ pub async fn persist_run(
         transition_run(&mut tx, tenant_id, run_id, 1, "running", None).await?
     };
     insert_outcome(&mut tx, tenant_id, run_id, suite_id, outcome).await?;
-    let (terminal, reason) = match (&outcome.abort, outcome.plan.mode) {
-        (_, Mode::DryRun) => ("aborted", Some("dry_run".to_string())),
-        (Some(a), _) => ("aborted", Some(format!("{a:?}"))),
-        (None, _) if outcome.totals.failed > 0 => ("failed", None),
-        (None, _) => ("completed", None),
-    };
+    let (terminal, reason) = run_status(outcome);
     transition_run(&mut tx, tenant_id, run_id, v, terminal, reason.as_deref()).await?;
     tx.commit().await?;
     Ok(run_id)

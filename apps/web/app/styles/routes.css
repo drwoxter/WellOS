@@ -193,3 +193,96 @@ main.signin {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---- dMind evaluation cockpit (/admin/dmind/evaluations) ---- */
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 0.5rem);
+  list-style: none;
+  margin: var(--space-3, 0.75rem) 0 0;
+  padding: 0;
+}
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: var(--space-1, 0.25rem) var(--space-3, 0.75rem);
+}
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-2, 0.5rem) var(--space-4, 1rem);
+  margin: 0;
+}
+.kv-grid dt {
+  color: var(--text-muted);
+  font-size: var(--text-xs, 0.75rem);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.kv-grid dd {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.two-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: var(--space-3, 0.75rem);
+  align-items: start;
+}
+.code-block {
+  max-height: 24rem;
+  overflow: auto;
+  padding: var(--space-3, 0.75rem);
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--surface-sunken, rgba(0, 0, 0, 0.04));
+  font-size: var(--text-xs, 0.75rem);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mono {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.eval-executions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3, 0.75rem);
+}
+.eval-execution[data-status="failed"] > .card {
+  border-left: 4px solid var(--critical, #b42318);
+}
+.eval-execution[data-status="needs_review"] > .card {
+  border-left: 4px solid var(--warn, #b54708);
+}
+.eval-metrics summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: var(--space-2, 0.5rem) 0;
+}
+.eval-reviews .timeline {
+  margin: 0 0 var(--space-3, 0.75rem);
+  padding-left: 1.25rem;
+}
+.eval-review-form {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) minmax(12rem, 2fr) auto;
+  gap: var(--space-3, 0.75rem);
+  align-items: end;
+}
+.eval-review-form .field {
+  display: grid;
+  gap: var(--space-1, 0.25rem);
+}
+.eval-review-form textarea,
+.eval-review-form select {
+  width: 100%;
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  .eval-review-form {
+    grid-template-columns: 1fr;
+  }
+}
