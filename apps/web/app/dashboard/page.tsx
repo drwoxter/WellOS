@@ -344,6 +344,7 @@ function PriorityStrip({
             <li key={p.key}>
               <a
                 className={`priority-tile ${p.tone}`}
+                data-tilt=""
                 href={p.href}
                 data-testid={`priority-${p.key}`}
               >

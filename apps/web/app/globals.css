@@ -1,9 +1,11 @@
 /* WellOS Experience Reset v1 — one design system for every route.
-   Order matters: tokens → base → legacy route styles → primitives → shell,
-   so the shared primitives and shell override older per-route rules. */
+   Order matters: tokens → base → legacy route styles → primitives → shell →
+   routes → motion, so the shared primitives and shell override older
+   per-route rules and the motion/depth layer sits on top of everything. */
 @import "./styles/tokens.css";
 @import "./styles/base.css";
 @import "./styles/legacy.css";
 @import "./styles/primitives.css";
 @import "./styles/shell.css";
 @import "./styles/routes.css";
+@import "./styles/motion.css";

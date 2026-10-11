@@ -13,6 +13,7 @@ import { hasSchedulingConsoleAccess } from "@/lib/access";
 import { confirmLeaveUnsaved } from "@/lib/unsaved-guard";
 import { Icon } from "@/components/ui/icons";
 import { DmindPresence, type DmindState } from "@/components/ui/dmind";
+import { MotionLayer } from "@/components/ui/motion";
 import { Drawer, ToastProvider } from "@/components/ui/overlay";
 import { EmptyState, ListRow, Pill } from "@/components/ui/primitives";
 import { DmindContextProvider, useDmindContext } from "@/lib/dmind-context";
@@ -617,6 +618,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <DmindContextProvider>
       <ToastProvider dismissLabel={t(lang, "uiDismiss")}>
+        <MotionLayer />
         <div
           className={`shell role-${role}${collapsed ? " rail-collapsed" : ""}`}
         >
@@ -717,7 +719,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               ) : null}
               <UserMenu />
             </header>
-            <main id="main-content">{children}</main>
+            <main id="main-content" className="page-enter" key={pathname}>
+              {children}
+            </main>
             <nav className="mobile-nav" aria-label={t(lang, "uiMainNav")}>
               {primaryMobile.map((l) => (
                 <NavItem key={l.href} link={l} pathname={pathname} />

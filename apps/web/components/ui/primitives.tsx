@@ -93,6 +93,7 @@ export function StatTile({
     return (
       <a
         className={cx("stat-tile", tone !== "neutral" && tone)}
+        data-tilt=""
         href={href}
         style={{ textDecoration: "none" }}
       >
@@ -101,7 +102,9 @@ export function StatTile({
     );
   }
   return (
-    <div className={cx("stat-tile", tone !== "neutral" && tone)}>{body}</div>
+    <div className={cx("stat-tile", tone !== "neutral" && tone)} data-tilt="">
+      {body}
+    </div>
   );
 }
 

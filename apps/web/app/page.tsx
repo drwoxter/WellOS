@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppHeader, BrandMark } from "./chrome";
 import { Icon } from "@/components/ui/icons";
+import { MotionLayer } from "@/components/ui/motion";
 import { t } from "@/lib/i18n";
 import {
   fetchAuthProviders,
@@ -84,7 +85,8 @@ export default function SignInPage() {
   return (
     <>
       <AppHeader />
-      <main className="signin">
+      <MotionLayer />
+      <main className="signin page-enter">
         <section className="hero signin-hero" aria-labelledby="signin-tagline">
           <p className="eyebrow">{t(lang, "appName")}</p>
           <h1
@@ -162,6 +164,7 @@ export default function SignInPage() {
                   <button
                     key={u.username}
                     className="role-card"
+                    data-tilt=""
                     disabled={busy !== null}
                     onClick={() => void signInAs(u)}
                   >
