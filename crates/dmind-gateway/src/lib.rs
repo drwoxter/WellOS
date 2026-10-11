@@ -150,6 +150,7 @@ pub const DEGRADED_WINDOW_SECS: i64 = 300;
 pub struct ProviderHealth {
     consecutive_failures: std::sync::atomic::AtomicU32,
     last_failure_unix: std::sync::atomic::AtomicI64,
+    retries_total: std::sync::atomic::AtomicU64,
 }
 
 impl ProviderHealth {
@@ -160,6 +161,17 @@ impl ProviderHealth {
     pub fn record_success(&self) {
         self.consecutive_failures
             .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// One transient attempt was retried (counted independently of the
+    /// final outcome so evaluation can report provider instability).
+    pub fn record_retry(&self) {
+        self.retries_total
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn retries_total(&self) -> u64 {
+        self.retries_total.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn record_failure(&self) {
@@ -324,6 +336,12 @@ pub trait ModelGateway: Send + Sync {
 
     /// Current honest availability, without performing a network call.
     fn status(&self) -> CapabilityStatus;
+
+    /// Transient attempts retried since the provider was constructed
+    /// (monotonic; safe metadata only). Providers without retries report 0.
+    fn retries_total(&self) -> u64 {
+        0
+    }
 
     /// Prompt/template family this provider applies to `op`; recorded on
     /// every artifact and part of the deduplication key.

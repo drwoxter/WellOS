@@ -162,7 +162,17 @@ impl ModelGateway for FakeProvider {
                 summary,
                 relevant_trend: None,
                 cited_sources,
-                limitations: vec![limitation],
+                limitations: {
+                    let mut l = vec![limitation];
+                    if req.facts.is_empty() {
+                        l.push(if req.language == "es" {
+                            "Faltan hechos de origen: información insuficiente.".into()
+                        } else {
+                            "Source facts missing: insufficient information.".into()
+                        });
+                    }
+                    l
+                },
                 suggested_next_step_categories: steps,
             },
             model: FAKE_MODEL.into(),

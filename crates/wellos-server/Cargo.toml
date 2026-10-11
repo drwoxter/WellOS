@@ -66,3 +66,7 @@ path = "src/bin/migrate.rs"
 name = "seed"
 path = "src/bin/seed.rs"
 required-features = ["dev-fixtures"]
+
+[[bin]]
+name = "dmind-eval"
+path = "src/bin/dmind_eval.rs"

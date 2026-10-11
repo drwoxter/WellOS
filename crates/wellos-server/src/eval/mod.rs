@@ -9,10 +9,15 @@
 pub mod corpus;
 pub mod ops;
 pub mod registry;
+pub mod report;
 pub mod rubric;
+pub mod runner;
 pub mod store;
 
 pub use corpus::{Corpus, EvalCase, Expectations, CORPUS_VERSION, SUITE_KEY};
 pub use ops::{CaseInput, CaseOutput};
 pub use registry::{registry, RegisteredOperation};
-pub use rubric::{MetricResult, Outcome, Severity, Verification, RUBRIC_VERSION};
+pub use rubric::{
+    CaseStatus, MetricResult, Outcome, Severity, Verdict, Verification, RUBRIC_VERSION,
+};
+pub use runner::{Budget, ExecutionKind, LiveGate, Mode, Pricing, RunOutcome, Runner};
