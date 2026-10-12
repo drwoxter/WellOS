@@ -621,9 +621,12 @@ pub async fn schedule(
         return Err(stale("case"));
     }
     let from = c.status_enum();
-    let to = from
-        .apply(CaseTransition::Schedule)
-        .map_err(invalid_transition)?;
+    let transition = if from == CaseStatus::Scheduled {
+        CaseTransition::Reschedule
+    } else {
+        CaseTransition::Schedule
+    };
+    let to = from.apply(transition).map_err(invalid_transition)?;
     let proposed = Interval {
         starts_at: input.scheduled_start,
         ends_at: input.scheduled_start + Duration::minutes(c.expected_duration_minutes as i64),
@@ -683,6 +686,9 @@ pub async fn schedule(
             ),
         ));
     }
+    if let Some(old) = c.booking_id {
+        sqlx::query("UPDATE resource_bookings SET status = 'released', released_at = now() WHERE id = $1 AND status = 'active'").bind(old).execute(&mut *conn).await?;
+    }
     let booking_id = match theatre.schedulable_resource_id {
         Some(res) => {
             let id = Uuid::now_v7();
@@ -708,9 +714,6 @@ pub async fn schedule(
         }
         None => None,
     };
-    if let Some(old) = c.booking_id {
-        sqlx::query("UPDATE resource_bookings SET status = 'released', released_at = now() WHERE id = $1 AND status = 'active'").bind(old).execute(&mut *conn).await?;
-    }
     let session_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM theatre_sessions WHERE theatre_location_id = $1 AND status = 'planned' AND starts_at <= $2 AND ends_at >= $3 LIMIT 1",
     )
@@ -742,7 +745,11 @@ pub async fn schedule(
         c.id,
         Some(from.as_str()),
         to.as_str(),
-        "scheduled",
+        if transition == CaseTransition::Reschedule {
+            "rescheduled"
+        } else {
+            "scheduled"
+        },
         None,
         overridden,
         input.override_reason.as_deref(),

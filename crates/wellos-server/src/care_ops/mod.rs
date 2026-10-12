@@ -974,6 +974,7 @@ pub async fn transition_episode(
         .bind(id)
         .execute(&mut *conn)
         .await?;
+        cancel_open_tasks(conn, ctx, id, to.as_str()).await?;
     }
     let started_at = if to == EpisodeStatus::Active && ep.started_at.is_none() {
         Some(Utc::now())
@@ -2052,6 +2053,26 @@ pub async fn confirm(
                     PositionState::Available,
                 )
                 .await?;
+                if req.status_enum() == PlacementRequestStatus::Held {
+                    sqlx::query(
+                        "UPDATE placement_requests SET status = 'candidates_ready', version = version + 1, updated_at = now() WHERE id = $1",
+                    )
+                    .bind(req.id)
+                    .execute(&mut *conn)
+                    .await?;
+                    record_placement_history(
+                        conn,
+                        ctx,
+                        None,
+                        Some(req.id),
+                        Some("held"),
+                        "candidates_ready",
+                        Some("hold_expired"),
+                        None,
+                        req.version + 1,
+                    )
+                    .await?;
+                }
                 return Err(ApiError::conflict(
                     "hold_expired",
                     "the hold expired; regenerate candidates and hold again",
@@ -2599,6 +2620,54 @@ pub struct TaskInput {
     pub patient_text_es: Option<String>,
     #[serde(default)]
     pub depends_on: Vec<Uuid>,
+}
+
+/// A closed episode can no longer be worked: its open coordination tasks are
+/// cancelled with the closing status as reason, each with a history row.
+/// Refusals that already changed state inside the caller's transaction (an
+/// expired or closure-invalidated hold was released) and must be committed
+/// rather than rolled back with the `409`.
+pub fn refusal_is_persisted(e: &ApiError) -> bool {
+    e.status == axum::http::StatusCode::CONFLICT
+        && matches!(e.code, "hold_expired" | "facility_closed")
+}
+
+async fn cancel_open_tasks(
+    conn: &mut PgConnection,
+    ctx: &AuthContext,
+    episode_id: Uuid,
+    episode_status: &str,
+) -> Result<(), ApiError> {
+    let open = sqlx::query(
+        "WITH open AS (
+             SELECT id, status FROM care_coordination_tasks
+             WHERE tenant_id = $1 AND episode_id = $2 AND status NOT IN ('completed','cancelled')
+             FOR UPDATE
+         )
+         UPDATE care_coordination_tasks t SET status = 'cancelled', version = t.version + 1, updated_at = now()
+         FROM open WHERE t.id = open.id
+         RETURNING t.id, open.status AS from_status, t.version",
+    )
+    .bind(ctx.tenant_id)
+    .bind(episode_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let reason = format!("episode_{episode_status}");
+    for r in open {
+        record_task_history(
+            conn,
+            ctx,
+            r.get("id"),
+            r.get::<Option<String>, _>("from_status").as_deref(),
+            "cancelled",
+            "episode_closed",
+            Some(&reason),
+            None,
+            r.get("version"),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

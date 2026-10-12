@@ -52,7 +52,11 @@ ADR-0006).
   `version_conflict`). `placements` (`placement.v1`) move
   `held → occupied → released`; release puts the position into `cleaning`
   with the configured turnaround, and `available` is restored by a human
-  state change or the cleaning worker tick.
+  state change or the cleaning worker tick. A confirmation that finds its
+  hold expired (or the facility closed) releases the hold, returns the
+  request to `candidates_ready` and commits that release before answering
+  `409 hold_expired`/`facility_closed`, so the position is available again
+  immediately rather than at the next expiry tick.
 * `care_coordination_tasks` (`coordination-task.v1`) require an accountable
   user or queue, carry profession/capability requirements, due and
   escalation times, dependencies, barrier category, patient-visible text
@@ -72,11 +76,16 @@ ADR-0006).
   capability requirements; `theatre-conflicts.v1` is a deterministic
   readiness/conflict engine over `theatre_sessions`, position state,
   equipment and team shifts. Overrides need a reason and are recorded.
+  Scheduling an already `scheduled` case is a `reschedule`: the previous
+  theatre booking is released and the new interval booked in one
+  transaction, subject to the same conflict engine.
   No anaesthetic record, operative note or medication administration exists.
 * `workforce_shifts`, `workforce_coverage_requirements`,
   `workforce_shift_assignments` and `workforce_shift_absences` feed
   `workforce-coverage.v1`, a capability-specific gap engine in the facility's
-  IANA zone (DST-safe). Reallocation is a human action.
+  IANA zone (DST-safe). Reallocation is a human action; moving an
+  assignment to another shift authorises the target shift's facility as well
+  as the source's.
 * `care-operations-forecast.v1` is deterministic over ≥ 14 days of history
   (`insufficient_history` otherwise) and persists expected demand, capacity,
   gap, uncertainty, source facts and `facts_hash` for 24 h and 7 d horizons;

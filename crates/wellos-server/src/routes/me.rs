@@ -2840,7 +2840,7 @@ pub async fn care(
         .collect();
     let notifications = sqlx::query(
         "SELECT id, kind, status, created_at, delivered_at FROM notifications
-         WHERE tenant_id = $1 AND patient_id = $2 AND status IN ('delivered','sent','queued')
+         WHERE tenant_id = $1 AND patient_id = $2 AND status IN ('delivered','partially_delivered')
          ORDER BY created_at DESC LIMIT 10",
     )
     .bind(g.tenant_id)

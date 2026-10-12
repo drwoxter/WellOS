@@ -954,7 +954,14 @@ async fn confirm(
     .await?;
     ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Scheduling).await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
-    let (req, p, ep) = ops::confirm(&mut tx, &ctx, id, &body).await?;
+    let (req, p, ep) = match ops::confirm(&mut tx, &ctx, id, &body).await {
+        Ok(v) => v,
+        Err(e) if ops::refusal_is_persisted(&e) => {
+            tx.commit().await?;
+            return Err(e);
+        }
+        Err(e) => return Err(e),
+    };
     ops::resolve_escalations(
         &mut tx,
         ctx.tenant_id,
@@ -1539,6 +1546,29 @@ async fn change_assignment(
     )
     .await?;
     allowed.record(&mut tx, &ctx, &state.cell).await?;
+    if let Some(target) = body.target_shift_id {
+        let target_facility: Uuid = sqlx::query_scalar(
+            "SELECT facility_id FROM workforce_shifts WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(ctx.tenant_id)
+        .bind(target)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+        if target_facility != facility_id {
+            allow_existing(
+                &state,
+                &ctx,
+                actions::CARE_OPS_MANAGE_WORKFORCE,
+                "workforce_shift",
+                target_facility,
+                None,
+            )
+            .await?
+            .record(&mut tx, &ctx, &state.cell)
+            .await?;
+        }
+    }
     let out = workforce::change_assignment(&mut tx, &ctx, id, &body).await?;
     crate::audit::emit(&mut *tx, &ctx, "care_ops.workforce.assignment_changed", &state.cell, json!({"assignment_id": id, "status": body.status, "target_shift_id": body.target_shift_id}), None).await?;
     tx.commit().await?;

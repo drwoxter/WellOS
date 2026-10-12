@@ -1460,3 +1460,452 @@ async fn fhir_care_operations_subset_is_authorized_and_linked() {
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+/// Review regression: a hold that expired must be released (position back to
+/// available, request back to candidates_ready) by the very confirmation that
+/// refuses it, not only by a later expiry tick.
+#[tokio::test]
+async fn expired_hold_is_released_by_the_refusing_confirmation() {
+    let state = test_state().await;
+    let fx = fixtures(&state).await;
+    let ep = episode(&state, &fx, "inpatient").await;
+    let req = placement_request(&state, uuid(&ep["id"]), requirements(&[])).await;
+    let req_id = uuid(&req["id"]);
+    let c = candidates(&state, req_id).await;
+    let bed = c["match"]["feasible"][0]["location_id"].clone();
+    assert!(bed.is_string(), "no feasible bed: {}", c["match"]);
+    let (s, h) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/placement-requests/{req_id}/hold"),
+        BEDS,
+        Some(json!({"location_id": bed, "expected_version": c["request"]["version"], "facts_hash": c["match"]["facts_hash"], "hold_minutes": 30})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{h}");
+    let placement_id = uuid(&h["placement"]["id"]);
+    sqlx::query("UPDATE placements SET expires_at = now() - interval '1 minute' WHERE id = $1")
+        .bind(placement_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/placement-requests/{req_id}/confirm"),
+        BEDS,
+        Some(json!({"expected_version": h["request"]["version"], "location_id": bed, "facts_hash": c["match"]["facts_hash"]})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "hold_expired", "{v}");
+    let (p_status,): (String,) = sqlx::query_as("SELECT status FROM placements WHERE id = $1")
+        .bind(placement_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(p_status, "expired", "release must survive the 409");
+    let (pos_state,): (String,) =
+        sqlx::query_as("SELECT position_state FROM operational_locations WHERE id = $1")
+            .bind(uuid(&bed))
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(pos_state, "available");
+    let (r_status,): (String,) =
+        sqlx::query_as("SELECT status FROM placement_requests WHERE id = $1")
+            .bind(req_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(r_status, "candidates_ready");
+    // The bed is immediately holdable again.
+    let c2 = candidates(&state, req_id).await;
+    assert!(
+        c2["match"]["feasible"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["location_id"] == bed),
+        "{}",
+        c2["match"]
+    );
+    let (ep_version,): (i64,) = sqlx::query_as("SELECT version FROM care_episodes WHERE id = $1")
+        .bind(uuid(&ep["id"]))
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/episodes/{}/transition", uuid(&ep["id"])),
+        BEDS,
+        Some(json!({"transition": "cancel", "expected_version": ep_version, "reason_code": "test_cleanup"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+/// Review regression: closing an episode cancels its open coordination tasks
+/// (with history) so they leave queues and overdue counts.
+#[tokio::test]
+async fn terminal_episode_cancels_open_coordination_tasks() {
+    let state = test_state().await;
+    let fx = fixtures(&state).await;
+    let ep = episode(&state, &fx, "inpatient").await;
+    let (nurse,): (Uuid,) = sqlx::query_as("SELECT id FROM users WHERE username = 'nurse.kim'")
+        .bind(fx.tenant)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let (s, task) = call(
+        &state,
+        "POST",
+        "/api/v1/operations/tasks",
+        BEDS,
+        Some(json!({
+            "episode_id": ep["id"],
+            "title_en": "Arrange transport",
+            "title_es": "Organizar transporte",
+            "kind": "coordination",
+            "accountable_user_id": nurse,
+            "patient_visible": false
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{task}");
+    let task_id = uuid(&task["id"]);
+    let (s, done) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/tasks/{task_id}/transition"),
+        BEDS,
+        Some(json!({"transition": "start", "expected_version": task["version"]})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{done}");
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/episodes/{}/transition", uuid(&ep["id"])),
+        BEDS,
+        Some(json!({"transition": "cancel", "expected_version": ep["version"], "reason_code": "patient_left"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "cancelled", "{v}");
+    let (t_status, t_version): (String, i64) =
+        sqlx::query_as("SELECT status, version FROM care_coordination_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(t_status, "cancelled");
+    assert_eq!(t_version, done["version"].as_i64().unwrap() + 1);
+    let (from, kind, reason): (Option<String>, String, Option<String>) = sqlx::query_as(
+        "SELECT from_status, change_kind, reason_code FROM care_coordination_task_history WHERE task_id = $1 AND to_status = 'cancelled'",
+    )
+    .bind(task_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(from.as_deref(), Some("in_progress"));
+    assert_eq!(kind, "episode_closed");
+    assert_eq!(reason.as_deref(), Some("episode_cancelled"));
+    let (s, open) = call(
+        &state,
+        "GET",
+        &format!(
+            "/api/v1/operations/tasks?facility_id={}&open_only=true",
+            fx.facility
+        ),
+        BEDS,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{open}");
+    let listed = open
+        .as_array()
+        .cloned()
+        .or_else(|| open["tasks"].as_array().cloned())
+        .unwrap_or_default();
+    assert!(
+        !listed
+            .iter()
+            .any(|t| t["id"] == task["id"] || t["task"]["id"] == task["id"]),
+        "cancelled task still queued: {open}"
+    );
+}
+
+/// Review regression: an already scheduled case is *rescheduled* (not refused
+/// as an invalid transition); the previous theatre booking is released and the
+/// new interval booked.
+#[tokio::test]
+async fn scheduled_theatre_case_can_be_rescheduled() {
+    let state = test_state().await;
+    let fx = fixtures(&state).await;
+    let (s, cases) = call(
+        &state,
+        "GET",
+        &format!(
+            "/api/v1/operations/theatre/cases?facility_id={}",
+            fx.facility
+        ),
+        THEATRE,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{cases}");
+    let items = cases
+        .as_array()
+        .cloned()
+        .or_else(|| cases["cases"].as_array().cloned())
+        .unwrap();
+    let case = items
+        .iter()
+        .map(|c| c["case"].clone())
+        .find(|c| c["status"] == "scheduled")
+        .unwrap_or_else(|| panic!("fixture scheduled case missing: {cases}"));
+    let theatre = uuid(&case["theatre_location_id"]);
+    let (theatre_version,): (i64,) =
+        sqlx::query_as("SELECT version FROM operational_locations WHERE id = $1")
+            .bind(theatre)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let old_start: chrono::DateTime<Utc> =
+        case["scheduled_start"].as_str().unwrap().parse().unwrap();
+    let old_booking = case["booking_id"]
+        .as_str()
+        .map(|b| b.parse::<Uuid>().unwrap());
+    let new_start = old_start + Duration::minutes(45);
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!(
+            "/api/v1/operations/theatre/cases/{}/schedule",
+            uuid(&case["id"])
+        ),
+        THEATRE,
+        Some(json!({
+            "expected_version": case["version"],
+            "theatre_location_id": theatre,
+            "expected_theatre_version": theatre_version,
+            "scheduled_start": new_start,
+            "team_user_ids": case["team_user_ids"],
+            "override_reason": "surgeon availability changed"
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let out = &v["case"];
+    assert_eq!(out["status"], "scheduled", "{v}");
+    let got: chrono::DateTime<Utc> = out["scheduled_start"].as_str().unwrap().parse().unwrap();
+    assert_eq!(got, new_start);
+    assert_eq!(out["version"], json!(case["version"].as_i64().unwrap() + 1));
+    if let Some(old) = old_booking {
+        let (old_status,): (String,) =
+            sqlx::query_as("SELECT status FROM resource_bookings WHERE id = $1")
+                .bind(old)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(old_status, "released");
+        let new_booking = uuid(&out["booking_id"]);
+        assert_ne!(new_booking, old);
+        let (new_status, starts_at): (String, chrono::DateTime<Utc>) =
+            sqlx::query_as("SELECT status, starts_at FROM resource_bookings WHERE id = $1")
+                .bind(new_booking)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(new_status, "active");
+        assert_eq!(starts_at, new_start);
+    }
+    let (kind,): (String,) = sqlx::query_as(
+        "SELECT change_kind FROM perioperative_case_history WHERE case_id = $1 ORDER BY recorded_at DESC, version DESC LIMIT 1",
+    )
+    .bind(uuid(&case["id"]))
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(kind, "rescheduled");
+}
+
+/// Review regression: reassigning a shift assignment to a shift at a facility
+/// outside the coordinator's scope is refused and leaves the assignment intact.
+#[tokio::test]
+async fn workforce_reassignment_to_out_of_scope_facility_is_refused() {
+    let state = test_state().await;
+    let fx = fixtures(&state).await;
+    let (s, shifts) = call(
+        &state,
+        "GET",
+        &format!(
+            "/api/v1/operations/workforce/shifts?facility_id={}&from={}",
+            fx.facility,
+            (Utc::now() - Duration::hours(36)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ),
+        WORKFORCE,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{shifts}");
+    let shift = shifts
+        .as_array()
+        .cloned()
+        .or_else(|| shifts["shifts"].as_array().cloned())
+        .unwrap()
+        .first()
+        .map(|s| s["shift"].clone())
+        .unwrap_or_else(|| panic!("fixture shift missing: {shifts}"));
+    let (nurse,): (Uuid,) = sqlx::query_as("SELECT id FROM users WHERE username = 'nurse.kim'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let (s, a) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/workforce/shifts/{}/assignments", uuid(&shift["id"])),
+        WORKFORCE,
+        Some(json!({"user_id": nurse, "profession_code": "nurse", "capability_codes": ["acute_care"], "specialty_codes": [], "role_in_shift": "float"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{a}");
+    let assignment_id = uuid(&a["id"]);
+    // A shift at a facility the workforce coordinator is not assigned to.
+    let (other_facility,): (Uuid,) = sqlx::query_as(
+        "SELECT id FROM facilities WHERE tenant_id = $1 AND id <> $2 ORDER BY name LIMIT 1",
+    )
+    .bind(fx.tenant)
+    .bind(fx.facility)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    let target = Uuid::now_v7();
+    let starts = Utc::now() + Duration::hours(1);
+    sqlx::query(
+        "INSERT INTO workforce_shifts (id, tenant_id, facility_id, label, local_date, starts_at, ends_at, created_by)
+         VALUES ($1,$2,$3,'Out of scope','2030-01-01',$4,$5,$6)",
+    )
+    .bind(target)
+    .bind(fx.tenant)
+    .bind(other_facility)
+    .bind(starts)
+    .bind(starts + Duration::hours(8))
+    .bind(nurse)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/workforce/assignments/{assignment_id}"),
+        WORKFORCE,
+        Some(json!({"expected_version": a["version"], "status": "reassigned", "target_shift_id": target, "reason": "cover"})),
+    )
+    .await;
+    assert!(
+        s == StatusCode::FORBIDDEN || s == StatusCode::NOT_FOUND,
+        "cross-facility reassignment accepted: {s} {v}"
+    );
+    let (status, shift_id, version): (String, Uuid, i64) = sqlx::query_as(
+        "SELECT status, shift_id, version FROM workforce_shift_assignments WHERE id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(status, a["status"].as_str().unwrap());
+    assert_eq!(shift_id, uuid(&shift["id"]));
+    assert_eq!(version, a["version"].as_i64().unwrap());
+    let (moved,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM workforce_shift_assignments WHERE shift_id = $1")
+            .bind(target)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(moved, 0);
+    sqlx::query("DELETE FROM workforce_shift_assignments WHERE id = $1")
+        .bind(assignment_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM workforce_shifts WHERE id = $1")
+        .bind(target)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+}
+
+/// Review regression: the patient care view lists only notifications that
+/// were actually delivered; scheduled/in-flight/failed ones stay invisible.
+#[tokio::test]
+async fn patient_care_view_hides_undelivered_notifications() {
+    let state = test_state().await;
+    let (s, me) = call(&state, "GET", "/api/v1/me/care", PATIENT, None).await;
+    assert_eq!(s, StatusCode::OK, "{me}");
+    let pid: Uuid = me["patient_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{me}"))
+        .parse()
+        .unwrap();
+    let (tenant,): (Uuid,) = sqlx::query_as("SELECT tenant_id FROM patients WHERE id = $1")
+        .bind(pid)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for status in ["scheduled", "delivering", "failed", "delivered"] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO notifications (id, tenant_id, patient_id, kind, dedupe_key, scheduled_for, status, delivered_at)
+             VALUES ($1,$2,$3,'reminder',$4, now() - interval '1 minute', $5, CASE WHEN $5 = 'delivered' THEN now() END)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(pid)
+        .bind(format!("review-test-{id}"))
+        .bind(status)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        ids.push((status, id));
+    }
+    let (s, care) = call(&state, "GET", "/api/v1/me/care", PATIENT, None).await;
+    assert_eq!(s, StatusCode::OK, "{care}");
+    let listed: Vec<Uuid> = care["notifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| uuid(&n["id"]))
+        .collect();
+    for (status, id) in &ids {
+        if *status == "delivered" {
+            assert!(
+                listed.contains(id),
+                "delivered notification missing: {care}"
+            );
+        } else {
+            assert!(
+                !listed.contains(id),
+                "{status} notification exposed: {care}"
+            );
+        }
+    }
+    assert!(
+        care["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["status"] == "delivered" || n["status"] == "partially_delivered"),
+        "{care}"
+    );
+    for (_, id) in ids {
+        sqlx::query("DELETE FROM notifications WHERE id = $1")
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+    }
+}
