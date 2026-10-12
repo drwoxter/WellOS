@@ -6,6 +6,7 @@ import FlowPage from "@/app/operations/flow/page";
 import WorkforcePage from "@/app/operations/workforce/page";
 import TheatresPage from "@/app/operations/theatres/page";
 import MyCarePage from "@/app/my/care/page";
+import CoordinationPage from "@/app/episodes/[id]/coordination/page";
 import { SessionProvider } from "@/lib/session";
 import { hasOperationsAccess } from "@/lib/care-ops";
 import { STALE_AFTER_MINUTES, statusTone } from "@/app/operations/shared";
@@ -270,7 +271,8 @@ function setup(ui: React.ReactElement, m: unknown, route: Route) {
       const hit = route(url, init);
       if (hit === undefined)
         return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
-      if (hit instanceof Response) return Promise.resolve(hit);
+      if (hit instanceof Response || hit instanceof Promise)
+        return Promise.resolve(hit);
       return Promise.resolve(jsonResponse(hit));
     }),
   );
@@ -704,5 +706,134 @@ describe("/my/care patient view", () => {
     expect(view).toHaveTextContent(/not medical clearance/i);
     expect(view).not.toHaveTextContent(/medically cleared|discharged now/i);
     expect(view).not.toHaveTextContent(/barrier_category|staff only/i);
+  });
+});
+
+describe("/episodes/[id]/coordination tasks", () => {
+  function detail(taskStatus: string, version: number) {
+    return {
+      episode: {
+        id: "ep1",
+        facility_id: "f1",
+        patient_id: "p1",
+        episode_type_code: "inpatient",
+        status: "discharge_preparation",
+        responsible_service_code: "internal_medicine",
+        current_placement_id: null,
+        started_at: NOW,
+        expected_end_at: null,
+        ended_at: null,
+        priority: "routine",
+        barriers: [],
+        version: 3,
+        created_at: NOW,
+        updated_at: NOW,
+      },
+      links: [],
+      placements: [],
+      placement_requests: [],
+      tasks: [
+        {
+          id: "t1",
+          episode_id: "ep1",
+          patient_id: "p1",
+          title_en: "Arrange transport home",
+          title_es: "Organizar transporte a casa",
+          kind: "transport",
+          status: taskStatus,
+          profession_code: null,
+          capability_codes: [],
+          due_at: null,
+          escalate_at: null,
+          barrier_category_code: null,
+          patient_visible: true,
+          version,
+          depends_on: [],
+        },
+      ],
+      handoffs: [],
+      escalations: [],
+      theatre_cases: [],
+      history: [],
+      ai_artifacts: [],
+    };
+  }
+
+  it("keeps task actions disabled until the reload after a transition has landed, so the next action carries the fresh version", async () => {
+    let task = { status: "open", version: 1 };
+    let releaseReload: (() => void) | null = null;
+    let loads = 0;
+    const calls = setup(<CoordinationPage />, meta(), (url, init) => {
+      if (url === "/api/v1/operations/episodes/ep1") {
+        loads += 1;
+        const body = detail(task.status, task.version);
+        if (loads === 2) {
+          return new Promise<Response>((resolve) => {
+            releaseReload = () => resolve(jsonResponse(body));
+          });
+        }
+        return body;
+      }
+      if (url === "/api/v1/operations/tasks/t1/transition") {
+        const sent = JSON.parse(String(init?.body)) as {
+          transition: string;
+          expected_version: number;
+        };
+        if (sent.expected_version !== task.version) {
+          return jsonResponse(
+            {
+              error: {
+                code: "conflict",
+                message: "task changed since it was loaded; reload and retry",
+              },
+            },
+            409,
+          );
+        }
+        task = {
+          status: sent.transition === "start" ? "in_progress" : "completed",
+          version: task.version + 1,
+        };
+        return { task: detail(task.status, task.version).tasks[0] };
+      }
+      return undefined;
+    });
+    const user = userEvent.setup();
+    const row = await screen.findByTestId("coord-task");
+    await user.click(within(row).getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(loads).toBe(2));
+    const complete = within(row).getByRole("button", { name: "Complete" });
+    expect(complete).toBeDisabled();
+    expect(row).toHaveAttribute("data-status", "open");
+
+    releaseReload!();
+    await waitFor(() =>
+      expect(row).toHaveAttribute("data-status", "in_progress"),
+    );
+    await waitFor(() =>
+      expect(
+        within(row).getByRole("button", { name: "Complete" }),
+      ).toBeEnabled(),
+    );
+    await user.click(within(row).getByRole("button", { name: "Complete" }));
+    await waitFor(() =>
+      expect(row).toHaveAttribute("data-status", "completed"),
+    );
+
+    const transitions = calls
+      .filter((c) => c.url === "/api/v1/operations/tasks/t1/transition")
+      .map(
+        (c) =>
+          JSON.parse(String(c.init?.body)) as {
+            transition: string;
+            expected_version: number;
+          },
+      );
+    expect(transitions).toEqual([
+      { transition: "start", expected_version: 1 },
+      { transition: "complete", expected_version: 2 },
+    ]);
+    expect(row).not.toHaveTextContent(/changed since it was loaded/i);
   });
 });

@@ -217,13 +217,13 @@ function HandoffRow({
   lang: Lang;
   h: Handoff;
   canDecide: boolean;
-  onChanged: () => void;
+  onChanged: () => void | Promise<void>;
 }) {
   const action = useAction(lang);
   const decide = (decision: "accept" | "reject") =>
     action.run(async () => {
       await decideHandoff(h.id, { decision, expected_version: h.version });
-      onChanged();
+      await onChanged();
     });
   const c = h.content;
   const text = (k: string) =>
@@ -280,7 +280,7 @@ function TaskRow({
   lang: Lang;
   task: Task;
   canManage: boolean;
-  onChanged: () => void;
+  onChanged: () => void | Promise<void>;
 }) {
   const action = useAction(lang);
   const title =
@@ -333,7 +333,7 @@ function TaskRow({
                     transition: tr.transition,
                     expected_version: task.version,
                   });
-                  onChanged();
+                  await onChanged();
                 })
               }
             >
@@ -553,7 +553,7 @@ function Coordination({ id }: { id: string }) {
                               reason_code: reason.trim() || undefined,
                             });
                             setReason("");
-                            detail.reload();
+                            await detail.reload();
                           }, "coordPlacementReleased")
                         }
                       >
@@ -589,7 +589,7 @@ function Coordination({ id }: { id: string }) {
                               note: reason.trim() || undefined,
                             });
                             setReason("");
-                            detail.reload();
+                            await detail.reload();
                           })
                         }
                       >
@@ -743,7 +743,7 @@ function Coordination({ id }: { id: string }) {
                         lang,
                       );
                       setDraft(r.draft);
-                      detail.reload();
+                      await detail.reload();
                     });
                   }}
                 >
