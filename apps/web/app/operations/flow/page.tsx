@@ -25,6 +25,7 @@ import {
   loadEpisodes,
   loadEscalations,
   loadRequest,
+  matchFromCandidates,
   loadRequests,
   requestRanking,
   type AiOutcome,
@@ -186,19 +187,25 @@ function RequestPanel({
   const detail = useLoader(() => loadRequest(id), id);
   const action = useAction(lang);
   const [selected, setSelected] = useState<string | null>(null);
+  const [freshMatch, setFreshMatch] = useState<MatchResult | null>(null);
   const [ranking, setRanking] = useState<AiOutcome<PlacementRankingOut> | null>(
     null,
   );
   useEffect(() => {
     setSelected(null);
+    setFreshMatch(null);
     setRanking(null);
   }, [id]);
   const refresh = useCallback(() => {
     detail.reload();
     onChanged();
   }, [detail, onChanged]);
-  const match: MatchResult | null = detail.data?.match ?? null;
   const req: PlacementRequest | undefined = detail.data?.request;
+  const match: MatchResult | null =
+    freshMatch ??
+    (detail.data
+      ? matchFromCandidates(detail.data.request, detail.data.candidates)
+      : null);
   const rankNotes = new Map<string, string>();
   ranking?.output?.ranked.forEach((r) =>
     rankNotes.set(r.candidate_ref, r.rationale),
@@ -251,11 +258,12 @@ function RequestPanel({
                 className="secondary"
                 disabled={action.busy}
                 onClick={() =>
-                  void run(() =>
-                    generateCandidates(d.request.id, {
+                  void run(async () => {
+                    const r = await generateCandidates(d.request.id, {
                       expected_version: d.request.version,
-                    }),
-                  )
+                    });
+                    setFreshMatch(r.match);
+                  })
                 }
               >
                 {t(lang, "flowGenerate")}
@@ -449,7 +457,7 @@ function AdmissionForm({
             activate: true,
           });
           const r = await createPlacementRequest({
-            episode_id: ep.episode.id,
+            episode_id: ep.id,
             kind: "admission",
             priority,
             requirements: {
@@ -462,7 +470,7 @@ function AdmissionForm({
             reason_code: "human_admission_decision",
             note: reason.trim() || undefined,
           });
-          onCreated(r.request.id);
+          onCreated(r.id);
         }, "flowAdmitted");
       }}
     >

@@ -28,7 +28,12 @@ export type Facility = {
 
 export type TenantMeta = {
   tenant: { id: string; name: string; cell: string };
-  user: { username: string; display_name: string; roles: string[] };
+  user: {
+    id?: string;
+    username: string;
+    display_name: string;
+    roles: string[];
+  };
   facilities: Facility[];
   /** Runtime environment and whether this tenant's data is synthetic. */
   environment?: { name: string; synthetic_data: boolean };

@@ -21,6 +21,7 @@ import {
   loadEpisode,
   requestDischargeCoordination,
   requestHandoffDraft,
+  releasePlacement,
   transitionEpisode,
   transitionTask,
   type AiOutcome,
@@ -349,13 +350,19 @@ function TaskRow({
 function NewTaskForm({
   lang,
   episodeId,
+  userId,
   onCreated,
 }: {
   lang: Lang;
   episodeId: string;
+  userId?: string;
   onCreated: () => void;
 }) {
   const action = useAction(lang);
+  const [accountable, setAccountable] = useState<"me" | "queue">(
+    userId ? "me" : "queue",
+  );
+  const [queueId, setQueueId] = useState("");
   const [titleEn, setTitleEn] = useState("");
   const [titleEs, setTitleEs] = useState("");
   const [profession, setProfession] = useState("");
@@ -372,6 +379,10 @@ function NewTaskForm({
             episode_id: episodeId,
             title_en: titleEn.trim(),
             title_es: titleEs.trim() || titleEn.trim(),
+            accountable_user_id:
+              accountable === "me" && userId ? userId : undefined,
+            accountable_queue_id:
+              accountable === "queue" ? queueId.trim() || undefined : undefined,
             profession_code: profession.trim() || undefined,
             barrier_category_code: barrier.trim() || undefined,
             patient_visible: visible,
@@ -415,6 +426,30 @@ function NewTaskForm({
           <span>{t(lang, "coordBarrier")}</span>
           <input value={barrier} onChange={(e) => setBarrier(e.target.value)} />
         </label>
+        <label className="field">
+          <span>{t(lang, "coordAccountable")}</span>
+          <select
+            value={accountable}
+            onChange={(e) =>
+              setAccountable(e.target.value === "queue" ? "queue" : "me")
+            }
+          >
+            <option value="me" disabled={!userId}>
+              {t(lang, "coordAccountableMe")}
+            </option>
+            <option value="queue">{t(lang, "coordAccountableQueue")}</option>
+          </select>
+        </label>
+        {accountable === "queue" ? (
+          <label className="field">
+            <span>{t(lang, "coordQueueId")}</span>
+            <input
+              required
+              value={queueId}
+              onChange={(e) => setQueueId(e.target.value)}
+            />
+          </label>
+        ) : null}
       </div>
       <label className="check">
         <input
@@ -485,7 +520,7 @@ function Coordination({ id }: { id: string }) {
                 </div>
                 <div>
                   <dt>{t(lang, "coordLinks")}</dt>
-                  <dd>{d.links.map((l) => l.kind).join(", ") || "—"}</dd>
+                  <dd>{d.links.map((l) => l.link_type).join(", ") || "—"}</dd>
                 </div>
               </dl>
               {d.episode.status === "discharge_ready" ? (
@@ -493,6 +528,40 @@ function Coordination({ id }: { id: string }) {
                   {t(lang, "coordDischargeReadyNote")}
                 </p>
               ) : null}
+              {d.placements
+                .filter((p) => p.status === "held" || p.status === "occupied")
+                .map((p) => (
+                  <div
+                    key={p.id}
+                    className="row wrap gap"
+                    data-testid="coord-placement"
+                    data-status={p.status}
+                  >
+                    <span>
+                      {t(lang, "coordPlacement")}:{" "}
+                      <StatusPill status={p.status} />
+                    </span>
+                    {caps.can_manage_flow ? (
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={action.busy}
+                        onClick={() =>
+                          void action.run(async () => {
+                            await releasePlacement(p.id, {
+                              expected_version: p.version,
+                              reason_code: reason.trim() || undefined,
+                            });
+                            setReason("");
+                            detail.reload();
+                          }, "coordPlacementReleased")
+                        }
+                      >
+                        {t(lang, "coordReleasePlacement")}
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
               {caps.can_manage_flow && EPISODE_TRANSITIONS[d.episode.status] ? (
                 <div className="stack">
                   <label className="field">
@@ -557,6 +626,7 @@ function Coordination({ id }: { id: string }) {
                     <NewTaskForm
                       lang={lang}
                       episodeId={d.episode.id}
+                      userId={meta?.user.id}
                       onCreated={detail.reload}
                     />
                   </details>
@@ -710,25 +780,28 @@ function Coordination({ id }: { id: string }) {
             <Card>
               <CardHead title={t(lang, "coordHistory")} />
               <ol className="timeline" data-testid="coord-history">
-                {d.history.map((h) => (
-                  <li key={h.id}>
+                {d.history.map((h, i) => (
+                  <li key={`${h.version}-${h.recorded_at}-${i}`}>
                     <span className="muted small">
-                      {formatDateTime(lang, h.created_at)}
+                      {formatDateTime(lang, h.recorded_at)}
                     </span>{" "}
-                    <strong>{h.action}</strong> {h.from_status ?? "∅"} →{" "}
-                    {h.to_status}
-                    {h.reason ? (
-                      <span className="small"> · {h.reason}</span>
+                    <strong>{h.change_kind.replace(/_/g, " ")}</strong>{" "}
+                    {h.from_status ?? "∅"} → {h.to_status}
+                    {h.reason_code || h.note ? (
+                      <span className="small">
+                        {" "}
+                        · {[h.reason_code, h.note].filter(Boolean).join(" — ")}
+                      </span>
                     ) : null}{" "}
                     <span className="muted small">v{h.version}</span>
                   </li>
                 ))}
               </ol>
-              {d.artifacts.length > 0 ? (
+              {d.ai_artifacts.length > 0 ? (
                 <>
                   <h4>{t(lang, "coordArtifacts")}</h4>
                   <ul className="small">
-                    {d.artifacts.map((a) => (
+                    {d.ai_artifacts.map((a) => (
                       <li key={a.id}>
                         {a.artifact_type} <StatusPill status={a.status} />{" "}
                         {formatDateTime(lang, a.created_at)}

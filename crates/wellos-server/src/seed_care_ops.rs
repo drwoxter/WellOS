@@ -1745,6 +1745,20 @@ pub(crate) async fn seed(
         checklist: json!({"who_sign_in": false}),
         post_procedure_requirements: json!({"placement_service_code": "general_surgery"}),
     }).await?;
+    let case_ready = theatre::transition_case(
+        conn,
+        &th,
+        case_ready.id,
+        &theatre::CaseTransitionInput {
+            transition: "mark_ready".into(),
+            expected_version: case_ready.version,
+            reason_code: None,
+            note: None,
+            prerequisites: vec![],
+            checklist: None,
+        },
+    )
+    .await?;
     theatre::schedule(
         conn,
         &th,
@@ -1758,8 +1772,7 @@ pub(crate) async fn seed(
             override_reason: None,
         },
     )
-    .await
-    .ok();
+    .await?;
     // Case 2: missing externally supplied anaesthetic review — not schedulable.
     theatre::create_case(conn, &th, &theatre::CaseInput {
         episode_id: diego_ep.id,

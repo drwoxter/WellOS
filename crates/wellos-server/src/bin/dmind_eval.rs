@@ -25,7 +25,7 @@ usage: dmind-eval [options]
   --provider env|fake           env = configured DMIND_MODEL_PROVIDER; fake = synthetic fixture (offline only)
   --tenant-id <uuid>            synthetic tenant (required for --persist and live)
   --confirm-live                explicit acknowledgement for live mode
-  --max-calls <n>               default 60
+  --max-calls <n>               default 120 (covers the full synthetic corpus offline; live runs should pass an explicit ceiling)
   --max-concurrency <n>         default 2 (1..16)
   --max-input-tokens <n>        default 400000
   --max-output-tokens <n>       default 200000
@@ -70,7 +70,7 @@ fn parse_args() -> Result<Args, String> {
         tenant_id: None,
         confirm_live: false,
         budget: Budget {
-            max_calls: 60,
+            max_calls: 120,
             max_concurrency: 2,
             max_input_tokens: 400_000,
             max_output_tokens: 200_000,

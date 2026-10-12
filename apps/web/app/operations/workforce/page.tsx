@@ -13,6 +13,7 @@ import { formatDateTime } from "@/lib/clinical";
 import {
   loadShift,
   loadShifts,
+  type ShiftListItem,
   type CoverageGap,
   type Shift,
 } from "@/lib/care-ops";
@@ -148,7 +149,7 @@ function Workforce() {
             >
               {(d) => (
                 <ul className="plain" role="list" data-testid="wf-shifts">
-                  {d.shifts.map((s: Shift) => (
+                  {d.shifts.map(({ shift: s, coverage }: ShiftListItem) => (
                     <li key={s.id}>
                       <button
                         type="button"

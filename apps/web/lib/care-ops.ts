@@ -67,7 +67,13 @@ export type Snapshot = {
     awaiting_triage: number;
     awaiting_clinician: number;
     in_consultation: number;
-    by_priority: Record<string, number>;
+    by_priority: {
+      priority: string;
+      status: string;
+      count: number;
+      avg_wait_minutes: number | null;
+      max_wait_minutes: number | null;
+    }[];
   };
   placement_queue: { pending: number; max_wait_minutes: number };
   capacity: {
@@ -79,19 +85,34 @@ export type Snapshot = {
   };
   episodes: Record<string, number>;
   discharge: {
-    barriers: { barrier_category: string | null; n: number }[];
+    barriers: { category: string | null; count: number }[];
     overdue_tasks: number;
   };
   transport: { open: number; delayed: number };
-  alerts: number;
-  escalations: { kind: string; status: string; n: number }[];
+  alerts: { priority: string; count: number }[];
+  escalations: {
+    kind: string;
+    status: string;
+    count: number;
+    next_due_at: string | null;
+  }[];
   theatre: {
     cases_next_24h: number;
     ready: number;
     blocking_conflicts: number;
     missing_prerequisites: number;
   };
-  workforce: { shifts_next_24h: number; gaps: unknown[] };
+  workforce: {
+    shifts_next_24h: number;
+    gaps: {
+      shift_id: string;
+      label: string;
+      starts_at: string;
+      ends_at: string;
+      unit_location_id: string | null;
+      gaps: CoverageGap[];
+    }[];
+  };
   forecasts: Forecast[];
 };
 
@@ -420,26 +441,38 @@ export function loadEpisodes(
   );
 }
 
+export type Placement = {
+  id: string;
+  episode_id: string | null;
+  request_id: string | null;
+  location_id: string;
+  status: string;
+  starts_at: string;
+  ends_at: string | null;
+  expires_at: string | null;
+  version: number;
+};
+
 export type EpisodeDetail = {
   episode: Episode;
-  links: { kind: string; target_id: string; created_at: string }[];
-  placements: unknown[];
+  links: { link_type: string; link_id: string }[];
+  placements: Placement[];
   placement_requests: PlacementRequest[];
   tasks: Task[];
   handoffs: Handoff[];
   escalations: Escalation[];
   theatre_cases: TheatreCase[];
   history: {
-    id: string;
     from_status: string | null;
     to_status: string;
-    action: string;
-    reason: string | null;
-    actor_id: string | null;
+    change_kind: string;
+    reason_code: string | null;
+    note: string | null;
+    actor: string | null;
     version: number;
-    created_at: string;
+    recorded_at: string;
   }[];
-  artifacts: {
+  ai_artifacts: {
     id: string;
     artifact_type: string;
     status: string;
@@ -461,12 +494,62 @@ export function loadRequests(
   );
 }
 
+export type CandidateRow = {
+  id: string;
+  location_id: string;
+  generation: number;
+  rank: number | null;
+  feasible: boolean;
+  score: number | null;
+  score_factors: ScoreFactor[];
+  rejection_codes: string[];
+  facts_hash: string;
+  label: string;
+  unit_id: string | null;
+};
+
 export function loadRequest(id: string): Promise<{
   request: PlacementRequest;
-  match: MatchResult | null;
-  considered?: number;
+  candidates: CandidateRow[];
+  placements: unknown[];
+  history: unknown[];
 }> {
   return opsFetch(`/api/v1/operations/placement-requests/${id}`);
+}
+
+/** Rebuild the deterministic match from the persisted latest-generation candidates. */
+export function matchFromCandidates(
+  request: PlacementRequest,
+  candidates: CandidateRow[],
+): MatchResult | null {
+  if (candidates.length === 0) return null;
+  const toCandidate = (c: CandidateRow): Candidate => ({
+    location_id: c.location_id,
+    unit_id: c.unit_id,
+    label: c.label,
+    feasible: c.feasible,
+    rank: c.rank,
+    score: c.score,
+    factors: Array.isArray(c.score_factors) ? c.score_factors : [],
+    reasons: [],
+    rejection_codes: c.rejection_codes,
+  });
+  const feasible = candidates
+    .filter((c) => c.feasible)
+    .sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9))
+    .map(toCandidate);
+  const rejected = candidates.filter((c) => !c.feasible).map(toCandidate);
+  const rejected_by_code: Record<string, number> = {};
+  for (const c of rejected)
+    for (const code of c.rejection_codes)
+      rejected_by_code[code] = (rejected_by_code[code] ?? 0) + 1;
+  return {
+    matcher_version: request.matcher_version ?? "care-placement.v1",
+    facts_hash: request.facts_hash ?? candidates[0].facts_hash,
+    feasible,
+    rejected,
+    rejected_by_code,
+  };
 }
 
 export function generateCandidates(
@@ -526,21 +609,44 @@ export function loadEscalations(
   );
 }
 
+export type TheatreCaseListItem = {
+  case: TheatreCase;
+  readiness: Readiness | null;
+};
+
 export function loadCases(
   facilityId: string,
-): Promise<{ cases: TheatreCase[] }> {
+): Promise<{ cases: TheatreCaseListItem[] }> {
   return opsFetch(
     `/api/v1/operations/theatre/cases${q({ facility_id: facilityId, open_only: true })}`,
   );
 }
 
-export function loadCase(
-  id: string,
-): Promise<{ case: TheatreCase; readiness: Readiness; history?: unknown[] }> {
+export function loadCase(id: string): Promise<{
+  case: TheatreCase;
+  readiness: Readiness | null;
+  history?: unknown[];
+}> {
   return opsFetch(`/api/v1/operations/theatre/cases/${id}`);
 }
 
-export function loadShifts(facilityId: string): Promise<{ shifts: Shift[] }> {
+export type ShiftCoverage = {
+  covered: boolean;
+  engine_version: string;
+  facts_hash: string;
+  gaps: CoverageGap[];
+};
+
+export type ShiftListItem = {
+  shift: Shift;
+  requirements: unknown[];
+  coverage: ShiftCoverage;
+  reallocation_candidates: string[][];
+};
+
+export function loadShifts(
+  facilityId: string,
+): Promise<{ shifts: ShiftListItem[] }> {
   return opsFetch(
     `/api/v1/operations/workforce/shifts${q({ facility_id: facilityId })}`,
   );
@@ -550,12 +656,8 @@ export function loadShift(id: string): Promise<{
   shift: Shift;
   requirements: unknown[];
   assignments: unknown[];
-  coverage: {
-    shift_id: string;
-    covered: boolean;
-    gaps: CoverageGap[];
-  };
-  reallocation_candidates: unknown[];
+  coverage: ShiftCoverage;
+  reallocation_candidates: string[][];
 }> {
   return opsFetch(`/api/v1/operations/workforce/shifts/${id}`);
 }
@@ -660,7 +762,7 @@ export function createEpisode(body: {
   activate?: boolean;
   links?: { link_type: string; link_id: string }[];
 }) {
-  return postOps<{ episode: Episode }>(`/api/v1/operations/episodes`, body);
+  return postOps<Episode>(`/api/v1/operations/episodes`, body);
 }
 
 export function createPlacementRequest(body: {
@@ -671,7 +773,7 @@ export function createPlacementRequest(body: {
   reason_code?: string;
   note?: string;
 }) {
-  return postOps<{ request: PlacementRequest }>(
+  return postOps<PlacementRequest>(
     `/api/v1/operations/placement-requests`,
     body,
   );
@@ -682,6 +784,8 @@ export function createTask(body: {
   title_en: string;
   title_es: string;
   kind?: string;
+  accountable_user_id?: string;
+  accountable_queue_id?: string;
   profession_code?: string;
   capability_codes?: string[];
   due_at?: string;
@@ -691,7 +795,7 @@ export function createTask(body: {
   patient_text_en?: string;
   patient_text_es?: string;
 }) {
-  return postOps<{ task: Task }>(`/api/v1/operations/tasks`, body);
+  return postOps<Task>(`/api/v1/operations/tasks`, body);
 }
 
 export function requestTheatreExplanation(sessionId: string, language: string) {
@@ -711,6 +815,18 @@ export function requestForecastExplanation(
     forecast_id: string;
     explanation: AiOutcome<ForecastExplanationOut>;
   }>(`/api/v1/operations/forecasts/${forecastId}/explanation`, { language });
+}
+
+/** Human release of a held/occupied placement: the position enters cleaning
+ *  and the episode's current placement is cleared. */
+export function releasePlacement(
+  id: string,
+  body: { expected_version: number; reason_code?: string },
+) {
+  return postOps<{ placement: Placement; episode: Episode }>(
+    `/api/v1/operations/placements/${id}/release`,
+    body,
+  );
 }
 
 export function transitionEpisode(
@@ -748,57 +864,73 @@ export function transitionTask(
 // Patient active-care view (released, patient-appropriate facts only)
 // ---------------------------------------------------------------------------
 
-export type MyCare = {
-  generated_at: string;
-  episodes: {
-    episode_id: string;
-    episode_type_code: string;
+export type MyCareEpisode = {
+  episode_id: string;
+  episode_type_code: string;
+  status: string;
+  started_at: string | null;
+  expected_end_at: string | null;
+  facility_id: string;
+  location: {
+    unit_en: string | null;
+    unit_es: string | null;
+    position_en: string;
+    position_es: string;
+  } | null;
+  next_step: {
+    id: string;
     status: string;
-    facility_name: string;
-    time_zone: string;
-    started_at: string | null;
-    expected_end_at: string | null;
-    location: {
-      unit_en: string;
-      unit_es: string;
-      position_en: string;
-      position_es: string;
-    } | null;
-    pending_tasks: {
-      id: string;
-      text_en: string;
-      text_es: string;
-      due_at: string | null;
-    }[];
-    appointments: {
-      id: string;
-      starts_at: string;
-      ends_at: string;
-      status: string;
-    }[];
-    procedures: {
-      id: string;
-      procedure_code: string;
-      scheduled_start: string | null;
-      status: string;
-    }[];
-    transport: {
-      status: string;
-      pickup_window_start: string | null;
-      pickup_window_end: string | null;
-    } | null;
+    text_en?: string | null;
+    text_es?: string | null;
+    procedure_code?: string;
+    scheduled_start?: string | null;
+    due_at?: string | null;
+  } | null;
+  pending_tasks: {
+    id: string;
+    status: string;
+    due_at: string | null;
+    text_en: string | null;
+    text_es: string | null;
     discharge_preparation: boolean;
-    next_step: { text_en: string; text_es: string } | null;
+  }[];
+  procedures: {
+    id: string;
+    procedure_code: string;
+    status: string;
+    scheduled_start: string | null;
+  }[];
+};
+
+export type MyCare = {
+  patient_id: string;
+  generated_at: string;
+  episodes: MyCareEpisode[];
+  appointments: {
+    id: string;
+    service_code: string;
+    starts_at: string;
+    ends_at: string;
+    facility_id: string;
+  }[];
+  transport: {
+    id: string;
+    status: string;
+    pickup_window_start: string | null;
+    pickup_window_end: string | null;
   }[];
   notifications: {
     id: string;
     kind: string;
-    text_en: string;
-    text_es: string;
-    delivered_at: string | null;
+    status: string;
     created_at: string;
+    delivered_at: string | null;
   }[];
-  contact: unknown;
+  contact: {
+    facility_id: string;
+    facility_name: string;
+    time_zone: string | null;
+  } | null;
 };
 
 export function loadMyCare(patientId?: string): Promise<MyCare> {

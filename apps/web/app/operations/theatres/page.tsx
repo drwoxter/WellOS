@@ -13,6 +13,7 @@ import { formatDateTime } from "@/lib/clinical";
 import {
   loadCase,
   loadCases,
+  type TheatreCaseListItem,
   type Readiness,
   type TheatreCase,
 } from "@/lib/care-ops";
@@ -25,8 +26,15 @@ export function ReadinessView({
   readiness,
 }: {
   lang: Lang;
-  readiness: Readiness;
+  readiness: Readiness | null;
 }) {
+  if (!readiness) {
+    return (
+      <div data-testid="theatre-readiness">
+        <p className="muted small">{t(lang, "theatreNotScheduled")}</p>
+      </div>
+    );
+  }
   return (
     <div data-testid="theatre-readiness">
       <p>
@@ -146,36 +154,38 @@ function Theatres() {
             >
               {(d) => (
                 <ul className="plain" role="list" data-testid="theatre-cases">
-                  {d.cases.map((c: TheatreCase) => (
-                    <li key={c.id}>
-                      <button
-                        type="button"
-                        className={`listrow${selected === c.id ? " selected" : ""}`}
-                        aria-pressed={selected === c.id}
-                        onClick={() => setSelected(c.id)}
-                      >
-                        <strong>{c.procedure_code}</strong>{" "}
-                        <StatusPill status={c.status} />{" "}
-                        <Pill
-                          tone={
-                            c.priority === "urgent" ||
-                            c.priority === "emergency"
-                              ? "critical"
-                              : "neutral"
-                          }
-                          outline
+                  {d.cases.map(
+                    ({ case: c, readiness }: TheatreCaseListItem) => (
+                      <li key={c.id}>
+                        <button
+                          type="button"
+                          className={`listrow${selected === c.id ? " selected" : ""}`}
+                          aria-pressed={selected === c.id}
+                          onClick={() => setSelected(c.id)}
                         >
-                          {c.priority}
-                        </Pill>
-                        <span className="muted small">
-                          {" "}
-                          {c.scheduled_start
-                            ? formatDateTime(lang, c.scheduled_start)
-                            : t(lang, "theatreUnscheduled")}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
+                          <strong>{c.procedure_code}</strong>{" "}
+                          <StatusPill status={c.status} />{" "}
+                          <Pill
+                            tone={
+                              c.priority === "urgent" ||
+                              c.priority === "emergency"
+                                ? "critical"
+                                : "neutral"
+                            }
+                            outline
+                          >
+                            {c.priority}
+                          </Pill>
+                          <span className="muted small">
+                            {" "}
+                            {c.scheduled_start
+                              ? formatDateTime(lang, c.scheduled_start)
+                              : t(lang, "theatreUnscheduled")}
+                          </span>
+                        </button>
+                      </li>
+                    ),
+                  )}
                 </ul>
               )}
             </PanelState>

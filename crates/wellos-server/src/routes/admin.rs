@@ -128,6 +128,7 @@ pub async fn tenant_meta(
             "cell": row.get::<String,_>("cell"),
         },
         "user": {
+            "id": ctx.user_id,
             "username": ctx.username,
             "display_name": ctx.display_name,
             "roles": ctx.roles,

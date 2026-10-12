@@ -29,6 +29,10 @@ cargo run -p wellos-server --bin dmind-eval --features dev-fixtures -- \
 * Exercises every corpus case against the deterministic fixture provider and
   the deterministic baselines; exit code is nonzero when any high-severity
   metric fails or a mandatory threshold is unmet.
+* The call ceiling defaults to 120, which covers the whole synthetic corpus
+  (79 cases at v1 incl. the six Care Operations operations); the planner
+  refuses to start when the corpus outgrows the ceiling, so raise
+  `--max-calls` explicitly rather than trimming cases.
 * `--operations result_summary,triage_proposal` restricts the registry subset;
   `--list-operations` prints the authoritative list.
 * `--persist --tenant-id <synthetic tenant>` records the run in the
