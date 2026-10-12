@@ -469,11 +469,12 @@ async fn episode_detail(
         theatre::list_cases(conn, ep.tenant_id, None, Some(ep.id), false, MAX_LIMIT).await?;
     let history = ops::episode_history(conn, ep.tenant_id, ep.id).await?;
     let artifacts = sqlx::query(
-        "SELECT id, operation, status, synthetic, created_at FROM ai_artifacts
-         WHERE tenant_id = $1 AND (patient_id = $2) AND operation LIKE 'care_%' ORDER BY created_at DESC LIMIT 50",
+        "SELECT id, artifact_type, status, synthetic, created_at FROM ai_artifacts
+         WHERE tenant_id = $1 AND care_episode_id = $2
+         ORDER BY created_at DESC LIMIT 50",
     )
     .bind(ep.tenant_id)
-    .bind(ep.patient_id)
+    .bind(ep.id)
     .fetch_all(&mut *conn)
     .await?;
     let artifacts: Vec<Value> = artifacts
@@ -482,7 +483,7 @@ async fn episode_detail(
             use sqlx::Row;
             json!({
                 "id": r.get::<Uuid, _>("id"),
-                "operation": r.get::<String, _>("operation"),
+                "artifact_type": r.get::<String, _>("artifact_type"),
                 "status": r.get::<String, _>("status"),
                 "synthetic": r.get::<bool, _>("synthetic"),
                 "created_at": r.get::<DateTime<Utc>, _>("created_at"),

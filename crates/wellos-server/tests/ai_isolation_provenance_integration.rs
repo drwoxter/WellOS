@@ -265,6 +265,90 @@ impl ModelGateway for RealLikeGateway {
         r.prompt_version = self.prompt_version(Operation::CapacityExplanation);
         Ok(r)
     }
+
+    async fn brief_care_flow(
+        &self,
+        req: &dmind_gateway::care_ops::CareFlowBriefRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<wellos_domain::care_ops_ai::CareFlowBriefV1>,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.brief_care_flow(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::CareFlowBrief);
+        Ok(r)
+    }
+
+    async fn rank_placements(
+        &self,
+        req: &dmind_gateway::care_ops::PlacementRankingRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<wellos_domain::care_ops_ai::PlacementRankingV1>,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.rank_placements(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::PlacementRanking);
+        Ok(r)
+    }
+
+    async fn coordinate_discharge(
+        &self,
+        req: &dmind_gateway::care_ops::DischargeCoordinationRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<
+            wellos_domain::care_ops_ai::DischargeCoordinationV1,
+        >,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.coordinate_discharge(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::DischargeCoordination);
+        Ok(r)
+    }
+
+    async fn explain_theatre_plan(
+        &self,
+        req: &dmind_gateway::care_ops::TheatrePlanExplanationRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<
+            wellos_domain::care_ops_ai::TheatrePlanExplanationV1,
+        >,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.explain_theatre_plan(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::TheatrePlanExplanation);
+        Ok(r)
+    }
+
+    async fn explain_operational_forecast(
+        &self,
+        req: &dmind_gateway::care_ops::OperationalForecastExplanationRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<
+            wellos_domain::care_ops_ai::OperationalForecastExplanationV1,
+        >,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.explain_operational_forecast(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::OperationalForecastExplanation);
+        Ok(r)
+    }
+
+    async fn draft_shift_handoff(
+        &self,
+        req: &dmind_gateway::care_ops::ShiftHandoffDraftRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<wellos_domain::care_ops_ai::ShiftHandoffDraftV1>,
+        dmind_gateway::GatewayError,
+    > {
+        let mut r = self.inner.draft_shift_handoff(req).await?;
+        r.provider = real_model_info();
+        r.prompt_version = self.prompt_version(Operation::ShiftHandoffDraft);
+        Ok(r)
+    }
 }
 
 struct RealLikeTranscription {

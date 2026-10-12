@@ -69,6 +69,30 @@ const FILES: &[(&str, &str)] = &[
         "patient_result_explanation",
         include_str!("../../eval-corpus/v1/patient_result_explanation.json"),
     ),
+    (
+        "care_flow_brief",
+        include_str!("../../eval-corpus/v1/care_flow_brief.json"),
+    ),
+    (
+        "placement_ranking",
+        include_str!("../../eval-corpus/v1/placement_ranking.json"),
+    ),
+    (
+        "discharge_coordination",
+        include_str!("../../eval-corpus/v1/discharge_coordination.json"),
+    ),
+    (
+        "theatre_plan_explanation",
+        include_str!("../../eval-corpus/v1/theatre_plan_explanation.json"),
+    ),
+    (
+        "operational_forecast_explanation",
+        include_str!("../../eval-corpus/v1/operational_forecast_explanation.json"),
+    ),
+    (
+        "shift_handoff_draft",
+        include_str!("../../eval-corpus/v1/shift_handoff_draft.json"),
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

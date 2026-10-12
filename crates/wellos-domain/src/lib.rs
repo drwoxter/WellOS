@@ -10,6 +10,7 @@ pub mod access_ai;
 pub mod ai;
 pub mod capacity;
 pub mod care_ops;
+pub mod care_ops_ai;
 pub mod diagnostics;
 pub mod diagnostics_ai;
 pub mod events;

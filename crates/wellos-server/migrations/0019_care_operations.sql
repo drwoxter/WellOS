@@ -21,8 +21,8 @@
 --        operational_locations;
 --   DROP FUNCTION care_ops_forbid_mutation();
 --   ALTER TABLE ai_artifacts DROP COLUMN care_episode_id, DROP COLUMN placement_request_id,
---        DROP COLUMN perioperative_case_id, DROP COLUMN care_operations_forecast_id,
---        DROP COLUMN care_handoff_id, DROP COLUMN workforce_shift_id;
+--     DROP COLUMN theatre_session_id, DROP COLUMN care_operations_forecast_id,
+--     DROP COLUMN care_operations_snapshot_id; DROP TABLE care_operations_snapshots;
 --   restore the catalog_entries kind, notifications kind and
 --   ai_artifacts_patient_required CHECK constraints.
 
@@ -636,19 +636,34 @@ CREATE INDEX care_operations_forecasts_facility ON care_operations_forecasts (te
 -- 10. AI artifacts and notifications for care operations
 -- ---------------------------------------------------------------------------
 
+-- Persisted command-center snapshots: the exact facts a care-flow brief was
+-- generated from, so a brief can be detected as stale against current state.
+CREATE TABLE care_operations_snapshots (
+    id           uuid PRIMARY KEY,
+    tenant_id    uuid NOT NULL REFERENCES tenants(id),
+    facility_id  uuid NOT NULL REFERENCES facilities(id),
+    generated_at timestamptz NOT NULL DEFAULT now(),
+    facts        jsonb NOT NULL,
+    facts_hash   text NOT NULL,
+    created_by   uuid NOT NULL REFERENCES users(id)
+);
+CREATE INDEX care_operations_snapshots_facility
+    ON care_operations_snapshots (tenant_id, facility_id, generated_at DESC);
+
 ALTER TABLE ai_artifacts
-    ADD COLUMN care_episode_id            uuid REFERENCES care_episodes(id),
-    ADD COLUMN placement_request_id       uuid REFERENCES placement_requests(id),
-    ADD COLUMN perioperative_case_id      uuid REFERENCES perioperative_cases(id),
+    ADD COLUMN care_episode_id             uuid REFERENCES care_episodes(id),
+    ADD COLUMN placement_request_id        uuid REFERENCES placement_requests(id),
+    ADD COLUMN theatre_session_id          uuid REFERENCES theatre_sessions(id),
     ADD COLUMN care_operations_forecast_id uuid REFERENCES care_operations_forecasts(id),
-    ADD COLUMN care_handoff_id            uuid REFERENCES care_handoffs(id),
-    ADD COLUMN workforce_shift_id         uuid REFERENCES workforce_shifts(id);
+    ADD COLUMN care_operations_snapshot_id uuid REFERENCES care_operations_snapshots(id);
 CREATE INDEX ai_artifacts_care_episode ON ai_artifacts (tenant_id, care_episode_id) WHERE care_episode_id IS NOT NULL;
--- Facility-level operational artifacts have no single patient.
+CREATE INDEX ai_artifacts_placement_request ON ai_artifacts (tenant_id, placement_request_id) WHERE placement_request_id IS NOT NULL;
+-- Facility/session-level operational artifacts have no single patient.
 ALTER TABLE ai_artifacts DROP CONSTRAINT ai_artifacts_patient_required;
 ALTER TABLE ai_artifacts ADD CONSTRAINT ai_artifacts_patient_required
     CHECK (patient_id IS NOT NULL OR artifact_type IN (
-        'capacity_explanation', 'care_flow_brief', 'operational_forecast_explanation'));
+        'capacity_explanation', 'care_flow_brief', 'operational_forecast_explanation',
+        'theatre_plan_explanation'));
 
 ALTER TABLE notifications DROP CONSTRAINT notifications_kind_check;
 ALTER TABLE notifications ADD CONSTRAINT notifications_kind_check CHECK (kind IN (

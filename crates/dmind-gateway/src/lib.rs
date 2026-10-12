@@ -15,6 +15,7 @@
 //!   real call.
 
 pub mod access;
+pub mod care_ops;
 pub mod diagnostics;
 #[cfg(any(feature = "dev-fixtures", test))]
 pub mod fake;
@@ -42,6 +43,11 @@ pub use access::{
     AccessIntentRequest, AccessResponse, CapacityExplanationRequest, RankingRequest,
     RecoveryRankingRequest,
 };
+pub use care_ops::{
+    CareFlowBriefRequest, CareOpsResponse, DischargeCoordinationRequest,
+    OperationalForecastExplanationRequest, PlacementRankingRequest, ShiftHandoffDraftRequest,
+    TheatrePlanExplanationRequest,
+};
 pub use diagnostics::{
     DiagnosticResponse, OrderSuggestionRequest, PatientExplanationRequest, ResultSynthesisRequest,
 };
@@ -49,6 +55,10 @@ pub use risk::{RiskSummaryRequest, RiskSummaryResponse};
 pub use triage::{TriageRequest, TriageResponse};
 use wellos_domain::access_ai::{
     AccessIntentV1, AppointmentRankingV1, CancellationRecoveryV1, CapacityExplanationV1,
+};
+use wellos_domain::care_ops_ai::{
+    CareFlowBriefV1, DischargeCoordinationV1, OperationalForecastExplanationV1, PlacementRankingV1,
+    ShiftHandoffDraftV1, TheatrePlanExplanationV1,
 };
 use wellos_domain::diagnostics_ai::{
     DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, PatientResultExplanationV1,
@@ -280,6 +290,12 @@ operations! {
     DiagnosticOrderSuggestion,
     DiagnosticResultSynthesis,
     PatientResultExplanation,
+    CareFlowBrief,
+    PlacementRanking,
+    DischargeCoordination,
+    TheatrePlanExplanation,
+    OperationalForecastExplanation,
+    ShiftHandoffDraft,
 }
 
 impl Operation {
@@ -297,6 +313,12 @@ impl Operation {
             Operation::DiagnosticOrderSuggestion => "diagnostic_order_suggestion",
             Operation::DiagnosticResultSynthesis => "diagnostic_result_synthesis",
             Operation::PatientResultExplanation => "patient_result_explanation",
+            Operation::CareFlowBrief => "care_flow_brief",
+            Operation::PlacementRanking => "placement_ranking",
+            Operation::DischargeCoordination => "discharge_coordination",
+            Operation::TheatrePlanExplanation => "theatre_plan_explanation",
+            Operation::OperationalForecastExplanation => "operational_forecast_explanation",
+            Operation::ShiftHandoffDraft => "shift_handoff_draft",
         }
     }
 
@@ -322,6 +344,18 @@ impl Operation {
             Operation::PatientResultExplanation => {
                 wellos_domain::diagnostics_ai::PATIENT_EXPLANATION_SCHEMA
             }
+            Operation::CareFlowBrief => wellos_domain::care_ops_ai::CARE_FLOW_BRIEF_SCHEMA,
+            Operation::PlacementRanking => wellos_domain::care_ops_ai::PLACEMENT_RANKING_SCHEMA,
+            Operation::DischargeCoordination => {
+                wellos_domain::care_ops_ai::DISCHARGE_COORDINATION_SCHEMA
+            }
+            Operation::TheatrePlanExplanation => {
+                wellos_domain::care_ops_ai::THEATRE_PLAN_EXPLANATION_SCHEMA
+            }
+            Operation::OperationalForecastExplanation => {
+                wellos_domain::care_ops_ai::OPERATIONAL_FORECAST_EXPLANATION_SCHEMA
+            }
+            Operation::ShiftHandoffDraft => wellos_domain::care_ops_ai::SHIFT_HANDOFF_DRAFT_SCHEMA,
         }
     }
 
@@ -415,6 +449,44 @@ pub trait ModelGateway: Send + Sync {
         &self,
         req: &CapacityExplanationRequest,
     ) -> Result<AccessResponse<CapacityExplanationV1>, GatewayError>;
+
+    /// A1 `care-flow-brief.v1`: explains a persisted command-center snapshot.
+    async fn brief_care_flow(
+        &self,
+        req: &CareFlowBriefRequest,
+    ) -> Result<CareOpsResponse<CareFlowBriefV1>, GatewayError>;
+
+    /// A2 `placement-ranking.v1`: reorders/explains matcher-feasible positions.
+    async fn rank_placements(
+        &self,
+        req: &PlacementRankingRequest,
+    ) -> Result<CareOpsResponse<PlacementRankingV1>, GatewayError>;
+
+    /// A1 `discharge-coordination.v1`: explains operational discharge barriers.
+    async fn coordinate_discharge(
+        &self,
+        req: &DischargeCoordinationRequest,
+    ) -> Result<CareOpsResponse<DischargeCoordinationV1>, GatewayError>;
+
+    /// A1 `theatre-plan-explanation.v1`: explains a session plan's readiness.
+    async fn explain_theatre_plan(
+        &self,
+        req: &TheatrePlanExplanationRequest,
+    ) -> Result<CareOpsResponse<TheatrePlanExplanationV1>, GatewayError>;
+
+    /// A1 `operational-forecast-explanation.v1`: explains a deterministic
+    /// care-operations forecast.
+    async fn explain_operational_forecast(
+        &self,
+        req: &OperationalForecastExplanationRequest,
+    ) -> Result<CareOpsResponse<OperationalForecastExplanationV1>, GatewayError>;
+
+    /// A2 `shift-handoff-draft.v1`: drafts a structured handoff that stays a
+    /// draft until a professional accepts it.
+    async fn draft_shift_handoff(
+        &self,
+        req: &ShiftHandoffDraftRequest,
+    ) -> Result<CareOpsResponse<ShiftHandoffDraftV1>, GatewayError>;
 
     /// A2 `diagnostic-order-suggestion.v1`: suggests orderables from the
     /// bounded candidate list; the clinician composes and confirms the order.
@@ -535,6 +607,48 @@ impl ModelGateway for DisabledGateway {
         Err(self.err())
     }
 
+    async fn brief_care_flow(
+        &self,
+        _req: &CareFlowBriefRequest,
+    ) -> Result<CareOpsResponse<CareFlowBriefV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn rank_placements(
+        &self,
+        _req: &PlacementRankingRequest,
+    ) -> Result<CareOpsResponse<PlacementRankingV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn coordinate_discharge(
+        &self,
+        _req: &DischargeCoordinationRequest,
+    ) -> Result<CareOpsResponse<DischargeCoordinationV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn explain_theatre_plan(
+        &self,
+        _req: &TheatrePlanExplanationRequest,
+    ) -> Result<CareOpsResponse<TheatrePlanExplanationV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn explain_operational_forecast(
+        &self,
+        _req: &OperationalForecastExplanationRequest,
+    ) -> Result<CareOpsResponse<OperationalForecastExplanationV1>, GatewayError> {
+        Err(self.err())
+    }
+
+    async fn draft_shift_handoff(
+        &self,
+        _req: &ShiftHandoffDraftRequest,
+    ) -> Result<CareOpsResponse<ShiftHandoffDraftV1>, GatewayError> {
+        Err(self.err())
+    }
+
     async fn suggest_orders(
         &self,
         _req: &OrderSuggestionRequest,
@@ -589,7 +703,13 @@ mod operation_tests {
                 | Operation::CapacityExplanation
                 | Operation::DiagnosticOrderSuggestion
                 | Operation::DiagnosticResultSynthesis
-                | Operation::PatientResultExplanation => {}
+                | Operation::PatientResultExplanation
+                | Operation::CareFlowBrief
+                | Operation::PlacementRanking
+                | Operation::DischargeCoordination
+                | Operation::TheatrePlanExplanation
+                | Operation::OperationalForecastExplanation
+                | Operation::ShiftHandoffDraft => {}
             };
             assert_eq!(
                 serde_json::to_value(op).unwrap(),
