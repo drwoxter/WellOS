@@ -111,6 +111,15 @@ pub async fn tenant_meta(
         "can_manage_catalog": allows_any(actions::CATALOG_MANAGE),
         "self_service": allows_any(actions::PATIENT_SELF_SERVICE),
     });
+    let care_ops_capabilities = json!({
+        "can_read": allows_any(actions::CARE_OPS_READ),
+        "can_manage_flow": allows_any(actions::CARE_OPS_MANAGE_FLOW),
+        "can_manage_theatre": allows_any(actions::CARE_OPS_MANAGE_THEATRE),
+        "can_manage_workforce": allows_any(actions::CARE_OPS_MANAGE_WORKFORCE),
+        "can_review_ai": allows_any(actions::CARE_OPS_REVIEW_AI),
+        "can_audit": allows_any(actions::CARE_OPS_AUDIT),
+        "self_service": allows_any(actions::PATIENT_SELF_SERVICE),
+    });
     Ok(Json(json!({
         "tenant": {
             "id": ctx.tenant_id,
@@ -131,6 +140,7 @@ pub async fn tenant_meta(
         "ai_capabilities": aigov::capabilities(&state),
         "scheduling_capabilities": scheduling_capabilities,
         "diagnostics_capabilities": diagnostics_capabilities,
+        "care_ops_capabilities": care_ops_capabilities,
     })))
 }
 

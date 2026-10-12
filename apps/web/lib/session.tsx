@@ -11,6 +11,7 @@ import {
 } from "react";
 import type { SchedulingCapabilities } from "./access";
 import type { DiagnosticsCapabilities } from "./diagnostics";
+import type { CareOpsCapabilities } from "./care-ops";
 import type { AiCapabilities } from "./capabilities";
 import { installHistoryIndex } from "./history-index";
 import type { Lang } from "./i18n";
@@ -35,6 +36,7 @@ export type TenantMeta = {
   ai_capabilities?: AiCapabilities;
   scheduling_capabilities?: SchedulingCapabilities;
   diagnostics_capabilities?: DiagnosticsCapabilities;
+  care_ops_capabilities?: CareOpsCapabilities;
 };
 
 type Session = {

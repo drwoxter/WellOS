@@ -55,6 +55,17 @@ export function homeForRoles(roles: string[]): string {
     return "/my";
   if (roles.includes("registration_staff")) return "/access";
   if (roles.includes("transport_coordinator")) return "/scheduling";
+  if (
+    roles.some((r) =>
+      [
+        "operations_manager",
+        "bed_coordinator",
+        "theatre_coordinator",
+        "workforce_coordinator",
+      ].includes(r),
+    )
+  )
+    return "/operations";
   return "/dashboard";
 }
 
@@ -71,6 +82,10 @@ const ROLE_LABELS: Record<string, TKey> = {
   break_glass_authorized: "roleBreakGlass",
   patient_representative: "rolePatientRepresentative",
   transport_coordinator: "roleTransportCoordinator",
+  operations_manager: "roleOperationsManager",
+  bed_coordinator: "roleBedCoordinator",
+  theatre_coordinator: "roleTheatreCoordinator",
+  workforce_coordinator: "roleWorkforceCoordinator",
 };
 
 /** Human-readable role list; unknown roles fall back to their identifier. */

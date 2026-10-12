@@ -11,6 +11,7 @@ import { canReadEvaluations } from "@/lib/eval";
 import { canReadVisits } from "@/lib/visits";
 import { canReadRisk } from "@/lib/risk";
 import { hasSchedulingConsoleAccess } from "@/lib/access";
+import { hasOperationsAccess } from "../lib/care-ops";
 import { confirmLeaveUnsaved } from "@/lib/unsaved-guard";
 import { Icon } from "@/components/ui/icons";
 import { DmindPresence, type DmindState } from "@/components/ui/dmind";
@@ -36,6 +37,10 @@ export type NavGroup = { label: string | null; links: NavLink[] };
 
 const PATIENT_ROLES = new Set(["patient", "patient_representative"]);
 const OPERATIONAL_ROLES = new Set([
+  "operations_manager",
+  "bed_coordinator",
+  "theatre_coordinator",
+  "workforce_coordinator",
   "registration_staff",
   "transport_coordinator",
   "scheduler",
@@ -61,11 +66,13 @@ export function shellRoleFor(meta: TenantMeta | null): ShellRole {
   const hasOperational =
     roles.some((r) => OPERATIONAL_ROLES.has(r)) ||
     canReadVisits(roles) ||
-    hasSchedulingConsoleAccess(meta?.scheduling_capabilities);
+    hasSchedulingConsoleAccess(meta?.scheduling_capabilities) ||
+    hasOperationsAccess(meta?.care_ops_capabilities);
   const selfService =
     roles.some((r) => PATIENT_ROLES.has(r)) ||
     Boolean(meta?.scheduling_capabilities?.self_service) ||
-    Boolean(meta?.diagnostics_capabilities?.self_service);
+    Boolean(meta?.diagnostics_capabilities?.self_service) ||
+    Boolean(meta?.care_ops_capabilities?.self_service);
   if (selfService && !hasClinical && !hasOperational) return "patient";
   if (hasOperational && !hasClinical) return "operational";
   return "clinical";
@@ -80,7 +87,40 @@ export function navGroupsFor(
   const roles = meta?.user.roles ?? [];
   const sched = meta?.scheduling_capabilities;
   const dx = meta?.diagnostics_capabilities;
+  const ops_caps = meta?.care_ops_capabilities;
   const L = (k: TKey) => t(lang, k);
+  const myCare: NavLink[] = ops_caps?.self_service
+    ? [{ href: "/my/care", label: L("navMyCare"), icon: Icon.Heart }]
+    : [];
+  const operations: NavLink[] = hasOperationsAccess(ops_caps)
+    ? [
+        {
+          href: "/operations",
+          label: L("navCommandCenter"),
+          icon: Icon.Grid,
+          also: ["/episodes"],
+        },
+        { href: "/operations/flow", label: L("navCareFlow"), icon: Icon.Door },
+        ...(ops_caps?.can_manage_theatre || ops_caps?.can_read
+          ? [
+              {
+                href: "/operations/theatres",
+                label: L("navTheatres"),
+                icon: Icon.Layers,
+              },
+            ]
+          : []),
+        ...(ops_caps?.can_manage_workforce || ops_caps?.can_read
+          ? [
+              {
+                href: "/operations/workforce",
+                label: L("navWorkforce"),
+                icon: Icon.Users,
+              },
+            ]
+          : []),
+      ]
+    : [];
 
   if (role === "patient") {
     return [
@@ -97,6 +137,7 @@ export function navGroupsFor(
                 },
               ]
             : []),
+          ...myCare,
           ...(dx?.self_service
             ? [
                 {
@@ -176,6 +217,7 @@ export function navGroupsFor(
           },
         ]
       : []),
+    ...operations,
     ...(canReadEvaluations(roles)
       ? [
           {
@@ -187,6 +229,7 @@ export function navGroupsFor(
       : []),
   ];
   const me: NavLink[] = [
+    ...myCare,
     ...(sched?.self_service
       ? [
           {
