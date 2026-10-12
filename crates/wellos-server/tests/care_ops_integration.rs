@@ -823,6 +823,7 @@ async fn workforce_gap_is_capability_specific_and_forecast_is_honest() {
 #[tokio::test]
 async fn patient_care_view_exposes_only_released_own_data() {
     let state = test_state().await;
+    let fx = fixtures(&state).await;
     let (s, v) = call(&state, "GET", "/api/v1/me/care", PATIENT, None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     let pid: Uuid = v["patient_id"]
@@ -830,7 +831,91 @@ async fn patient_care_view_exposes_only_released_own_data() {
         .unwrap_or_else(|| panic!("{v}"))
         .parse()
         .unwrap();
-    assert!(!v["episodes"].as_array().unwrap().is_empty(), "{v}");
+    // The seeded representative's patient has only a completed episode
+    // (history fixture); a rehabilitation episode left by an interrupted run
+    // is cancelled so the test owns the patient's active care.
+    for e in v["episodes"].as_array().unwrap() {
+        assert_ne!(e["status"], "completed", "history is not active care: {v}");
+        if e["episode_type_code"] == "rehabilitation" {
+            let stale = uuid(&e["episode_id"]);
+            let row = {
+                let mut conn = state.pool.acquire().await.unwrap();
+                wellos_server::care_ops::load_episode(&mut conn, fx.tenant, stale, false)
+                    .await
+                    .unwrap()
+            };
+            let (s, v) = call(
+                &state,
+                "POST",
+                &format!("/api/v1/operations/episodes/{stale}/transition"),
+                BEDS,
+                Some(json!({ "transition": "cancel", "expected_version": row.version, "reason_code": "test_cleanup" })),
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+        }
+    }
+
+    // Open an episode for that patient with staff-only and patient-visible
+    // work, then read it back as the representative.
+    let (s, ep) = call(
+        &state,
+        "POST",
+        "/api/v1/operations/episodes",
+        BEDS,
+        Some(json!({
+            "facility_id": fx.facility,
+            "patient_id": pid,
+            "episode_type_code": "rehabilitation",
+            "responsible_service_code": "physiotherapy",
+            "priority": "routine",
+            "activate": true
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{ep}");
+    let episode_id = uuid(&ep["id"]);
+    let (nurse,): (Uuid,) = sqlx::query_as("SELECT id FROM users WHERE username = 'nurse.kim'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    for (title, visible) in [
+        ("Staff-only internal_note review", false),
+        ("Bring walking aid", true),
+    ] {
+        let (s, t) = call(
+            &state,
+            "POST",
+            "/api/v1/operations/tasks",
+            BEDS,
+            Some(json!({
+                "episode_id": episode_id,
+                "title_en": title,
+                "title_es": title,
+                "kind": "coordination",
+                "accountable_user_id": nurse,
+                "patient_visible": visible,
+                "patient_text_en": visible.then_some("Please bring your walking aid"),
+                "patient_text_es": visible.then_some("Traiga su andador"),
+            })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{t}");
+    }
+    let (s, v) = call(&state, "GET", "/api/v1/me/care", PATIENT, None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let mine = v["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| uuid(&e["episode_id"]) == episode_id)
+        .unwrap_or_else(|| panic!("active episode visible to its representative: {v}"));
+    let tasks = mine["pending_tasks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(tasks.len(), 1, "only patient-visible work: {v}");
+    assert_eq!(tasks[0]["text_en"], "Please bring your walking aid");
     for e in v["episodes"].as_array().unwrap() {
         let (owner,): (Uuid,) =
             sqlx::query_as("SELECT patient_id FROM care_episodes WHERE id = $1")
@@ -840,7 +925,7 @@ async fn patient_care_view_exposes_only_released_own_data() {
                 .unwrap();
         assert_eq!(owner, pid);
         assert!(e.get("patient_id").is_none() && e.get("responsible_user_id").is_none());
-        for t in e["tasks"].as_array().unwrap_or(&vec![]) {
+        for t in e["pending_tasks"].as_array().unwrap_or(&vec![]) {
             assert!(
                 t.get("text_en").is_some() && t.get("accountable_user_id").is_none(),
                 "{t}"
@@ -863,6 +948,27 @@ async fn patient_care_view_exposes_only_released_own_data() {
     }
     let (s, _) = call(&state, "GET", "/api/v1/me/care", NURSE, None).await;
     assert_ne!(s, StatusCode::OK);
+
+    // Leave the shared representative fixture as seeded.
+    let ep = {
+        let mut conn = state.pool.acquire().await.unwrap();
+        wellos_server::care_ops::load_episode(&mut conn, fx.tenant, episode_id, false)
+            .await
+            .unwrap()
+    };
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/episodes/{episode_id}/transition"),
+        BEDS,
+        Some(json!({
+            "transition": "cancel",
+            "expected_version": ep.version,
+            "reason_code": "test_cleanup"
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
 }
 
 #[tokio::test]
