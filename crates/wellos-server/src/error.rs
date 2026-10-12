@@ -12,6 +12,8 @@ pub struct ApiError {
     pub message: String,
     /// Seconds to wait before retrying (sets a `Retry-After` header).
     pub retry_after: Option<u64>,
+    /// Structured, non-sensitive context (e.g. deterministic conflict codes).
+    pub details: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -21,7 +23,13 @@ impl ApiError {
             code,
             message: message.into(),
             retry_after: None,
+            details: None,
         }
+    }
+
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn too_many_requests(retry_after: u64) -> Self {
@@ -94,9 +102,11 @@ impl From<sqlx::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = Json(json!({
-            "error": { "code": self.code, "message": self.message }
-        }));
+        let mut error = json!({ "code": self.code, "message": self.message });
+        if let Some(details) = self.details {
+            error["details"] = details;
+        }
+        let body = Json(json!({ "error": error }));
         let mut response = (self.status, body).into_response();
         if let Some(secs) = self.retry_after {
             if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {

@@ -68,6 +68,20 @@ pub mod actions {
     pub const DMIND_EVAL_READ: &str = "dmind_eval.read";
     /// Plan/record evaluation runs and append human reviews.
     pub const DMIND_EVAL_MANAGE: &str = "dmind_eval.manage";
+    /// Read care-operations surfaces: command-center snapshot, episodes,
+    /// placements, coordination, theatre plans, coverage, forecasts.
+    pub const CARE_OPS_READ: &str = "care_ops.read";
+    /// Patient-flow mutations: episodes, placement requests, holds,
+    /// confirmations, transfers, releases, coordination tasks, handoffs.
+    pub const CARE_OPS_MANAGE_FLOW: &str = "care_ops.manage_flow";
+    /// Theatre sessions and perioperative case scheduling/overrides.
+    pub const CARE_OPS_MANAGE_THEATRE: &str = "care_ops.manage_theatre";
+    /// Shifts, coverage requirements, assignments, absences.
+    pub const CARE_OPS_MANAGE_WORKFORCE: &str = "care_ops.manage_workforce";
+    /// Accept/reject dMind care-operations artifacts.
+    pub const CARE_OPS_REVIEW_AI: &str = "care_ops.review_ai";
+    /// Read operational history and audit trails for care operations.
+    pub const CARE_OPS_AUDIT: &str = "care_ops.audit";
     pub const TENANT_META_READ: &str = "tenant.meta_read";
     /// Create scheduled visits and arrivals; mark arrived, cancel, no-show.
     pub const VISIT_MANAGE: &str = "visit.manage";
@@ -144,6 +158,12 @@ pub mod actions {
     pub const DIAGNOSTIC_RELEASE: &str = "diagnostic_result.release";
 
     pub const ALL: &[&str] = &[
+        CARE_OPS_READ,
+        CARE_OPS_MANAGE_FLOW,
+        CARE_OPS_MANAGE_THEATRE,
+        CARE_OPS_MANAGE_WORKFORCE,
+        CARE_OPS_REVIEW_AI,
+        CARE_OPS_AUDIT,
         PATIENT_REGISTER,
         PATIENT_READ,
         PATIENT_SEARCH,
@@ -256,6 +276,13 @@ pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
         }
         DIAGNOSTIC_READ => &[Purpose::Treatment, Purpose::Operations, Purpose::Quality],
         AUDIT_READ => &[Purpose::Operations, Purpose::Quality],
+        CARE_OPS_READ | CARE_OPS_MANAGE_FLOW | CARE_OPS_REVIEW_AI => {
+            &[Purpose::Treatment, Purpose::Operations, Purpose::Emergency]
+        }
+        CARE_OPS_MANAGE_THEATRE | CARE_OPS_MANAGE_WORKFORCE => {
+            &[Purpose::Operations, Purpose::Treatment]
+        }
+        CARE_OPS_AUDIT => &[Purpose::Operations, Purpose::Quality],
         CONSENT_WRITE => &[Purpose::Treatment, Purpose::Operations],
         WORKLIST_READ => &[Purpose::Treatment, Purpose::Operations, Purpose::Quality],
         JOBS_RUN => &[Purpose::Operations],
@@ -300,7 +327,17 @@ pub mod roles {
     /// reports in their facility. Never order, review for the patient or
     /// release results.
     pub const DIAGNOSTIC_PROFESSIONAL: &str = "diagnostic_professional";
+    /// Operational roles (authorization only; the holder's profession is
+    /// catalog data and is never inferred from these).
+    pub const OPERATIONS_MANAGER: &str = "operations_manager";
+    pub const BED_COORDINATOR: &str = "bed_coordinator";
+    pub const THEATRE_COORDINATOR: &str = "theatre_coordinator";
+    pub const WORKFORCE_COORDINATOR: &str = "workforce_coordinator";
     pub const ALL: &[&str] = &[
+        OPERATIONS_MANAGER,
+        BED_COORDINATOR,
+        THEATRE_COORDINATOR,
+        WORKFORCE_COORDINATOR,
         REGISTRATION,
         PHYSICIAN,
         NURSE,
@@ -327,6 +364,7 @@ pub fn role_allows(role: &str, action: &str) -> bool {
     use roles::*;
     let allowed: &[&str] = match role {
         REGISTRATION => &[
+            CARE_OPS_READ,
             PATIENT_REGISTER,
             PATIENT_READ,
             PATIENT_SEARCH,
@@ -344,6 +382,9 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             NOTIFICATION_READ,
         ],
         PHYSICIAN => &[
+            CARE_OPS_READ,
+            CARE_OPS_MANAGE_FLOW,
+            CARE_OPS_REVIEW_AI,
             PATIENT_SEARCH,
             PATIENT_READ,
             ENCOUNTER_START,
@@ -379,6 +420,9 @@ pub fn role_allows(role: &str, action: &str) -> bool {
         // practitioner. Triage and care-team routing are nursing functions
         // scoped by facility; they never imply consultation rights.
         NURSE => &[
+            CARE_OPS_READ,
+            CARE_OPS_MANAGE_FLOW,
+            CARE_OPS_REVIEW_AI,
             PATIENT_SEARCH,
             PATIENT_READ,
             WORKLIST_READ,
@@ -433,6 +477,12 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             NOTIFICATION_READ,
         ],
         CLINICAL_ADMIN => &[
+            CARE_OPS_READ,
+            CARE_OPS_MANAGE_FLOW,
+            CARE_OPS_MANAGE_THEATRE,
+            CARE_OPS_MANAGE_WORKFORCE,
+            CARE_OPS_REVIEW_AI,
+            CARE_OPS_AUDIT,
             PATIENT_SEARCH,
             PATIENT_READ,
             WORKLIST_READ,
@@ -459,6 +509,7 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             DMIND_EVAL_MANAGE,
         ],
         PRIVACY_OFFICER => &[
+            CARE_OPS_AUDIT,
             AUDIT_READ,
             CONSENT_WRITE,
             BREAK_GLASS_REVIEW,
@@ -469,6 +520,8 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             PATIENT_GRANT_MANAGE,
         ],
         SECURITY_AUDITOR => &[
+            CARE_OPS_READ,
+            CARE_OPS_AUDIT,
             AUDIT_READ,
             BREAK_GLASS_REVIEW,
             SERVICE_CREDENTIAL_READ,
@@ -486,7 +539,47 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             NOTIFICATION_READ,
             TENANT_META_READ,
         ],
+        OPERATIONS_MANAGER => &[
+            CARE_OPS_READ,
+            CARE_OPS_MANAGE_FLOW,
+            CARE_OPS_MANAGE_THEATRE,
+            CARE_OPS_MANAGE_WORKFORCE,
+            CARE_OPS_REVIEW_AI,
+            CARE_OPS_AUDIT,
+            WORKLIST_READ,
+            VISIT_READ,
+            SCHEDULING_READ,
+            CAPACITY_REVIEW,
+            NOTIFICATION_READ,
+            CATALOG_READ,
+            TENANT_META_READ,
+        ],
+        BED_COORDINATOR => &[
+            CARE_OPS_READ,
+            CARE_OPS_MANAGE_FLOW,
+            CARE_OPS_REVIEW_AI,
+            VISIT_READ,
+            NOTIFICATION_READ,
+            CATALOG_READ,
+            TENANT_META_READ,
+        ],
+        THEATRE_COORDINATOR => &[
+            CARE_OPS_READ,
+            CARE_OPS_MANAGE_THEATRE,
+            CARE_OPS_REVIEW_AI,
+            SCHEDULING_READ,
+            CATALOG_READ,
+            TENANT_META_READ,
+        ],
+        WORKFORCE_COORDINATOR => &[
+            CARE_OPS_READ,
+            CARE_OPS_MANAGE_WORKFORCE,
+            CARE_OPS_REVIEW_AI,
+            CATALOG_READ,
+            TENANT_META_READ,
+        ],
         TRANSPORT_COORDINATOR => &[
+            CARE_OPS_READ,
             TRANSPORT_COORDINATE,
             CATALOG_READ,
             NOTIFICATION_READ,

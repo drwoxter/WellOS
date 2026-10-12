@@ -9,6 +9,7 @@
 use crate::routes::visits::single_row_vital_facts;
 use crate::runtime::RuntimeConfig;
 use crate::seed_access;
+use crate::seed_care_ops;
 use crate::seed_diagnostics;
 use chrono::{DateTime, Utc};
 use dmind_gateway::triage::TRIAGE_TEMPLATE;
@@ -175,6 +176,30 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
             false,
         ),
         (
+            "ops.lopez",
+            "Marta López (Operations Manager)",
+            "operations_manager",
+            false,
+        ),
+        (
+            "bed.ortiz",
+            "Iván Ortiz (Bed Coordinator)",
+            "bed_coordinator",
+            false,
+        ),
+        (
+            "theatre.ruiz",
+            "Elena Ruiz (Theatre Coordinator)",
+            "theatre_coordinator",
+            false,
+        ),
+        (
+            "wf.diaz",
+            "Tomás Díaz (Workforce Coordinator)",
+            "workforce_coordinator",
+            false,
+        ),
+        (
             "privacy.wolf",
             "Petra Wolf (Privacy Officer)",
             "privacy_officer",
@@ -212,6 +237,10 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
     let mut admin_silva_id = None;
     let mut pharm_osei_id = None;
     let mut lab_chen_id = None;
+    let mut ops_lopez_id = None;
+    let mut bed_ortiz_id = None;
+    let mut theatre_ruiz_id = None;
+    let mut wf_diaz_id = None;
     for (username, display, role, is_service) in users {
         let uid = Uuid::now_v7();
         match *username {
@@ -221,6 +250,10 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
             "admin.silva" => admin_silva_id = Some(uid),
             "pharm.osei" => pharm_osei_id = Some(uid),
             "lab.chen" => lab_chen_id = Some(uid),
+            "ops.lopez" => ops_lopez_id = Some(uid),
+            "bed.ortiz" => bed_ortiz_id = Some(uid),
+            "theatre.ruiz" => theatre_ruiz_id = Some(uid),
+            "wf.diaz" => wf_diaz_id = Some(uid),
             "reg.rivera" => reg_rivera_id = Some(uid),
             _ => {}
         }
@@ -542,6 +575,31 @@ pub async fn seed(pool: &PgPool, runtime: &RuntimeConfig) -> anyhow::Result<Opti
 
     // Every seeded dMind artifact is a deterministic fixture and is marked
     // as such so no view can mistake it for a real model execution.
+    // Care Operations fixtures: locations, episodes, placements, coordination,
+    // theatre, workforce and forecasts through the production write paths.
+    seed_care_ops::seed(
+        &mut tx,
+        &access_state,
+        seed_care_ops::CareOpsFixtureInput {
+            tenant: tenant_a,
+            facility: facility_a,
+            annex: facility_a2,
+            ops_manager: ops_lopez_id.expect("ops.lopez seeded"),
+            bed_coordinator: bed_ortiz_id.expect("bed.ortiz seeded"),
+            theatre_coordinator: theatre_ruiz_id.expect("theatre.ruiz seeded"),
+            workforce_coordinator: wf_diaz_id.expect("wf.diaz seeded"),
+            dr_garcia,
+            nurse_kim: nurse_kim_id.expect("nurse.kim seeded"),
+            alba: patient_a,
+            carlos: demo.carlos,
+            marta: demo.marta,
+            jonas: demo.jonas,
+            sofia: access_seeded.sofia,
+            diego: access_seeded.diego,
+        },
+    )
+    .await?;
+
     sqlx::query(
         "UPDATE ai_artifacts SET synthetic = true, provider = COALESCE(provider, route)
          WHERE tenant_id = ANY($1)",

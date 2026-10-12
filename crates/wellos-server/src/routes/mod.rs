@@ -4,6 +4,7 @@ pub mod admin;
 pub mod ai;
 pub mod brief;
 pub mod capacity;
+pub mod care_ops;
 pub mod consent;
 pub mod creds;
 pub mod dashboard;
@@ -228,6 +229,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/v1", me::routes())
         .nest("/api/v1", waitlist::routes())
         .nest("/api/v1", capacity::routes())
+        .nest("/api/v1", care_ops::routes())
         .nest("/api/v1", transport::routes())
         .route(
             "/api/v1/patient-grants",

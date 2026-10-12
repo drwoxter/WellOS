@@ -2,6 +2,7 @@ pub mod aigov;
 pub mod audit;
 pub mod auth;
 pub mod capacity;
+pub mod care_ops;
 pub mod crypto;
 pub mod error;
 pub mod eval;
@@ -16,6 +17,8 @@ pub mod runtime;
 pub mod scheduling;
 #[cfg(feature = "dev-fixtures")]
 mod seed_access;
+#[cfg(feature = "dev-fixtures")]
+mod seed_care_ops;
 #[cfg(feature = "dev-fixtures")]
 mod seed_diagnostics;
 #[cfg(feature = "dev-fixtures")]
