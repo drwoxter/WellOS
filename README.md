@@ -355,6 +355,18 @@ Invoke-RestMethod "http://127.0.0.1:8080/api/v1/patients/$patientId/risk/project
 See `docs/architecture/dmind-clinical-diagnostics.md` for the data model,
 state machines, safety engine, dMind operations, release rules and non-goals.
 
+## dMind Live Intelligence & Evaluation v1 (synthetic only)
+
+Evaluation of configured dMind providers against a versioned synthetic EN/ES
+corpus (55 cases, every registered operation) with a versioned rubric that
+separates deterministic, heuristic and human-review metrics; a budgeted
+`dmind-eval` CLI (dry-run / offline / gated live), self-contained reports,
+append-only evaluation tables (migration 0018) and an administrator cockpit at
+`/admin/dmind/evaluations` with read-only auditor access. Not clinical
+validation; never runs on real patients. See
+`docs/architecture/dmind-evaluation.md` and
+`docs/operations/dmind-evaluation-runbook.md`.
+
 ## Tests
 
 ```bash

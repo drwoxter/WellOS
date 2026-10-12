@@ -7,6 +7,7 @@ import { t, type TKey } from "@/lib/i18n";
 import { useSession, type TenantMeta } from "@/lib/session";
 import { hasDiagnosticsWorkspaceAccess } from "@/lib/diagnostics";
 import { canReadWorklist, canSearchPatients } from "@/lib/clinical";
+import { canReadEvaluations } from "@/lib/eval";
 import { canReadVisits } from "@/lib/visits";
 import { canReadRisk } from "@/lib/risk";
 import { hasSchedulingConsoleAccess } from "@/lib/access";
@@ -172,6 +173,15 @@ export function navGroupsFor(
             href: "/scheduling/catalog",
             label: L("catalogAdmin"),
             icon: Icon.Grid,
+          },
+        ]
+      : []),
+    ...(canReadEvaluations(roles)
+      ? [
+          {
+            href: "/admin/dmind/evaluations",
+            label: L("navEvaluations"),
+            icon: Icon.Sparkle,
           },
         ]
       : []),

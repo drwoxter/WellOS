@@ -59,6 +59,20 @@ jobs:
         run: cargo test -p wellos-server --test upgrade_migration_integration
       - name: Pre-0016 upgrade migration gate (0001..0015 schema + legacy laboratory orders -> 0016)
         run: cargo test -p wellos-server --test upgrade_migration_0016_integration
+      - name: Pre-0018 upgrade migration gate (0001..0017 schema + existing tenants -> 0018 evaluation tables)
+        run: cargo test -p wellos-server --test upgrade_migration_0018_integration
+      - name: Offline dMind evaluation (fake provider, synthetic corpus, no network, nonzero on safety failure)
+        run: cargo run -p wellos-server --features dev-fixtures --bin dmind-eval -- --mode offline --provider fake --json target/dmind-eval.json --html target/dmind-eval.html
+      - name: Upload offline evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmind-eval-offline-report
+          path: |
+            target/dmind-eval.json
+            target/dmind-eval.html
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Integration tests
         run: cargo test --workspace --test '*'
 

@@ -21,18 +21,35 @@ function row(page: Page, name: string): Locator {
 /**
  * Selects the patient's row (when listed) and returns the detail card
  * (card heading = patient name); resolves to nothing when the patient is
- * not in the list.
+ * not in the list. A filter change reloads the list server-side and mounts
+ * a fresh master-detail, so a click that lands on the outgoing list is lost:
+ * the selection is confirmed against the detail heading and retried.
  */
 async function card(page: Page, name: string): Promise<Locator> {
   const r = row(page, name);
-  await r
-    .first()
-    .waitFor({ state: "visible", timeout: 5_000 })
-    .catch(() => undefined);
-  if ((await r.count()) > 0) await r.first().click();
-  return page.locator(".risk-worklist .worklist-detail li.risk-item").filter({
-    has: page.getByRole("heading", { level: 3, name }),
-  });
+  const detail = page
+    .locator(".risk-worklist .worklist-detail li.risk-item")
+    .filter({ has: page.getByRole("heading", { level: 3, name }) });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const listed = await r
+      .first()
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .then(
+        () => true,
+        () => false,
+      );
+    if (!listed) break;
+    await r.first().click();
+    const shown = await detail
+      .first()
+      .waitFor({ state: "visible", timeout: 3_000 })
+      .then(
+        () => true,
+        () => false,
+      );
+    if (shown) break;
+  }
+  return detail;
 }
 
 async function expectNoSeriousViolations(page: Page) {

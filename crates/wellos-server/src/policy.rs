@@ -63,6 +63,11 @@ pub mod actions {
     pub const BREAK_GLASS_REVIEW: &str = "break_glass.review";
     pub const SERVICE_CREDENTIAL_MANAGE: &str = "service_credential.manage";
     pub const SERVICE_CREDENTIAL_READ: &str = "service_credential.read";
+    /// Inspect dMind evaluation suites, runs, executions and reviews
+    /// (synthetic tenants only; never a clinical read).
+    pub const DMIND_EVAL_READ: &str = "dmind_eval.read";
+    /// Plan/record evaluation runs and append human reviews.
+    pub const DMIND_EVAL_MANAGE: &str = "dmind_eval.manage";
     pub const TENANT_META_READ: &str = "tenant.meta_read";
     /// Create scheduled visits and arrivals; mark arrived, cancel, no-show.
     pub const VISIT_MANAGE: &str = "visit.manage";
@@ -158,6 +163,8 @@ pub mod actions {
         BREAK_GLASS_REVIEW,
         SERVICE_CREDENTIAL_MANAGE,
         SERVICE_CREDENTIAL_READ,
+        DMIND_EVAL_READ,
+        DMIND_EVAL_MANAGE,
         TENANT_META_READ,
         VISIT_MANAGE,
         VISIT_READ,
@@ -254,6 +261,7 @@ pub fn purpose_allows(purpose: Purpose, action: &str) -> bool {
         JOBS_RUN => &[Purpose::Operations],
         BREAK_GLASS_REVIEW => &[Purpose::Operations, Purpose::Quality],
         SERVICE_CREDENTIAL_MANAGE | SERVICE_CREDENTIAL_READ => &[Purpose::Operations],
+        DMIND_EVAL_READ | DMIND_EVAL_MANAGE => &[Purpose::Operations, Purpose::Quality],
         TENANT_META_READ => &[
             Purpose::Treatment,
             Purpose::Operations,
@@ -447,6 +455,8 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             CAPACITY_REVIEW,
             NOTIFICATION_READ,
             DIAGNOSTIC_READ,
+            DMIND_EVAL_READ,
+            DMIND_EVAL_MANAGE,
         ],
         PRIVACY_OFFICER => &[
             AUDIT_READ,
@@ -464,6 +474,7 @@ pub fn role_allows(role: &str, action: &str) -> bool {
             SERVICE_CREDENTIAL_READ,
             TENANT_META_READ,
             CATALOG_READ,
+            DMIND_EVAL_READ,
         ],
         // Research users have no direct-care access by design.
         RESEARCH => &[],
@@ -998,6 +1009,28 @@ mod tests {
             actions::PATIENT_SELF_SERVICE
         ));
         assert!(!purpose_allows(Purpose::Treatment, actions::CATALOG_MANAGE));
+    }
+
+    #[test]
+    fn dmind_evaluation_is_admin_managed_and_auditor_readable() {
+        for role in roles::ALL {
+            let read = *role == roles::CLINICAL_ADMIN || *role == roles::SECURITY_AUDITOR;
+            let manage = *role == roles::CLINICAL_ADMIN;
+            assert_eq!(role_allows(role, actions::DMIND_EVAL_READ), read, "{role}");
+            assert_eq!(
+                role_allows(role, actions::DMIND_EVAL_MANAGE),
+                manage,
+                "{role}"
+            );
+        }
+        assert!(!purpose_allows(
+            Purpose::Treatment,
+            actions::DMIND_EVAL_READ
+        ));
+        assert!(!purpose_allows(
+            Purpose::Emergency,
+            actions::DMIND_EVAL_MANAGE
+        ));
     }
 
     #[test]
