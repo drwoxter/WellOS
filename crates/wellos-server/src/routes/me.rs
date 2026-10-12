@@ -2692,11 +2692,14 @@ pub async fn care(
     let mut conn = state.pool.acquire().await?;
     let (g, allowed) = scope(&state, &ctx, &mut conn, "care", q.patient_id).await?;
     allowed.record(&mut conn, &ctx, &state.cell).await?;
+    // The allow above was evaluated for the grant's facility (the patient's
+    // registered facility); the view exposes nothing beyond that scope.
+    let grant_facilities = [g.patient_facility_id];
     let episodes = crate::care_ops::list_episodes(
         &mut conn,
         g.tenant_id,
         crate::care_ops::EpisodeFilter {
-            facility_ids: None,
+            facility_ids: Some(&grant_facilities),
             patient_id: Some(g.patient_id),
             statuses: &[],
             open_only: true,

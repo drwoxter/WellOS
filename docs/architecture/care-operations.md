@@ -111,7 +111,9 @@ evaluator must show zero safety failures.
   confirm/transfer/release, tasks/escalations, theatre sessions/cases,
   workforce shifts/absences/coverage, forecasts, artifact review, jobs tick)
   and `/api/v1/me/care` (patient active-care summary limited to released,
-  patient-visible items). Permissions: `care_ops.read`, `manage_flow`,
+  patient-visible items, episodes of the grant's facility — the patient's
+  registered facility, against which the self-service allow is evaluated —
+  and notifications actually delivered). Permissions: `care_ops.read`, `manage_flow`,
   `manage_theatre`, `manage_workforce`, `review_ai`, `audit`; roles
   `operations_manager`, `bed_coordinator`, `theatre_coordinator`,
   `workforce_coordinator`.

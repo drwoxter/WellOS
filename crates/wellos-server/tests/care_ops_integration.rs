@@ -1909,3 +1909,65 @@ async fn patient_care_view_hides_undelivered_notifications() {
             .unwrap();
     }
 }
+
+/// Review regression: a self-service grant is authorised within the
+/// facilities the caller's assignments cover; an episode of the same patient
+/// at another facility of the tenant is not exposed by `/me/care`.
+#[tokio::test]
+async fn patient_care_view_is_limited_to_the_grant_facility_scope() {
+    let state = test_state().await;
+    let fx = fixtures(&state).await;
+    let (s, me) = call(&state, "GET", "/api/v1/me/care", PATIENT, None).await;
+    assert_eq!(s, StatusCode::OK, "{me}");
+    let pid: Uuid = me["patient_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{me}"))
+        .parse()
+        .unwrap();
+    let (other_facility,): (Uuid,) = sqlx::query_as(
+        "SELECT id FROM facilities WHERE tenant_id = $1 AND id <> $2 ORDER BY name LIMIT 1",
+    )
+    .bind(fx.tenant)
+    .bind(fx.facility)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    let (creator,): (Uuid,) =
+        sqlx::query_as("SELECT id FROM users WHERE tenant_id = $1 AND username = 'ops.lopez'")
+            .bind(fx.tenant)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let foreign = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO care_episodes (id, tenant_id, facility_id, patient_id, episode_type_code, status,
+                                    responsible_service_code, started_at, priority, created_by)
+         VALUES ($1,$2,$3,$4,'inpatient','active','internal_medicine',now(),'routine',$5)",
+    )
+    .bind(foreign)
+    .bind(fx.tenant)
+    .bind(other_facility)
+    .bind(pid)
+    .bind(creator)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let (s, v) = call(&state, "GET", "/api/v1/me/care", PATIENT, None).await;
+    sqlx::query("DELETE FROM care_episodes WHERE id = $1")
+        .bind(foreign)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let episodes = v["episodes"].as_array().unwrap();
+    assert!(
+        episodes.iter().all(|e| uuid(&e["episode_id"]) != foreign),
+        "episode at another facility must not be exposed: {v}"
+    );
+    assert!(
+        episodes
+            .iter()
+            .all(|e| uuid(&e["facility_id"]) == fx.facility),
+        "every exposed episode is within the grant facility scope: {v}"
+    );
+}
