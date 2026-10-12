@@ -18,6 +18,61 @@ pub const SUPPORTED_RESOURCES: &[&str] = &[
     "DiagnosticReport",
     "DocumentReference",
     "ImagingStudy",
+    "EpisodeOfCare",
+    "Encounter",
+    "Location",
+    "Task",
+];
+
+pub const EPISODE_OF_CARE_STATUS: &[&str] = &[
+    "planned",
+    "waitlist",
+    "active",
+    "onhold",
+    "finished",
+    "cancelled",
+    "entered-in-error",
+];
+
+pub const ENCOUNTER_STATUS: &[&str] = &[
+    "planned",
+    "arrived",
+    "triaged",
+    "in-progress",
+    "onleave",
+    "finished",
+    "cancelled",
+    "entered-in-error",
+    "unknown",
+];
+
+pub const LOCATION_STATUS: &[&str] = &["active", "suspended", "inactive"];
+
+pub const TASK_STATUS: &[&str] = &[
+    "draft",
+    "requested",
+    "received",
+    "accepted",
+    "rejected",
+    "ready",
+    "cancelled",
+    "in-progress",
+    "on-hold",
+    "failed",
+    "completed",
+    "entered-in-error",
+];
+
+pub const TASK_INTENT: &[&str] = &[
+    "unknown",
+    "proposal",
+    "plan",
+    "order",
+    "original-order",
+    "reflex-order",
+    "filler-order",
+    "instance-order",
+    "option",
 ];
 
 pub const SERVICE_REQUEST_STATUS: &[&str] = &[
@@ -242,6 +297,25 @@ pub fn dicom_uid_is_valid(uid: &str) -> bool {
 ///
 /// `require_id` is set for resources read from the facade (they must carry
 /// the server-assigned logical id); inbound resources may omit it.
+fn codeable_concept_is_valid(v: &Value) -> bool {
+    v.get("coding")
+        .and_then(Value::as_array)
+        .is_some_and(|codings| {
+            !codings.is_empty()
+                && codings.iter().all(|c| {
+                    c.get("system")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                        && c.get("code")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.is_empty())
+                })
+        })
+        || v.get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|t| !t.is_empty())
+}
+
 pub fn validate(resource: &Value, require_id: bool) -> Result<(), Vec<Issue>> {
     let Some(ty) = resource.get("resourceType").and_then(Value::as_str) else {
         return Err(vec![Issue {
@@ -493,6 +567,69 @@ pub fn validate(resource: &Value, require_id: bool) -> Result<(), Vec<Issue>> {
             }
             c.optional_datetime(resource, "started");
         }
+        "EpisodeOfCare" => {
+            c.require_code(resource, "status", EPISODE_OF_CARE_STATUS);
+            c.require_reference(resource, "patient", Some("Patient"));
+            for (i, t) in c.require_array(resource, "type", 1).iter().enumerate() {
+                if !codeable_concept_is_valid(t) {
+                    c.fail(
+                        &format!("type/{i}"),
+                        "requires a coding with system and code",
+                    );
+                }
+            }
+            c.optional_datetime(resource, "period/start");
+            c.optional_datetime(resource, "period/end");
+        }
+        "Encounter" => {
+            c.require_code(resource, "status", ENCOUNTER_STATUS);
+            c.require_string(resource, "class/system");
+            c.require_string(resource, "class/code");
+            c.require_reference(resource, "subject", Some("Patient"));
+            for (i, e) in c
+                .require_array(resource, "episodeOfCare", 0)
+                .iter()
+                .enumerate()
+            {
+                if !e
+                    .get("reference")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| reference_is_valid(s, Some("EpisodeOfCare")))
+                {
+                    c.fail(
+                        &format!("episodeOfCare/{i}"),
+                        "must reference an EpisodeOfCare",
+                    );
+                }
+            }
+            c.optional_datetime(resource, "period/start");
+            c.optional_datetime(resource, "period/end");
+        }
+        "Location" => {
+            c.require_code(resource, "status", LOCATION_STATUS);
+            c.require_string(resource, "name");
+            c.require_codeable_concept(resource, "physicalType");
+            if resource.get("partOf").is_some() {
+                c.require_reference(resource, "partOf", Some("Location"));
+            }
+        }
+        "Task" => {
+            c.require_code(resource, "status", TASK_STATUS);
+            c.require_code(resource, "intent", TASK_INTENT);
+            c.require_codeable_concept(resource, "code");
+            c.require_reference(resource, "for", Some("Patient"));
+            for (i, b) in c.require_array(resource, "basedOn", 0).iter().enumerate() {
+                if !b
+                    .get("reference")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| reference_is_valid(s, Some("EpisodeOfCare")))
+                {
+                    c.fail(&format!("basedOn/{i}"), "must reference an EpisodeOfCare");
+                }
+            }
+            c.optional_datetime(resource, "authoredOn");
+            c.optional_datetime(resource, "restriction/period/end");
+        }
         _ => unreachable!("resource type checked against SUPPORTED_RESOURCES"),
     }
     if c.issues.is_empty() {
@@ -539,6 +676,81 @@ mod tests {
         assert!(paths.contains(&"ServiceRequest.status"));
         assert!(paths.contains(&"ServiceRequest.code/coding/0/system"));
         assert!(paths.contains(&"ServiceRequest.subject/reference"));
+    }
+
+    #[test]
+    fn care_operations_subset_validates_episode_encounter_location_task() {
+        let ep = json!({
+            "resourceType": "EpisodeOfCare", "id": "e1", "status": "active",
+            "type": [{ "coding": [{ "system": "urn:wellos:episode-type", "code": "inpatient" }] }],
+            "patient": { "reference": "Patient/p1" },
+            "period": { "start": "2026-10-04T10:00:00Z" }
+        });
+        assert!(validate(&ep, true).is_ok());
+        let bad = json!({
+            "resourceType": "EpisodeOfCare", "id": "e1", "status": "discharge_ready",
+            "type": [{ "coding": [{ "code": "inpatient" }] }],
+            "patient": { "reference": "Location/l1" }
+        });
+        let paths: Vec<String> = validate(&bad, true)
+            .unwrap_err()
+            .into_iter()
+            .map(|i| i.path)
+            .collect();
+        assert!(paths.contains(&"EpisodeOfCare.status".to_string()));
+        assert!(paths.contains(&"EpisodeOfCare.type/0".to_string()));
+        assert!(paths.contains(&"EpisodeOfCare.patient/reference".to_string()));
+
+        let enc = json!({
+            "resourceType": "Encounter", "id": "c1", "status": "in-progress",
+            "class": { "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "IMP" },
+            "subject": { "reference": "Patient/p1" },
+            "episodeOfCare": [{ "reference": "EpisodeOfCare/e1" }]
+        });
+        assert!(validate(&enc, true).is_ok());
+        let enc_bad = json!({
+            "resourceType": "Encounter", "id": "c1", "status": "in_progress",
+            "class": { "code": "IMP" }, "subject": { "reference": "Patient/p1" },
+            "episodeOfCare": [{ "reference": "Task/t1" }]
+        });
+        let paths: Vec<String> = validate(&enc_bad, true)
+            .unwrap_err()
+            .into_iter()
+            .map(|i| i.path)
+            .collect();
+        assert!(paths.contains(&"Encounter.status".to_string()));
+        assert!(paths.contains(&"Encounter.class/system".to_string()));
+        assert!(paths.contains(&"Encounter.episodeOfCare/0".to_string()));
+
+        let loc = json!({
+            "resourceType": "Location", "id": "l1", "status": "active", "name": "MED-3 Bed 1",
+            "physicalType": { "coding": [{ "system": "urn:wellos:location-level", "code": "position" }] },
+            "partOf": { "reference": "Location/l0" }
+        });
+        assert!(validate(&loc, true).is_ok());
+        assert!(validate(
+            &json!({ "resourceType": "Location", "id": "l1", "status": "available", "name": "x",
+                     "physicalType": { "coding": [{ "system": "s", "code": "c" }] },
+                     "partOf": { "reference": "Patient/p1" } }),
+            true
+        )
+        .is_err());
+
+        let task = json!({
+            "resourceType": "Task", "id": "t1", "status": "requested", "intent": "order",
+            "code": { "coding": [{ "system": "urn:wellos:task-kind", "code": "discharge_preparation" }] },
+            "for": { "reference": "Patient/p1" },
+            "basedOn": [{ "reference": "EpisodeOfCare/e1" }],
+            "restriction": { "period": { "end": "2026-10-05T10:00:00Z" } }
+        });
+        assert!(validate(&task, true).is_ok());
+        assert!(validate(
+            &json!({ "resourceType": "Task", "id": "t1", "status": "open", "intent": "order",
+                     "code": { "coding": [{ "system": "s", "code": "c" }] },
+                     "for": { "reference": "Patient/p1" } }),
+            true
+        )
+        .is_err());
     }
 
     #[test]

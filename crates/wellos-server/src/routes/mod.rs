@@ -257,6 +257,10 @@ pub fn router(state: AppState) -> Router {
             get(fhir::document_reference),
         )
         .route("/fhir/r4/ImagingStudy/:id", get(fhir::imaging_study))
+        .route("/fhir/r4/EpisodeOfCare/:id", get(fhir::episode_of_care))
+        .route("/fhir/r4/Encounter/:id", get(fhir::encounter))
+        .route("/fhir/r4/Location/:id", get(fhir::location))
+        .route("/fhir/r4/Task/:id", get(fhir::task))
         .layer(cors_layer());
     // Defense-in-depth response headers for the API surface. The API is
     // JSON-only, so a restrictive CSP with frame protection is safe

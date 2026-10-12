@@ -28,9 +28,11 @@ Consent & Rights, Evidence, Brand Studio, Context Fabric, Agent Runtime,
 Multimodal Hub, Workflow Studio, Safety & Evaluation Lab, Command Center,
 Learning Loop, Exchange.
 
-Today only a thin slice exists: dMind Core (rules + loop), Model Gateway (fake
-provider), Guard (policy/audit), Consent & Rights (purpose-based consent), and
-a minimal Brand Studio (tenant theme tokens).
+Today a bounded slice exists: dMind Core (rules + loop), Model Gateway
+(fake and OpenAI-compatible providers), Guard (policy/audit), Consent &
+Rights (purpose-based consent), Safety & Evaluation Lab v1 (synthetic,
+budgeted), Command Center v1 (deterministic care operations with advisory
+dMind), and a minimal Brand Studio (tenant theme tokens).
 
 ## First proof: Closed-Loop Diagnostic Result
 

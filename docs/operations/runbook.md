@@ -206,6 +206,34 @@ Seed is idempotent-ish for demos but intended for empty databases; to reset:
   components once (idempotent, no deletions); the rollback statements are
   documented at the end of the migration file.
 
+### Care Operations & Command Center
+
+- **Hierarchy is data**: an operations manager creates
+  `facility → department → unit → room → position` through
+  `POST /api/v1/operations/locations` (bilingual names, catalog `type_code`,
+  capability codes, `cleaning_minutes`). Upgrading to `0019` creates no
+  positions; a facility without positions reports "no feasible position"
+  until configured. Catalog or profession membership grants no permission —
+  assign `operations_manager`, `bed_coordinator`, `theatre_coordinator`,
+  `workforce_coordinator` roles.
+- **Positions stuck in `cleaning`**: the jobs tick
+  (`POST /api/v1/operations/jobs/tick`, also run by the worker) returns
+  positions to `available` after `cleaning_minutes`; a human can set the
+  state earlier through `POST /operations/locations/{id}/state` with a reason.
+  Monitor `SELECT facility_id, count(*) FROM operational_locations WHERE position_state = 'cleaning' AND updated_at < now() - interval '4 hours' GROUP BY 1;`.
+- **Open escalations**: `SELECT facility_id, kind, count(*) FROM care_escalations WHERE status = 'open' GROUP BY 1, 2;`
+  — escalations are raised by the tick and only closed by a human with a
+  reason. If the worker is down, holds do not expire and escalations are
+  not raised (alert on worker lag).
+- **Episode cannot be completed**: `409 placement_live` means the placement
+  must be released first (release → cleaning → available); this is by design.
+- **dMind care operations**: all six operations are advisory, bound to a
+  facts hash and reviewed through `POST /operations/artifacts/{id}/review`;
+  they are disabled by the same capability flags as the rest of dMind and
+  the workflows are identical with AI off.
+- **Forecasts**: `insufficient_history` is expected for the first 14 days of
+  a facility; do not treat it as an error.
+
 ## Troubleshooting
 
 | Symptom | Check |

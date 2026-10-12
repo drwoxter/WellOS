@@ -1179,3 +1179,178 @@ async fn dmind_care_ops_artifacts_are_advisory_and_human_reviewed() {
         "{s}"
     );
 }
+
+#[tokio::test]
+async fn fhir_care_operations_subset_is_authorized_and_linked() {
+    let state = test_state().await;
+    let fx = fixtures(&state).await;
+    let ep = episode(&state, &fx, "inpatient").await;
+    let episode_id = uuid(&ep["id"]);
+    let (nurse,): (Uuid,) = sqlx::query_as("SELECT id FROM users WHERE username = 'nurse.kim'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+
+    // A clinical encounter linked to the episode.
+    let encounter_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO encounters (id, tenant_id, facility_id, patient_id, practitioner_id, status)
+         VALUES ($1, $2, $3, $4, $5, 'in_progress')",
+    )
+    .bind(encounter_id)
+    .bind(fx.tenant)
+    .bind(fx.facility)
+    .bind(fx.patient)
+    .bind(nurse)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/episodes/{episode_id}/links"),
+        BEDS,
+        Some(json!({ "link_type": "encounter", "link_id": encounter_id })),
+    )
+    .await;
+    assert!(s == StatusCode::CREATED || s == StatusCode::OK, "{s} {v}");
+
+    // A coordination task accountable to a named professional.
+    let (s, task) = call(
+        &state,
+        "POST",
+        "/api/v1/operations/tasks",
+        BEDS,
+        Some(json!({
+            "episode_id": episode_id,
+            "title_en": "Arrange transport home",
+            "title_es": "Organizar transporte a domicilio",
+            "kind": "transport",
+            "accountable_user_id": nurse,
+            "due_at": (Utc::now() + Duration::hours(6)).to_rfc3339(),
+            "barrier_category_code": "transport"
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{task}");
+    let task_id = uuid(&task["id"]);
+
+    let (bed,): (Uuid,) = sqlx::query_as(
+        "SELECT id FROM operational_locations WHERE tenant_id = $1 AND level = 'position' AND facility_id = $2 ORDER BY code LIMIT 1",
+    )
+    .bind(fx.tenant)
+    .bind(fx.facility)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    // EpisodeOfCare: operational status mapped, patient referenced, encounter
+    // and task carried as extensions, readiness is operational only.
+    let (s, eoc) = call(
+        &state,
+        "GET",
+        &format!("/fhir/r4/EpisodeOfCare/{episode_id}"),
+        OPS,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{eoc}");
+    assert_eq!(eoc["resourceType"], "EpisodeOfCare");
+    assert_eq!(eoc["status"], "active");
+    assert_eq!(
+        eoc["patient"]["reference"],
+        format!("Patient/{}", fx.patient)
+    );
+    assert_eq!(eoc["type"][0]["coding"][0]["code"], "inpatient");
+    let ext = eoc["extension"].as_array().unwrap();
+    assert!(ext.iter().any(|e| {
+        e["url"] == "urn:wellos:linked-encounter"
+            && e["valueReference"]["reference"] == format!("Encounter/{encounter_id}")
+    }));
+    assert!(ext.iter().any(|e| {
+        e["url"] == "urn:wellos:coordination-task"
+            && e["valueReference"]["reference"] == format!("Task/{task_id}")
+    }));
+    assert!(ext.iter().any(|e| {
+        e["url"] == "urn:wellos:operational-discharge-readiness" && e["valueCode"] == "active"
+    }));
+
+    // Encounter links back to the episode.
+    let (s, enc) = call(
+        &state,
+        "GET",
+        &format!("/fhir/r4/Encounter/{encounter_id}"),
+        OPS,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{enc}");
+    assert_eq!(enc["status"], "in-progress");
+    assert_eq!(
+        enc["episodeOfCare"][0]["reference"],
+        format!("EpisodeOfCare/{episode_id}")
+    );
+
+    // Task: FHIR status/intent, patient, episode, owner, due time.
+    let (s, t) = call(
+        &state,
+        "GET",
+        &format!("/fhir/r4/Task/{task_id}"),
+        OPS,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{t}");
+    assert_eq!(t["status"], "requested");
+    assert_eq!(t["intent"], "order");
+    assert_eq!(t["code"]["coding"][0]["code"], "transport");
+    assert_eq!(t["for"]["reference"], format!("Patient/{}", fx.patient));
+    assert_eq!(
+        t["basedOn"][0]["reference"],
+        format!("EpisodeOfCare/{episode_id}")
+    );
+    assert_eq!(t["owner"]["reference"], format!("Practitioner/{nurse}"));
+    assert!(t["restriction"]["period"]["end"].is_string());
+
+    // Location: hierarchy level, parent and v2-0116 bed status.
+    let (s, loc) = call(
+        &state,
+        "GET",
+        &format!("/fhir/r4/Location/{bed}"),
+        OPS,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{loc}");
+    assert_eq!(loc["physicalType"]["coding"][0]["code"], "position");
+    assert!(loc["partOf"]["reference"]
+        .as_str()
+        .unwrap()
+        .starts_with("Location/"));
+    assert_eq!(
+        loc["operationalStatus"]["system"],
+        "http://terminology.hl7.org/CodeSystem/v2-0116"
+    );
+    assert!(loc["operationalStatus"]["code"].is_string());
+
+    // Patients/representatives and clinicians without care_ops.read are
+    // refused; unknown ids are not found.
+    for path in [
+        format!("/fhir/r4/EpisodeOfCare/{episode_id}"),
+        format!("/fhir/r4/Encounter/{encounter_id}"),
+        format!("/fhir/r4/Task/{task_id}"),
+        format!("/fhir/r4/Location/{bed}"),
+    ] {
+        let (s, _) = call(&state, "GET", &path, PATIENT, None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{path} for a representative");
+    }
+    let (s, _) = call(
+        &state,
+        "GET",
+        &format!("/fhir/r4/EpisodeOfCare/{}", Uuid::now_v7()),
+        OPS,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
