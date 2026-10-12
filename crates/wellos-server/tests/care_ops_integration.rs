@@ -117,14 +117,20 @@ async fn fixtures(state: &AppState) -> Fx {
             .fetch_one(&state.pool)
             .await
             .unwrap();
-    let (patient,): (Uuid,) = sqlx::query_as(
-        "SELECT p.id FROM patients p WHERE p.tenant_id = $1 AND NOT EXISTS (
-            SELECT 1 FROM care_episodes e WHERE e.patient_id = p.id
-              AND e.status NOT IN ('completed', 'cancelled', 'error'))
-         ORDER BY p.created_at LIMIT 1",
+    // Each test gets its own synthetic patient so concurrently running suites
+    // never compete for the single open episode a patient may hold per type.
+    let patient = Uuid::now_v7();
+    let tag = patient.simple().to_string();
+    sqlx::query(
+        "INSERT INTO patients (id, tenant_id, facility_id, family_name, given_name, birth_date, sex, identifier)
+         VALUES ($1,$2,$3,'Testpatient',$4,'1979-02-03','other',$5)",
     )
+    .bind(patient)
     .bind(tenant)
-    .fetch_one(&state.pool)
+    .bind(facility)
+    .bind(format!("Synthetic {}", &tag[tag.len() - 6..]))
+    .bind(format!("SYN-T-{}", &tag[tag.len() - 10..]))
+    .execute(&state.pool)
     .await
     .unwrap();
     Fx {
@@ -857,4 +863,319 @@ async fn patient_care_view_exposes_only_released_own_data() {
     }
     let (s, _) = call(&state, "GET", "/api/v1/me/care", NURSE, None).await;
     assert_ne!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn dmind_care_ops_artifacts_are_advisory_and_human_reviewed() {
+    let state = test_state().await;
+    let fx = fixtures(&state).await;
+    let full = Uuid::now_v7().simple().to_string();
+    let tag = full[full.len() - 8..].to_string();
+
+    // Care-flow brief: a persisted snapshot + an artifact awaiting review.
+    let (s, v) = call(
+        &state,
+        "POST",
+        "/api/v1/operations/snapshot/brief",
+        OPS,
+        Some(json!({ "facility_id": fx.facility, "language": "es" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["brief"]["mode"], "dmind", "{v}");
+    assert_eq!(v["brief"]["status"], "awaiting_review");
+    let brief_id = uuid(&v["brief"]["artifact_id"]);
+    let snapshot_id = uuid(&v["snapshot_id"]);
+    let out = &v["brief"]["output"];
+    assert!(out["summary"].as_str().is_some_and(|h| !h.is_empty()));
+    assert!(out["pressures"].is_array(), "{out}");
+    assert!(out["cited_sources"].as_array().unwrap().iter().all(|c| {
+        let c = c.as_str().unwrap();
+        c == "snapshot:summary" || c.starts_with("area:") || c.contains(':')
+    }));
+    let row: (Option<Uuid>, Option<Uuid>, String) = sqlx::query_as(
+        "SELECT patient_id, care_operations_snapshot_id, status FROM ai_artifacts WHERE id = $1",
+    )
+    .bind(brief_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (None, Some(snapshot_id), "awaiting_review".into()));
+
+    // Other-tenant facility: denied as not-found (anti-probing).
+    let (s, _) = call(
+        &state,
+        "POST",
+        "/api/v1/operations/snapshot/brief",
+        OPS,
+        Some(json!({ "facility_id": fx.other_tenant_facility })),
+    )
+    .await;
+    assert!(
+        s == StatusCode::FORBIDDEN || s == StatusCode::NOT_FOUND,
+        "{s}"
+    );
+
+    // Review requires care_ops.review_ai; registration staff cannot.
+    let (s, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/artifacts/{brief_id}/review"),
+        REG,
+        Some(json!({ "decision": "approved" })),
+    )
+    .await;
+    assert!(
+        s == StatusCode::FORBIDDEN || s == StatusCode::NOT_FOUND,
+        "{s}"
+    );
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/artifacts/{brief_id}/review"),
+        OPS,
+        Some(json!({ "decision": "approved", "note": "ok" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "approved");
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/artifacts/{brief_id}/review"),
+        OPS,
+        Some(json!({ "decision": "rejected" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let (reviewed,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM outbox_events WHERE event_type = 'ai.artifact.reviewed'
+           AND resource_refs->>'artifact_id' = $1",
+    )
+    .bind(brief_id.to_string())
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(reviewed, 1);
+
+    // Placement ranking over deterministic candidates only.
+    let dept = create_loc(
+        &state,
+        loc(
+            fx.facility,
+            None,
+            "department",
+            "department",
+            &format!("AD-{tag}"),
+            json!({}),
+        ),
+    )
+    .await;
+    let unit = create_loc(
+        &state,
+        loc(
+            fx.facility,
+            Some(uuid(&dept["id"])),
+            "unit",
+            "ward",
+            &format!("AU-{tag}"),
+            json!({"capacity": 2}),
+        ),
+    )
+    .await;
+    let room = create_loc(
+        &state,
+        loc(
+            fx.facility,
+            Some(uuid(&unit["id"])),
+            "room",
+            "room",
+            &format!("AR-{tag}"),
+            json!({"room_policy": "mixed", "capacity": 2}),
+        ),
+    )
+    .await;
+    for i in 1..=2 {
+        create_loc(
+            &state,
+            loc(
+                fx.facility,
+                Some(uuid(&room["id"])),
+                "position",
+                "bed",
+                &format!("AB{i}-{tag}"),
+                json!({}),
+            ),
+        )
+        .await;
+    }
+    let ep = episode(&state, &fx, "inpatient").await;
+    let ep_id = uuid(&ep["id"]);
+    // A second open episode of the same type is a typed conflict, not a 500.
+    let (s, v) = call(
+        &state,
+        "POST",
+        "/api/v1/operations/episodes",
+        BEDS,
+        Some(json!({
+            "facility_id": fx.facility,
+            "patient_id": fx.patient,
+            "episode_type_code": "inpatient",
+            "activate": true
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "episode_already_open");
+    let req = placement_request(&state, ep_id, requirements(&[])).await;
+    let req_id = uuid(&req["id"]);
+    let c = candidates(&state, req_id).await;
+    let feasible = c["match"]["feasible"].as_array().map_or(0, Vec::len);
+    assert!(feasible >= 2, "{c}");
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/placement-requests/{req_id}/ranking"),
+        BEDS,
+        Some(json!({ "language": "en" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["ranking"]["mode"], "dmind", "{v}");
+    let ranked = v["ranking"]["output"]["ranked"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(ranked.len(), feasible.min(20), "{v}");
+    let (bound,): (Option<Uuid>,) =
+        sqlx::query_as("SELECT ranking_artifact_id FROM placement_requests WHERE id = $1")
+            .bind(req_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(bound, Some(uuid(&v["ranking"]["artifact_id"])));
+    // The request itself is untouched: no hold, no placement, status unchanged.
+    let (_, after) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/operations/placement-requests/{req_id}"),
+        BEDS,
+        None,
+    )
+    .await;
+    assert_eq!(after["request"]["status"], "candidates_ready", "{after}");
+
+    // Discharge coordination is operational, never a clinical clearance.
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/episodes/{ep_id}/discharge-coordination"),
+        BEDS,
+        Some(json!({ "language": "es" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["coordination"]["mode"], "dmind", "{v}");
+    assert_eq!(v["coordination"]["output"]["operational_only"], true, "{v}");
+    let text = v["coordination"]["output"].to_string().to_lowercase();
+    assert!(!text.contains("alta médica autorizada") && !text.contains("medically cleared"));
+
+    // Handoff draft: stored as a dMind draft, becomes a handoff only when accepted.
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/episodes/{ep_id}/handoffs/draft"),
+        BEDS,
+        Some(json!({ "shift_label": "Night", "language": "es" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(v["handoff"]["status"], "draft", "{v}");
+    assert_eq!(v["handoff"]["origin"], "dmind_draft");
+    assert_eq!(v["handoff"]["artifact_id"], v["draft"]["artifact_id"]);
+    let handoff_id = uuid(&v["handoff"]["id"]);
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/handoffs/{handoff_id}/decision"),
+        NURSE,
+        Some(json!({ "expected_version": v["handoff"]["version"], "decision": "accept" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "accepted");
+    let (artifact_status,): (String,) =
+        sqlx::query_as("SELECT status FROM ai_artifacts WHERE id = $1")
+            .bind(uuid(&v["artifact_id"]))
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(artifact_status, "approved");
+    let (s, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/episodes/{ep_id}/handoffs/draft"),
+        BEDS,
+        Some(json!({ "language": "es" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // Forecast explanation on an insufficient-history forecast keeps the
+    // uncertainty explicit instead of inventing precision.
+    let (s, f) = call(
+        &state,
+        "POST",
+        "/api/v1/operations/forecasts",
+        OPS,
+        Some(json!({ "facility_id": fx.facility, "horizon": "24h" })),
+    )
+    .await;
+    assert!(s == StatusCode::OK || s == StatusCode::CREATED, "{f}");
+    let fid = uuid(&f["id"]);
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/forecasts/{fid}/explanation"),
+        OPS,
+        Some(json!({ "language": "en" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["explanation"]["mode"], "dmind", "{v}");
+    if f["status"] == "insufficient_history" {
+        assert!(
+            !v["explanation"]["output"]["missing_information"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+                || v["explanation"]["output"]["summary"]
+                    .as_str()
+                    .unwrap()
+                    .to_lowercase()
+                    .contains("history"),
+            "{v}"
+        );
+    }
+    let (bound,): (Option<Uuid>,) = sqlx::query_as(
+        "SELECT explanation_artifact_id FROM care_operations_forecasts WHERE id = $1",
+    )
+    .bind(fid)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(bound, Some(uuid(&v["explanation"]["artifact_id"])));
+
+    // Patient/representative cannot request or review any of these.
+    let (s, _) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/placement-requests/{req_id}/ranking"),
+        PATIENT,
+        Some(json!({})),
+    )
+    .await;
+    assert!(
+        s == StatusCode::FORBIDDEN || s == StatusCode::NOT_FOUND,
+        "{s}"
+    );
 }

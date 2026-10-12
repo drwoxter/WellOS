@@ -6,6 +6,7 @@
 //! transaction, bumps the row `version`, appends to the append-only history
 //! tables and leaves auditing/eventing to the route layer.
 
+pub mod ai;
 pub mod flow;
 pub mod forecast;
 pub mod theatre;
@@ -884,7 +885,16 @@ pub async fn create_episode(
     .bind(json!({"created_by": ctx.user_id, "correlation_id": ctx.correlation_id}))
     .bind(ctx.user_id)
     .execute(&mut *conn)
-    .await?;
+    .await
+    .map_err(|e| match e.as_database_error() {
+        Some(db) if db.constraint() == Some("care_episodes_one_open_per_type") => {
+            ApiError::conflict(
+                "episode_already_open",
+                "the patient already has an open episode of this type",
+            )
+        }
+        _ => ApiError::from(e),
+    })?;
     record_episode_history(
         conn,
         ctx,
@@ -3063,17 +3073,23 @@ pub async fn decide_handoff(
     .await?;
     if let Some(a) = h.artifact_id {
         let st = if status == "accepted" {
-            "accepted"
+            "approved"
         } else {
             "rejected"
         };
-        sqlx::query("UPDATE ai_artifacts SET status = $2, reviewed_by = $3, reviewed_at = now() WHERE id = $1 AND tenant_id = $4")
-            .bind(a)
-            .bind(st)
-            .bind(ctx.user_id)
-            .bind(ctx.tenant_id)
-            .execute(&mut *conn)
-            .await?;
+        sqlx::query(
+            "UPDATE ai_artifacts
+                SET status = $2, reviewer_id = $3, review_decision = $2, review_note = $5,
+                    reviewed_at = now()
+              WHERE id = $1 AND tenant_id = $4 AND status = 'awaiting_review'",
+        )
+        .bind(a)
+        .bind(st)
+        .bind(ctx.user_id)
+        .bind(ctx.tenant_id)
+        .bind(&input.note)
+        .execute(&mut *conn)
+        .await?;
     }
     let sql = format!("SELECT {HANDOFF_COLS} FROM care_handoffs WHERE id = $1");
     let row = sqlx::query(&sql).bind(id).fetch_one(&mut *conn).await?;

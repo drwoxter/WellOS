@@ -234,7 +234,7 @@ pub fn deterministic_flow_brief(
     req.check()?;
     let es = es(&req.language);
     let mut pressured: Vec<&AreaFacts> = req.areas.iter().filter(|a| a.pressure >= 2).collect();
-    pressured.sort_by(|a, b| b.pressure.cmp(&a.pressure));
+    pressured.sort_by_key(|a| std::cmp::Reverse(a.pressure));
     let summary = if es {
         format!(
             "{}: {} área(s) bajo presión de {} evaluadas a las {}.",

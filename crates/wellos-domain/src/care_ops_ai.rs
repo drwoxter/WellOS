@@ -546,6 +546,7 @@ mod tests {
             cited_sources: refs(&["request:requirements"]),
             confidence: Confidence::Medium,
             limitations: vec![],
+            missing_information: vec![],
         }
     }
 
@@ -600,6 +601,7 @@ mod tests {
             cited_sources: refs(&["episode:status"]),
             confidence: Confidence::Medium,
             limitations: vec!["Operational view only.".into()],
+            missing_information: vec![],
         };
         assert!(base.validate(&refs(&["task:1"]), &allowed).is_ok());
         let mut c = base.clone();
@@ -636,6 +638,7 @@ mod tests {
             cited_sources: refs(&["forecast:summary"]),
             confidence: Confidence::Medium,
             limitations: vec![],
+            missing_information: vec![],
         };
         assert!(e.validate(&[d], &allowed).is_ok());
         e.pressure_points[0].date = NaiveDate::from_ymd_opt(2026, 3, 11).unwrap();
@@ -659,6 +662,7 @@ mod tests {
             cited_sources: refs(&["episode:status"]),
             confidence: Confidence::Low,
             limitations: vec![],
+            missing_information: vec![],
         };
         assert!(draft.validate(&allowed).is_err());
     }

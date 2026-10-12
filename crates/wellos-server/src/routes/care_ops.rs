@@ -19,6 +19,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
+use wellos_domain::ai::ReviewDecision;
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
@@ -118,6 +119,28 @@ pub fn routes() -> Router<AppState> {
             get(list_forecasts).post(create_forecast),
         )
         .route("/operations/forecasts/:id", get(get_forecast))
+        .route(
+            "/operations/forecasts/:id/explanation",
+            post(forecast_explanation),
+        )
+        .route("/operations/snapshot/brief", post(flow_brief))
+        .route(
+            "/operations/placement-requests/:id/ranking",
+            post(placement_ranking),
+        )
+        .route(
+            "/operations/episodes/:id/discharge-coordination",
+            post(discharge_coordination),
+        )
+        .route(
+            "/operations/episodes/:id/handoffs/draft",
+            post(handoff_draft),
+        )
+        .route(
+            "/operations/theatre/sessions/:id/explanation",
+            post(theatre_explanation),
+        )
+        .route("/operations/artifacts/:id/review", post(review_artifact))
         .route("/operations/jobs/tick", post(tick))
 }
 
@@ -1671,4 +1694,264 @@ async fn tick(State(state): State<AppState>, ctx: AuthContext) -> Result<Json<Va
     Ok(Json(
         json!({"expired_holds": expired, "fired_escalations": fired.iter().map(|e| e.id).collect::<Vec<_>>()}),
     ))
+}
+
+// ---------------------------------------------------------------- dMind (advisory)
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AiBody {
+    pub facility_id: Option<Uuid>,
+    pub language: Option<String>,
+    pub shift_label: Option<String>,
+}
+
+async fn flow_brief(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    body: OptionalJson<AiBody>,
+) -> Result<Json<Value>, ApiError> {
+    let body = body.0.unwrap_or_default();
+    let facility_id = body
+        .facility_id
+        .ok_or_else(|| ApiError::bad_request("facility_required", "facility_id is required"))?;
+    let allowed = allow(
+        &state,
+        &ctx,
+        actions::CARE_OPS_READ,
+        "care_ops_snapshot",
+        Some(facility_id),
+        None,
+    )
+    .await?;
+    visible(&ctx, actions::CARE_OPS_READ, Some(facility_id))?;
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Api).await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let (snapshot_id, snapshot, outcome) =
+        ops::ai::flow_brief(&state, &ctx, &mut tx, facility_id, body.language.as_deref()).await?;
+    tx.commit().await?;
+    Ok(Json(json!({
+        "snapshot_id": snapshot_id,
+        "snapshot": snapshot,
+        "brief": outcome,
+    })))
+}
+
+async fn placement_ranking(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    body: OptionalJson<AiBody>,
+) -> Result<Json<Value>, ApiError> {
+    let body = body.0.unwrap_or_default();
+    let mut tx = state.pool.begin().await?;
+    let req = ops::load_request(&mut tx, ctx.tenant_id, id, true).await?;
+    let allowed = allow_existing(
+        &state,
+        &ctx,
+        actions::CARE_OPS_MANAGE_FLOW,
+        "placement_request",
+        req.facility_id,
+        Some(req.patient_id),
+    )
+    .await?;
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Api).await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let outcome =
+        ops::ai::placement_ranking(&state, &ctx, &mut tx, &req, body.language.as_deref()).await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "request_id": id, "ranking": outcome })))
+}
+
+async fn discharge_coordination(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    body: OptionalJson<AiBody>,
+) -> Result<Json<Value>, ApiError> {
+    let body = body.0.unwrap_or_default();
+    let mut tx = state.pool.begin().await?;
+    let ep = ops::load_episode(&mut tx, ctx.tenant_id, id, false).await?;
+    let allowed = allow_existing(
+        &state,
+        &ctx,
+        actions::CARE_OPS_MANAGE_FLOW,
+        "care_episode",
+        ep.facility_id,
+        Some(ep.patient_id),
+    )
+    .await?;
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Api).await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let outcome =
+        ops::ai::discharge_coordination(&state, &ctx, &mut tx, &ep, body.language.as_deref())
+            .await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "episode_id": id, "coordination": outcome })))
+}
+
+async fn theatre_explanation(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    body: OptionalJson<AiBody>,
+) -> Result<Json<Value>, ApiError> {
+    let body = body.0.unwrap_or_default();
+    let facility_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT facility_id FROM theatre_sessions WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(ctx.tenant_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let facility_id = facility_id.ok_or_else(ApiError::not_found)?;
+    let allowed = allow_existing(
+        &state,
+        &ctx,
+        actions::CARE_OPS_MANAGE_THEATRE,
+        "theatre_session",
+        facility_id,
+        None,
+    )
+    .await?;
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Api).await?;
+    let mut tx = state.pool.begin().await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let (_, outcome) =
+        ops::ai::theatre_plan(&state, &ctx, &mut tx, id, body.language.as_deref()).await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "session_id": id, "explanation": outcome })))
+}
+
+async fn forecast_explanation(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    body: OptionalJson<AiBody>,
+) -> Result<Json<Value>, ApiError> {
+    let body = body.0.unwrap_or_default();
+    let mut tx = state.pool.begin().await?;
+    let row = forecast::load_forecast(&mut tx, ctx.tenant_id, id).await?;
+    let allowed = allow_existing(
+        &state,
+        &ctx,
+        actions::CARE_OPS_READ,
+        "care_operations_forecast",
+        row.facility_id,
+        None,
+    )
+    .await?;
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Api).await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let outcome =
+        ops::ai::forecast_explanation(&state, &ctx, &mut tx, &row, body.language.as_deref())
+            .await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "forecast_id": id, "explanation": outcome })))
+}
+
+async fn handoff_draft(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(body): Json<AiBody>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let shift_label = body
+        .shift_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::bad_request("validation_failed", "shift_label is required"))?;
+    let mut tx = state.pool.begin().await?;
+    let ep = ops::load_episode(&mut tx, ctx.tenant_id, id, false).await?;
+    let allowed = allow_existing(
+        &state,
+        &ctx,
+        actions::CARE_OPS_MANAGE_FLOW,
+        "care_episode",
+        ep.facility_id,
+        Some(ep.patient_id),
+    )
+    .await?;
+    ratelimit::enforce_for_principal(&state, &ctx, ratelimit::Family::Api).await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let (outcome, handoff) = ops::ai::handoff_draft(
+        &state,
+        &ctx,
+        &mut tx,
+        &ep,
+        shift_label,
+        body.language.as_deref(),
+    )
+    .await?;
+    tx.commit().await?;
+    let code = if handoff.is_some() {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((
+        code,
+        Json(json!({ "episode_id": id, "draft": outcome, "handoff": handoff })),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactReviewBody {
+    pub decision: String,
+    pub note: Option<String>,
+}
+
+async fn review_artifact(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ArtifactReviewBody>,
+) -> Result<Json<Value>, ApiError> {
+    let decision = match body.decision.as_str() {
+        "approved" | "accepted" => ReviewDecision::Approved,
+        "rejected" => ReviewDecision::Rejected,
+        _ => {
+            return Err(ApiError::bad_request(
+                "validation_failed",
+                "decision must be 'approved' or 'rejected'",
+            ))
+        }
+    };
+    if body.note.as_deref().is_some_and(|n| n.len() > 4000) {
+        return Err(ApiError::bad_request(
+            "validation_failed",
+            "note exceeds 4000 characters",
+        ));
+    }
+    let mut tx = state.pool.begin().await?;
+    let target = ops::ai::load_review_target(&mut tx, ctx.tenant_id, id).await?;
+    let allowed = allow_existing(
+        &state,
+        &ctx,
+        actions::CARE_OPS_REVIEW_AI,
+        "ai_artifact",
+        target.facility_id,
+        target.patient_id,
+    )
+    .await?;
+    allowed.record(&mut tx, &ctx, &state.cell).await?;
+    let next = ops::ai::review(
+        &mut tx,
+        &ctx,
+        &state.cell,
+        id,
+        &target,
+        decision,
+        body.note.as_deref(),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({
+        "artifact_id": id,
+        "artifact_type": target.artifact_type,
+        "status": next.as_str(),
+    })))
 }
