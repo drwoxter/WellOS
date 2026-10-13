@@ -641,11 +641,25 @@ async fn escalation_tick_fires_overdue_boarding() {
 async fn theatre_equipment_conflict_needs_explicit_override() {
     let state = test_state().await;
     let fx = fixtures(&state).await;
+    // Other suites book hundreds of cases at this facility; list the fixture
+    // dental case through its episode so the bounded list stays deterministic.
+    let (dental_episode,): (Uuid,) = sqlx::query_as(
+        "SELECT episode_id FROM perioperative_cases
+         WHERE tenant_id = $1 AND facility_id = $2
+           AND procedure_code = 'dental_extraction_sedation'
+           AND status IN ('requested','ready_for_scheduling')
+         ORDER BY created_at LIMIT 1",
+    )
+    .bind(fx.tenant)
+    .bind(fx.facility)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
     let (s, cases) = call(
         &state,
         "GET",
         &format!(
-            "/api/v1/operations/theatre/cases?facility_id={}",
+            "/api/v1/operations/theatre/cases?facility_id={}&episode_id={dental_episode}",
             fx.facility
         ),
         THEATRE,
