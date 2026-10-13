@@ -2738,7 +2738,8 @@ pub async fn care(
             "SELECT id, status, due_at, patient_text_en, patient_text_es, barrier_category_code
              FROM care_coordination_tasks
              WHERE tenant_id = $1 AND episode_id = $2 AND patient_visible
-               AND status NOT IN ('cancelled') ORDER BY due_at NULLS LAST, created_at LIMIT 20",
+               AND status NOT IN ('completed','cancelled')
+             ORDER BY due_at NULLS LAST, created_at LIMIT 20",
         )
         .bind(g.tenant_id)
         .bind(ep.id)

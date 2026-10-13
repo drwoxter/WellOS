@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import OperationsPage from "@/app/operations/page";
 import FlowPage from "@/app/operations/flow/page";
@@ -592,6 +598,183 @@ describe("/operations/workforce and /operations/theatres", () => {
     expect(r).toHaveTextContent(/not ready/i);
     expect(r).toHaveTextContent("theatre-conflicts.v1");
     expect(r).toHaveTextContent("Anaesthetic review not recorded");
+  });
+});
+
+describe("/operations/theatres scheduling", () => {
+  it("lets a theatre coordinator schedule a case and refreshes readiness", async () => {
+    const c = {
+      id: "tc2",
+      facility_id: "f1",
+      episode_id: null,
+      patient_id: "pd",
+      procedure_code: "appendicectomy",
+      responsible_service_code: "surgery",
+      status: "ready_for_scheduling",
+      priority: "urgent",
+      expected_duration_minutes: 60,
+      required_equipment_codes: [],
+      prerequisites: {},
+      session_id: null,
+      theatre_location_id: null,
+      scheduled_start: null,
+      scheduled_end: null,
+      version: 2,
+    };
+    let scheduled = false;
+    const calls = setup(
+      <TheatresPage />,
+      meta({ can_manage_theatre: true }, ["theatre_coordinator"]),
+      (url, init) => {
+        if (url.startsWith("/api/v1/operations/theatre/cases?"))
+          return {
+            cases: [
+              {
+                case: scheduled ? { ...c, status: "scheduled", version: 3 } : c,
+                readiness: null,
+              },
+            ],
+          };
+        if (url.startsWith("/api/v1/operations/locations?"))
+          return {
+            locations: [
+              {
+                id: "th1",
+                facility_id: "f1",
+                level: "position",
+                type_code: "theatre",
+                code: "OR-1",
+                name_en: "Theatre 1",
+                name_es: "Quirófano 1",
+                operational_status: "open",
+                position_state: "available",
+                active: true,
+                version: 4,
+              },
+              {
+                id: "bed1",
+                facility_id: "f1",
+                level: "position",
+                type_code: "bed",
+                code: "B-1",
+                name_en: "Bed 1",
+                name_es: "Cama 1",
+                operational_status: "open",
+                position_state: "available",
+                active: true,
+                version: 1,
+              },
+            ],
+          };
+        if (url === "/api/v1/operations/theatre/cases/tc2/schedule") {
+          scheduled = true;
+          return {
+            case: {
+              ...c,
+              status: "scheduled",
+              theatre_location_id: "th1",
+              scheduled_start: NOW,
+              version: 3,
+            },
+            readiness: {
+              engine_version: "theatre-conflicts.v1",
+              feasible: true,
+              conflicts: [],
+            },
+          };
+        }
+        if (url === "/api/v1/operations/theatre/cases/tc2")
+          return scheduled
+            ? {
+                case: {
+                  ...c,
+                  status: "scheduled",
+                  theatre_location_id: "th1",
+                  scheduled_start: NOW,
+                  version: 3,
+                },
+                readiness: {
+                  engine_version: "theatre-conflicts.v1",
+                  feasible: true,
+                  conflicts: [],
+                },
+              }
+            : { case: c, readiness: null };
+        return undefined;
+      },
+    );
+    const user = userEvent.setup();
+    await user.click(
+      within(await screen.findByTestId("theatre-cases")).getByRole("button"),
+    );
+    const form = await screen.findByTestId("theatre-schedule");
+    const room = within(form).getByRole("combobox", { name: /theatre/i });
+    expect(within(room).getAllByRole("option")).toHaveLength(2);
+    await user.selectOptions(room, "th1");
+    fireEvent.change(within(form).getByLabelText(/scheduled start/i), {
+      target: { value: "2026-10-20T09:30" },
+    });
+    await user.click(within(form).getByRole("button", { name: /^schedule$/i }));
+    await waitFor(() =>
+      expect(screen.getByTestId("theatre-readiness")).toHaveTextContent(
+        /^ready|ready theatre-conflicts/i,
+      ),
+    );
+    const post = calls.find((x) =>
+      x.url.endsWith("/theatre/cases/tc2/schedule"),
+    );
+    expect(post).toBeDefined();
+    const body = JSON.parse(String(post?.init?.body));
+    expect(body).toMatchObject({
+      expected_version: 2,
+      theatre_location_id: "th1",
+      expected_theatre_version: 4,
+    });
+    expect(new Date(body.scheduled_start).getTime()).toBe(
+      new Date("2026-10-20T09:30").getTime(),
+    );
+    expect(screen.getByText(/case scheduled/i)).toBeInTheDocument();
+  });
+
+  it("hides the scheduling form from read-only operations users", async () => {
+    const c = {
+      id: "tc3",
+      facility_id: "f1",
+      episode_id: null,
+      patient_id: "pd",
+      procedure_code: "hernia-repair",
+      responsible_service_code: "surgery",
+      status: "ready_for_scheduling",
+      priority: "routine",
+      expected_duration_minutes: 60,
+      required_equipment_codes: [],
+      prerequisites: {},
+      session_id: null,
+      theatre_location_id: null,
+      scheduled_start: null,
+      scheduled_end: null,
+      version: 1,
+    };
+    const calls = setup(
+      <TheatresPage />,
+      meta({ can_manage_theatre: false }),
+      (url) => {
+        if (url.startsWith("/api/v1/operations/theatre/cases?"))
+          return { cases: [{ case: c, readiness: null }] };
+        if (url === "/api/v1/operations/theatre/cases/tc3")
+          return { case: c, readiness: null };
+        return undefined;
+      },
+    );
+    const user = userEvent.setup();
+    await user.click(
+      within(await screen.findByTestId("theatre-cases")).getByRole("button"),
+    );
+    await screen.findByTestId("theatre-readiness");
+    expect(screen.queryByTestId("theatre-schedule")).toBeNull();
+    expect(
+      calls.some((x) => x.url.startsWith("/api/v1/operations/locations")),
+    ).toBe(false);
   });
 });
 

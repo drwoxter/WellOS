@@ -188,23 +188,26 @@ pub async fn snapshot(
         .collect();
 
     let day_end = now + Duration::hours(24);
-    let cases = theatre::list_cases(conn, tenant_id, Some(&[facility_id]), None, true, 200).await?;
+    let cases = theatre::list_cases_starting_between(
+        conn,
+        tenant_id,
+        facility_id,
+        now - Duration::hours(12),
+        day_end,
+    )
+    .await?;
     let mut theatre_today = 0;
     let mut theatre_ready = 0;
     let mut theatre_conflicts = 0;
     let mut theatre_missing_prereqs = 0;
-    for c in cases.iter().filter(|c| {
-        c.scheduled_start
-            .map(|s| s >= now - Duration::hours(12) && s < day_end)
-            .unwrap_or(false)
-    }) {
+    for c in &cases {
         theatre_today += 1;
         if c.status == "ready" || c.status == "in_theatre" {
             theatre_ready += 1;
         }
         if c.prerequisites_typed()
             .iter()
-            .any(|p| p.status != "met" && p.status != "waived")
+            .any(|p| !wellos_domain::care_ops::prerequisite_satisfied(&p.status))
         {
             theatre_missing_prereqs += 1;
         }

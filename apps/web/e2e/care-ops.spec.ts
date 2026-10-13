@@ -347,6 +347,11 @@ test("theatre and workforce coordinators see deterministic readiness and capabil
     .click();
   const readiness = page.getByTestId("theatre-readiness");
   await expect(readiness).toContainText("theatre-conflicts.v1");
+  const schedule = page.getByTestId("theatre-schedule");
+  await expect(schedule).toBeVisible();
+  await expect(
+    schedule.getByRole("combobox", { name: /theatre/i }).locator("option"),
+  ).not.toHaveCount(1);
 
   await signOutViaBff(page);
   await signInViaBff(page, "wf.diaz");

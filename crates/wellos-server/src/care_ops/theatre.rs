@@ -14,8 +14,8 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 use wellos_domain::care_ops::{
-    self as domain, CaseStatus, CaseTransition, Interval, Prerequisite, TheatreCaseFacts,
-    TheatreCheck,
+    self as domain, prerequisite_satisfied, CaseStatus, CaseTransition, Interval, Prerequisite,
+    TheatreCaseFacts, TheatreCheck,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,6 +256,32 @@ pub async fn list_cases(
         .bind(episode_id)
         .bind(open_only)
         .bind(limit)
+        .fetch_all(&mut *conn)
+        .await?;
+    Ok(rows.iter().map(case_from_row).collect())
+}
+
+/// Open cases of one facility whose scheduled start falls in `[from, to)`;
+/// unbounded, so facility-wide totals never depend on a row limit.
+pub async fn list_cases_starting_between(
+    conn: &mut PgConnection,
+    tenant_id: Uuid,
+    facility_id: Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<CaseRow>, ApiError> {
+    let sql = format!(
+        "SELECT {CASE_COLS} FROM perioperative_cases
+         WHERE tenant_id = $1 AND facility_id = $2
+           AND status NOT IN ('completed','cancelled')
+           AND scheduled_start >= $3 AND scheduled_start < $4
+         ORDER BY scheduled_start, created_at"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(tenant_id)
+        .bind(facility_id)
+        .bind(from)
+        .bind(to)
         .fetch_all(&mut *conn)
         .await?;
     Ok(rows.iter().map(case_from_row).collect())
@@ -808,10 +834,7 @@ pub async fn transition_case(
             None => prereqs.push(upd.clone()),
         }
     }
-    if tr == CaseTransition::MarkReady
-        && prereqs
-            .iter()
-            .any(|p| p.status != "met" && p.status != "waived")
+    if tr == CaseTransition::MarkReady && prereqs.iter().any(|p| !prerequisite_satisfied(&p.status))
     {
         return Err(ApiError::conflict(
             "missing_prerequisite",
@@ -819,7 +842,7 @@ pub async fn transition_case(
                 "prerequisites not met: {}",
                 prereqs
                     .iter()
-                    .filter(|p| p.status != "met" && p.status != "waived")
+                    .filter(|p| !prerequisite_satisfied(&p.status))
                     .map(|p| p.code.as_str())
                     .collect::<Vec<_>>()
                     .join(",")

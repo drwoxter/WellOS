@@ -78,12 +78,17 @@ ADR-0006).
   equipment and team shifts. Overrides need a reason and are recorded.
   Scheduling an already `scheduled` case is a `reschedule`: the previous
   theatre booking is released and the new interval booked in one
-  transaction, subject to the same conflict engine.
+  transaction, subject to the same conflict engine. Prerequisite statuses
+  `met`, `waived` and `not_required` are non-blocking for both readiness and
+  scheduling (`prerequisite_satisfied`), so a case marked ready never fails
+  later on the same evidence. `/operations/theatres` carries the human
+  scheduling form (theatre, start, override reason); the snapshot's 24 h
+  theatre totals query the window directly rather than a capped case list.
   No anaesthetic record, operative note or medication administration exists.
 * `workforce_shifts`, `workforce_coverage_requirements`,
   `workforce_shift_assignments` and `workforce_shift_absences` feed
   `workforce-coverage.v1`, a capability-specific gap engine in the facility's
-  IANA zone (DST-safe). Reallocation is a human action; moving an
+  IANA zone (DST-safe) that counts distinct people, never assignment rows. Reallocation is a human action; moving an
   assignment to another shift authorises the target shift's facility as well
   as the source's.
 * `care-operations-forecast.v1` is deterministic over ≥ 14 days of history

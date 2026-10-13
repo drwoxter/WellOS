@@ -1097,10 +1097,15 @@ impl Interval {
     }
 }
 
+/// Prerequisite states that do not block readiness or scheduling.
+pub fn prerequisite_satisfied(status: &str) -> bool {
+    matches!(status, "met" | "waived" | "not_required")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Prerequisite {
     pub code: String,
-    /// `pending` | `met` | `not_required` | `failed`
+    /// `pending` | `met` | `waived` | `not_required` | `failed`
     pub status: String,
     pub evidence_ref: Option<String>,
 }
@@ -1246,7 +1251,7 @@ pub fn check_theatre(facts: &TheatreCaseFacts) -> TheatreCheck {
         );
     }
     for p in &facts.prerequisites {
-        if p.status != "met" && p.status != "not_required" {
+        if !prerequisite_satisfied(&p.status) {
             push(
                 &mut c,
                 "missing_prerequisite",
@@ -1330,27 +1335,33 @@ fn staff_matches(s: &StaffFact, r: &CoverageRequirement) -> bool {
                 .any(|c| s.specialty_codes.contains(c)))
 }
 
+/// Distinct people (by `user_id`; assignments without a user count once each)
+/// in `role` who satisfy the requirement. Duplicate assignment rows for the
+/// same person never inflate coverage.
+fn distinct_staff(staff: &[StaffFact], r: &CoverageRequirement, role: &str) -> i64 {
+    let mut users = std::collections::BTreeSet::new();
+    let mut anonymous = 0i64;
+    for s in staff.iter().filter(|s| {
+        !s.absent
+            && s.role_in_shift == role
+            && matches!(s.status.as_str(), "planned" | "confirmed")
+            && staff_matches(s, r)
+    }) {
+        match s.user_id {
+            Some(u) => {
+                users.insert(u);
+            }
+            None => anonymous += 1,
+        }
+    }
+    users.len() as i64 + anonymous
+}
+
 pub fn evaluate_coverage(reqs: &[CoverageRequirement], staff: &[StaffFact]) -> CoverageReport {
     let mut gaps = Vec::new();
     for r in reqs {
-        let present = staff
-            .iter()
-            .filter(|s| {
-                !s.absent
-                    && s.role_in_shift == "assigned"
-                    && matches!(s.status.as_str(), "planned" | "confirmed")
-                    && staff_matches(s, r)
-            })
-            .count() as i64;
-        let on_call = staff
-            .iter()
-            .filter(|s| {
-                !s.absent
-                    && s.role_in_shift == "on_call"
-                    && matches!(s.status.as_str(), "planned" | "confirmed")
-                    && staff_matches(s, r)
-            })
-            .count() as i64;
+        let present = distinct_staff(staff, r, "assigned");
+        let on_call = distinct_staff(staff, r, "on_call");
         if present < r.minimum_count {
             gaps.push(CoverageGap {
                 profession_code: r.profession_code.clone(),
@@ -2137,6 +2148,33 @@ mod tests {
         assert!(!check_theatre(&f).feasible);
     }
 
+    #[test]
+    fn waived_and_not_required_prerequisites_do_not_block_scheduling() {
+        let mut f = theatre_facts();
+        f.prerequisites = vec![
+            Prerequisite {
+                code: "anaesthetic_review".into(),
+                status: "waived".into(),
+                evidence_ref: Some("consultant waiver".into()),
+            },
+            Prerequisite {
+                code: "blood_products".into(),
+                status: "not_required".into(),
+                evidence_ref: None,
+            },
+        ];
+        let r = check_theatre(&f);
+        assert!(
+            r.conflicts.iter().all(|c| c.code != "missing_prerequisite"),
+            "{r:?}"
+        );
+        f.prerequisites[0].status = "pending".into();
+        assert!(check_theatre(&f)
+            .conflicts
+            .iter()
+            .any(|c| c.code == "missing_prerequisite" && c.blocking));
+    }
+
     fn staff(id: u128, profession: &str, caps: &[&str], role: &str) -> StaffFact {
         StaffFact {
             assignment_id: Uuid::from_u128(id),
@@ -2148,6 +2186,35 @@ mod tests {
             status: "confirmed".into(),
             absent: false,
         }
+    }
+
+    #[test]
+    fn coverage_counts_distinct_people_not_assignment_rows() {
+        let reqs = vec![CoverageRequirement {
+            profession_code: "nurse".into(),
+            capability_codes: vec![],
+            specialty_codes: vec![],
+            minimum_count: 2,
+        }];
+        let mut duplicate = staff(1, "nurse", &[], "assigned");
+        duplicate.assignment_id = Uuid::from_u128(99);
+        let r = evaluate_coverage(&reqs, &[staff(1, "nurse", &[], "assigned"), duplicate]);
+        assert!(!r.covered, "{r:?}");
+        assert_eq!(r.gaps[0].present, 1);
+        assert_eq!(r.gaps[0].shortfall, 1);
+        let r = evaluate_coverage(
+            &reqs,
+            &[
+                staff(1, "nurse", &[], "assigned"),
+                staff(2, "nurse", &[], "assigned"),
+            ],
+        );
+        assert!(r.covered, "{r:?}");
+        let mut unnamed_a = staff(1, "nurse", &[], "assigned");
+        unnamed_a.user_id = None;
+        let mut unnamed_b = staff(2, "nurse", &[], "assigned");
+        unnamed_b.user_id = None;
+        assert!(evaluate_coverage(&reqs, &[unnamed_a, unnamed_b]).covered);
     }
 
     #[test]

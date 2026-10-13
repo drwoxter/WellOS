@@ -2352,6 +2352,16 @@ const dict = {
     theatreExplain: "Ask dMind to explain the plan",
     theatreExplainIntro:
       "dMind explains the deterministic readiness of a session; it cannot schedule, cancel or override.",
+    theatreSchedule: "Schedule case",
+    theatreScheduleIntro:
+      "Human booking decision. The deterministic check runs again on save; blocking conflicts refuse the booking, advisory ones need an override reason.",
+    theatreRoom: "Theatre",
+    theatreSelectRoom: "Select a theatre",
+    theatreStart: "Scheduled start",
+    theatreOverrideReason: "Override reason (advisory conflicts)",
+    theatreScheduleSubmit: "Schedule",
+    theatreScheduled_ok: "Case scheduled; readiness recalculated.",
+    theatreNoRooms: "No theatres configured for this facility.",
     wfTitle: "Workforce",
     wfIntro:
       "Shifts, configured minimum coverage and deterministic gaps by profession and capability. Reassignments are approved by humans; dMind may only explain pressure.",
@@ -4764,6 +4774,16 @@ const dict = {
     theatreExplain: "Pedir a dMind que explique el plan",
     theatreExplainIntro:
       "dMind explica la preparación determinista de una sesión; no puede programar, cancelar ni anular.",
+    theatreSchedule: "Programar caso",
+    theatreScheduleIntro:
+      "Decisión humana de reserva. La comprobación determinista se repite al guardar; los conflictos bloqueantes rechazan la reserva y los avisos exigen un motivo de anulación.",
+    theatreRoom: "Quirófano",
+    theatreSelectRoom: "Selecciona un quirófano",
+    theatreStart: "Inicio programado",
+    theatreOverrideReason: "Motivo de anulación (conflictos de aviso)",
+    theatreScheduleSubmit: "Programar",
+    theatreScheduled_ok: "Caso programado; preparación recalculada.",
+    theatreNoRooms: "No hay quirófanos configurados en este centro.",
     wfTitle: "Personal",
     wfIntro:
       "Turnos, cobertura mínima configurada y huecos deterministas por profesión y capacidad. Las reasignaciones las aprueban personas; dMind solo puede explicar la presión.",

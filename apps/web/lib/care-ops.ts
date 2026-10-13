@@ -622,6 +622,43 @@ export function loadCases(
   );
 }
 
+export type OperationalLocation = {
+  id: string;
+  facility_id: string;
+  level: string;
+  type_code: string;
+  code: string;
+  name_en: string;
+  name_es: string;
+  operational_status: string;
+  position_state: string | null;
+  active: boolean;
+  version: number;
+};
+
+export function loadLocations(
+  facilityId: string,
+): Promise<{ locations: OperationalLocation[] }> {
+  return opsFetch(
+    `/api/v1/operations/locations${q({ facility_id: facilityId })}`,
+  );
+}
+
+/** Human scheduling decision; the server re-runs theatre-conflicts.v1. */
+export function scheduleCase(
+  id: string,
+  body: {
+    expected_version: number;
+    theatre_location_id: string;
+    expected_theatre_version: number;
+    scheduled_start: string;
+    team_user_ids?: string[];
+    override_reason?: string;
+  },
+): Promise<{ case: TheatreCase; readiness: Readiness }> {
+  return postOps(`/api/v1/operations/theatre/cases/${id}/schedule`, body);
+}
+
 export function loadCase(id: string): Promise<{
   case: TheatreCase;
   readiness: Readiness | null;

@@ -5,7 +5,7 @@
  * (theatre-conflicts.v1). Humans schedule and override; dMind may only
  * explain a session's deterministic plan.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppShell } from "../../chrome";
 import { t, type Lang } from "@/lib/i18n";
 import { useSession } from "@/lib/session";
@@ -13,13 +13,27 @@ import { formatDateTime } from "@/lib/clinical";
 import {
   loadCase,
   loadCases,
+  loadLocations,
+  scheduleCase,
+  type OperationalLocation,
   type TheatreCaseListItem,
   type Readiness,
   type TheatreCase,
 } from "@/lib/care-ops";
 import { Card, CardHead, EmptyState, Pill } from "@/components/ui/primitives";
-import { PanelState, useLoader } from "../../scheduling/shared";
-import { FacilityPicker, StatusPill, fill, useFacility } from "../shared";
+import {
+  MessageLine,
+  PanelState,
+  useAction,
+  useLoader,
+} from "../../scheduling/shared";
+import {
+  FacilityPicker,
+  StatusPill,
+  fill,
+  useCareOpsCaps,
+  useFacility,
+} from "../shared";
 
 export function ReadinessView({
   lang,
@@ -69,7 +83,140 @@ export function ReadinessView({
   );
 }
 
-function CaseDetail({ lang, id }: { lang: Lang; id: string }) {
+const SCHEDULABLE = new Set([
+  "requested",
+  "ready_for_scheduling",
+  "scheduled",
+  "delayed",
+]);
+
+function toLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * Human booking form. The server re-runs theatre-conflicts.v1 inside the
+ * scheduling transaction; this form only carries the coordinator's decision.
+ */
+function ScheduleForm({
+  lang,
+  theatreCase,
+  theatres,
+  onScheduled,
+}: {
+  lang: Lang;
+  theatreCase: TheatreCase;
+  theatres: OperationalLocation[];
+  onScheduled: () => Promise<void>;
+}) {
+  const action = useAction(lang);
+  const [theatreId, setTheatreId] = useState(
+    theatreCase.theatre_location_id ?? "",
+  );
+  const [start, setStart] = useState(
+    theatreCase.scheduled_start
+      ? toLocalInput(theatreCase.scheduled_start)
+      : "",
+  );
+  const [override, setOverride] = useState("");
+  useEffect(() => {
+    setTheatreId(theatreCase.theatre_location_id ?? "");
+    setStart(
+      theatreCase.scheduled_start
+        ? toLocalInput(theatreCase.scheduled_start)
+        : "",
+    );
+    setOverride("");
+  }, [
+    theatreCase.id,
+    theatreCase.theatre_location_id,
+    theatreCase.scheduled_start,
+  ]);
+  if (theatres.length === 0) {
+    return <p className="muted small">{t(lang, "theatreNoRooms")}</p>;
+  }
+  const chosen = theatres.find((x) => x.id === theatreId);
+  return (
+    <form
+      className="stack"
+      data-testid="theatre-schedule"
+      aria-label={t(lang, "theatreSchedule")}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!chosen || !start) return;
+        void action.run(async () => {
+          await scheduleCase(theatreCase.id, {
+            expected_version: theatreCase.version,
+            theatre_location_id: chosen.id,
+            expected_theatre_version: chosen.version,
+            scheduled_start: new Date(start).toISOString(),
+            override_reason: override.trim() || undefined,
+          });
+          await onScheduled();
+        }, "theatreScheduled_ok");
+      }}
+    >
+      <h4>{t(lang, "theatreSchedule")}</h4>
+      <p className="muted small">{t(lang, "theatreScheduleIntro")}</p>
+      <div className="grid two">
+        <label className="field">
+          <span>{t(lang, "theatreRoom")}</span>
+          <select
+            required
+            value={theatreId}
+            onChange={(e) => setTheatreId(e.target.value)}
+          >
+            <option value="">{t(lang, "theatreSelectRoom")}</option>
+            {theatres.map((x) => (
+              <option key={x.id} value={x.id}>
+                {lang === "es" ? x.name_es : x.name_en}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>{t(lang, "theatreStart")}</span>
+          <input
+            required
+            type="datetime-local"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>{t(lang, "theatreOverrideReason")}</span>
+          <input
+            value={override}
+            onChange={(e) => setOverride(e.target.value)}
+            maxLength={200}
+          />
+        </label>
+      </div>
+      <button type="submit" className="secondary" disabled={action.busy}>
+        {t(lang, "theatreScheduleSubmit")}
+      </button>
+      <MessageLine message={action.message} />
+    </form>
+  );
+}
+
+function CaseDetail({
+  lang,
+  id,
+  theatres,
+  canSchedule,
+  onChanged,
+}: {
+  lang: Lang;
+  id: string;
+  theatres: OperationalLocation[];
+  canSchedule: boolean;
+  onChanged: () => Promise<void>;
+}) {
   const detail = useLoader(() => loadCase(id), id);
   return (
     <PanelState
@@ -112,6 +259,16 @@ function CaseDetail({ lang, id }: { lang: Lang; id: string }) {
           </dl>
           <h4>{t(lang, "theatreReadiness")}</h4>
           <ReadinessView lang={lang} readiness={d.readiness} />
+          {canSchedule && SCHEDULABLE.has(d.case.status) ? (
+            <ScheduleForm
+              lang={lang}
+              theatreCase={d.case}
+              theatres={theatres}
+              onScheduled={async () => {
+                await Promise.all([detail.reload(), onChanged()]);
+              }}
+            />
+          ) : null}
           <p className="muted small">{t(lang, "theatreExplainIntro")}</p>
         </div>
       )}
@@ -122,10 +279,19 @@ function CaseDetail({ lang, id }: { lang: Lang; id: string }) {
 function Theatres() {
   const { lang } = useSession();
   const { facilityId, setFacilityId, facilities } = useFacility();
+  const caps = useCareOpsCaps();
   const cases = useLoader(
     () => loadCases(facilityId ?? ""),
     facilityId ?? "",
     Boolean(facilityId),
+  );
+  const rooms = useLoader(
+    () => loadLocations(facilityId ?? ""),
+    facilityId ?? "",
+    Boolean(facilityId) && caps.can_manage_theatre,
+  );
+  const theatres = (rooms.data?.locations ?? []).filter(
+    (l) => l.type_code === "theatre" && l.active,
   );
   const [selected, setSelected] = useState<string | null>(null);
   return (
@@ -193,7 +359,13 @@ function Theatres() {
           <Card>
             <CardHead title={t(lang, "theatreReadiness")} />
             {selected ? (
-              <CaseDetail lang={lang} id={selected} />
+              <CaseDetail
+                lang={lang}
+                id={selected}
+                theatres={theatres}
+                canSchedule={caps.can_manage_theatre}
+                onChanged={() => cases.reload()}
+              />
             ) : (
               <EmptyState inline title={t(lang, "theatreCases")} />
             )}

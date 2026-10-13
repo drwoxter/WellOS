@@ -1971,3 +1971,216 @@ async fn patient_care_view_is_limited_to_the_grant_facility_scope() {
         "every exposed episode is within the grant facility scope: {v}"
     );
 }
+
+/// Review flag: `pending_tasks` in `/me/care` must list only work that is
+/// still open; completed tasks never crowd open ones out of the 20-row limit.
+#[tokio::test]
+async fn patient_care_view_lists_only_open_tasks() {
+    let state = test_state().await;
+    let fx = fixtures(&state).await;
+    let (s, me) = call(&state, "GET", "/api/v1/me/care", PATIENT, None).await;
+    assert_eq!(s, StatusCode::OK, "{me}");
+    let pid = uuid(&me["patient_id"]);
+    // An observation episode left by an interrupted run is cancelled so this
+    // test owns the patient's observation care (one open episode per type).
+    for e in me["episodes"].as_array().unwrap() {
+        if e["episode_type_code"] == "observation" {
+            let stale = uuid(&e["episode_id"]);
+            let (version,): (i64,) =
+                sqlx::query_as("SELECT version FROM care_episodes WHERE id = $1")
+                    .bind(stale)
+                    .fetch_one(&state.pool)
+                    .await
+                    .unwrap();
+            let (s, v) = call(
+                &state,
+                "POST",
+                &format!("/api/v1/operations/episodes/{stale}/transition"),
+                BEDS,
+                Some(json!({ "transition": "cancel", "expected_version": version, "reason_code": "test_cleanup" })),
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+        }
+    }
+    let (s, ep) = call(
+        &state,
+        "POST",
+        "/api/v1/operations/episodes",
+        BEDS,
+        Some(json!({
+            "facility_id": fx.facility,
+            "patient_id": pid,
+            "episode_type_code": "observation",
+            "responsible_service_code": "internal_medicine",
+            "priority": "routine",
+            "activate": true
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{ep}");
+    let episode = uuid(&ep["id"]);
+    let (tenant, facility) = (fx.tenant, fx.facility);
+    let (creator,): (Uuid,) =
+        sqlx::query_as("SELECT id FROM users WHERE tenant_id = $1 AND username = 'bed.ortiz'")
+            .bind(tenant)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let mut ids = Vec::new();
+    for status in ["completed", "open", "in_progress", "cancelled"] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO care_coordination_tasks
+               (id, tenant_id, facility_id, episode_id, patient_id, title_en, title_es, status,
+                patient_visible, patient_text_en, patient_text_es, created_by,
+                accountable_user_id, completed_at, completed_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$6,$7,true,$6,$6,$8,$8,
+                     CASE WHEN $7 = 'completed' THEN now() END,
+                     CASE WHEN $7 = 'completed' THEN $8 END)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(facility)
+        .bind(episode)
+        .bind(pid)
+        .bind(format!("review-task-{status}"))
+        .bind(status)
+        .bind(creator)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        ids.push((status, id));
+    }
+    let (s, care) = call(&state, "GET", "/api/v1/me/care", PATIENT, None).await;
+    assert_eq!(s, StatusCode::OK, "{care}");
+    let ep = care["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| uuid(&e["episode_id"]) == episode)
+        .unwrap_or_else(|| panic!("episode missing from /me/care: {care}"));
+    let listed: Vec<Uuid> = ep["pending_tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| uuid(&t["id"]))
+        .collect();
+    for (status, id) in &ids {
+        let open = matches!(*status, "open" | "in_progress");
+        assert_eq!(
+            listed.contains(id),
+            open,
+            "{status} task visibility wrong: {care}"
+        );
+    }
+    assert!(
+        ep["pending_tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["status"] != "completed" && t["status"] != "cancelled"),
+        "{care}"
+    );
+    for (_, id) in ids {
+        sqlx::query("DELETE FROM care_coordination_tasks WHERE id = $1")
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+    }
+    let (ep_version,): (i64,) = sqlx::query_as("SELECT version FROM care_episodes WHERE id = $1")
+        .bind(episode)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let (s, v) = call(
+        &state,
+        "POST",
+        &format!("/api/v1/operations/episodes/{episode}/transition"),
+        BEDS,
+        Some(json!({ "transition": "cancel", "expected_version": ep_version, "reason_code": "test_cleanup" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+/// Review flag: the snapshot's 24 h theatre totals are computed over every
+/// case in the window, not over the first 200 open cases of the facility.
+#[tokio::test]
+async fn snapshot_theatre_totals_are_not_capped_by_a_row_limit() {
+    let state = test_state().await;
+    let fx = fixtures(&state).await;
+    let ep = episode(&state, &fx, "inpatient").await;
+    let (theatre,): (Uuid,) = sqlx::query_as(
+        "SELECT id FROM operational_locations
+         WHERE tenant_id = $1 AND facility_id = $2 AND type_code = 'theatre' AND active LIMIT 1",
+    )
+    .bind(fx.tenant)
+    .bind(fx.facility)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    let (creator,): (Uuid,) =
+        sqlx::query_as("SELECT id FROM users WHERE tenant_id = $1 AND username = 'theatre.ruiz'")
+            .bind(fx.tenant)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let (s, before) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/operations/snapshot?facility_id={}", fx.facility),
+        OPS,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{before}");
+    let baseline = before["theatre"]["cases_next_24h"].as_i64().unwrap();
+    let extra = 201i64;
+    let base_start = Utc::now() + Duration::hours(2);
+    let mut ids = Vec::with_capacity(extra as usize);
+    for i in 0..extra {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO perioperative_cases
+               (id, tenant_id, facility_id, episode_id, patient_id, procedure_code,
+                responsible_service_code, status, expected_duration_minutes,
+                theatre_location_id, scheduled_start, scheduled_end, created_by)
+             VALUES ($1,$2,$3,$4,$5,'review-volume','surgery','scheduled',30,$6,$7,$8,$9)",
+        )
+        .bind(id)
+        .bind(fx.tenant)
+        .bind(fx.facility)
+        .bind(uuid(&ep["id"]))
+        .bind(fx.patient)
+        .bind(theatre)
+        .bind(base_start + Duration::minutes(i))
+        .bind(base_start + Duration::minutes(i + 30))
+        .bind(creator)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let (s, after) = call(
+        &state,
+        "GET",
+        &format!("/api/v1/operations/snapshot?facility_id={}", fx.facility),
+        OPS,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{after}");
+    let counted = after["theatre"]["cases_next_24h"].as_i64().unwrap();
+    assert!(
+        counted >= baseline + extra,
+        "snapshot counted {counted} cases, expected at least {}",
+        baseline + extra
+    );
+    sqlx::query("DELETE FROM perioperative_cases WHERE id = ANY($1)")
+        .bind(&ids)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+}
