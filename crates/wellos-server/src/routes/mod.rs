@@ -4,6 +4,7 @@ pub mod admin;
 pub mod ai;
 pub mod brief;
 pub mod capacity;
+pub mod care_ops;
 pub mod consent;
 pub mod creds;
 pub mod dashboard;
@@ -228,6 +229,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/v1", me::routes())
         .nest("/api/v1", waitlist::routes())
         .nest("/api/v1", capacity::routes())
+        .nest("/api/v1", care_ops::routes())
         .nest("/api/v1", transport::routes())
         .route(
             "/api/v1/patient-grants",
@@ -255,6 +257,10 @@ pub fn router(state: AppState) -> Router {
             get(fhir::document_reference),
         )
         .route("/fhir/r4/ImagingStudy/:id", get(fhir::imaging_study))
+        .route("/fhir/r4/EpisodeOfCare/:id", get(fhir::episode_of_care))
+        .route("/fhir/r4/Encounter/:id", get(fhir::encounter))
+        .route("/fhir/r4/Location/:id", get(fhir::location))
+        .route("/fhir/r4/Task/:id", get(fhir::task))
         .layer(cors_layer());
     // Defense-in-depth response headers for the API surface. The API is
     // JSON-only, so a restrictive CSP with frame protection is safe

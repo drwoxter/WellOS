@@ -9,9 +9,13 @@ boundary, mapped at the edge.
 ## Implemented today
 
 - **FHIR R4 read facade**: `GET /fhir/r4/Patient/{id}`,
-  `GET /fhir/r4/Observation/{id}`, `GET /fhir/r4/ServiceRequest/{id}` — minimal
-  conformant resources mapped from internal records, fully authorized and
-  audited like every other read.
+  `GET /fhir/r4/Observation/{id}`, `GET /fhir/r4/ServiceRequest/{id}`,
+  `Specimen`, `DiagnosticReport`, `DocumentReference`, `ImagingStudy`, and the
+  Care Operations subset `EpisodeOfCare`, linked `Encounter`, `Location`
+  (hierarchy, v2-0116 bed status) and `Task` — minimal conformant resources
+  mapped from internal records, fully authorized and audited like every
+  other read. Operational readiness, linked encounters and coordination
+  tasks are `urn:wellos:*` extensions; no conformance claim is made.
 - **LOINC** codes for laboratory analytes on service requests/observations.
 - **UCUM**-aware quantity handling with refusal on unknown conversions.
 

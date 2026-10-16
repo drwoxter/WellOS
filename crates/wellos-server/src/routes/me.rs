@@ -59,6 +59,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/me", get(me))
         .route("/me/home", get(home))
+        .route("/me/care", get(care))
         .route(
             "/me/access-requests",
             get(list_requests).post(create_request),
@@ -2674,5 +2675,220 @@ async fn share_transport_location(
     Ok(Json(json!({
         "transport_request_id": t.id,
         "expires_at": expires_at,
+    })))
+}
+
+/// `GET /api/v1/me/care`: the patient's (or representative's) view of an
+/// active care episode. Only released, patient-appropriate facts are exposed:
+/// the episode and its confirmed location, patient-visible pending work,
+/// confirmed appointments and scheduled procedures, transport status and
+/// approved notifications. Staffing, forecasts, internal notes, unreviewed
+/// dMind output and other patients' data are never included.
+pub async fn care(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Query(q): Query<PatientQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (g, allowed) = scope(&state, &ctx, &mut conn, "care", q.patient_id).await?;
+    allowed.record(&mut conn, &ctx, &state.cell).await?;
+    // The allow above was evaluated for the grant's facility (the patient's
+    // registered facility); the view exposes nothing beyond that scope.
+    let grant_facilities = [g.patient_facility_id];
+    let episodes = crate::care_ops::list_episodes(
+        &mut conn,
+        g.tenant_id,
+        crate::care_ops::EpisodeFilter {
+            facility_ids: Some(&grant_facilities),
+            patient_id: Some(g.patient_id),
+            statuses: &[],
+            open_only: true,
+            limit: 5,
+        },
+    )
+    .await?;
+    let mut out = Vec::with_capacity(episodes.len());
+    for ep in &episodes {
+        let location = match ep.current_placement_id {
+            Some(pid) => {
+                sqlx::query(
+                    "SELECT l.name_en, l.name_es, u.name_en AS unit_en, u.name_es AS unit_es, p.status
+                     FROM placements p
+                     JOIN operational_locations l ON l.id = p.location_id
+                     LEFT JOIN operational_locations r ON r.id = l.parent_id
+                     LEFT JOIN operational_locations u ON u.id = COALESCE(CASE WHEN r.level = 'unit' THEN r.id END, r.parent_id)
+                     WHERE p.tenant_id = $1 AND p.id = $2 AND p.status = 'occupied'",
+                )
+                .bind(g.tenant_id)
+                .bind(pid)
+                .fetch_optional(&mut *conn)
+                .await?
+                .map(|r| {
+                    json!({
+                        "position_en": r.get::<String, _>("name_en"),
+                        "position_es": r.get::<String, _>("name_es"),
+                        "unit_en": r.get::<Option<String>, _>("unit_en"),
+                        "unit_es": r.get::<Option<String>, _>("unit_es"),
+                    })
+                })
+            }
+            None => None,
+        };
+        let tasks = sqlx::query(
+            "SELECT id, status, due_at, patient_text_en, patient_text_es, barrier_category_code
+             FROM care_coordination_tasks
+             WHERE tenant_id = $1 AND episode_id = $2 AND patient_visible
+               AND status NOT IN ('completed','cancelled')
+             ORDER BY due_at NULLS LAST, created_at LIMIT 20",
+        )
+        .bind(g.tenant_id)
+        .bind(ep.id)
+        .fetch_all(&mut *conn)
+        .await?;
+        let tasks: Vec<Value> = tasks
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.get::<Uuid, _>("id"),
+                    "status": r.get::<String, _>("status"),
+                    "due_at": r.get::<Option<DateTime<Utc>>, _>("due_at"),
+                    "text_en": r.get::<Option<String>, _>("patient_text_en"),
+                    "text_es": r.get::<Option<String>, _>("patient_text_es"),
+                    "discharge_preparation": r.get::<Option<String>, _>("barrier_category_code").is_some(),
+                })
+            })
+            .collect();
+        let procedures = sqlx::query(
+            "SELECT id, procedure_code, status, scheduled_start FROM perioperative_cases
+             WHERE tenant_id = $1 AND episode_id = $2 AND status IN ('scheduled','ready','delayed','completed')
+             ORDER BY scheduled_start NULLS LAST LIMIT 10",
+        )
+        .bind(g.tenant_id)
+        .bind(ep.id)
+        .fetch_all(&mut *conn)
+        .await?;
+        let procedures: Vec<Value> = procedures
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.get::<Uuid, _>("id"),
+                    "procedure_code": r.get::<String, _>("procedure_code"),
+                    "status": r.get::<String, _>("status"),
+                    "scheduled_start": r.get::<Option<DateTime<Utc>>, _>("scheduled_start"),
+                })
+            })
+            .collect();
+        let next_step = tasks
+            .iter()
+            .find(|t| t["status"] != "completed")
+            .cloned()
+            .or_else(|| {
+                procedures
+                    .iter()
+                    .find(|p| p["status"] != "completed")
+                    .cloned()
+            });
+        out.push(json!({
+            "episode_id": ep.id,
+            "episode_type_code": ep.episode_type_code,
+            "status": ep.status,
+            "started_at": ep.started_at,
+            "expected_end_at": ep.expected_end_at,
+            "facility_id": ep.facility_id,
+            "location": location,
+            "next_step": next_step,
+            "pending_tasks": tasks,
+            "procedures": procedures,
+        }));
+    }
+    let appointments = sqlx::query(
+        "SELECT id, service_code, starts_at, ends_at, facility_id FROM appointments
+         WHERE tenant_id = $1 AND patient_id = $2 AND status = 'confirmed' AND ends_at >= now()
+         ORDER BY starts_at LIMIT 10",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let appointments: Vec<Value> = appointments
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<Uuid, _>("id"),
+                "service_code": r.get::<String, _>("service_code"),
+                "starts_at": r.get::<DateTime<Utc>, _>("starts_at"),
+                "ends_at": r.get::<DateTime<Utc>, _>("ends_at"),
+                "facility_id": r.get::<Uuid, _>("facility_id"),
+            })
+        })
+        .collect();
+    let transport = sqlx::query(
+        "SELECT id, status, pickup_window_start, pickup_window_end FROM transport_requests
+         WHERE tenant_id = $1 AND patient_id = $2 AND status NOT IN ('completed','cancelled','failed')
+         ORDER BY pickup_window_start NULLS LAST LIMIT 5",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let transport: Vec<Value> = transport
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<Uuid, _>("id"),
+                "status": r.get::<String, _>("status"),
+                "pickup_window_start": r.get::<Option<DateTime<Utc>>, _>("pickup_window_start"),
+                "pickup_window_end": r.get::<Option<DateTime<Utc>>, _>("pickup_window_end"),
+            })
+        })
+        .collect();
+    let notifications = sqlx::query(
+        "SELECT id, kind, status, created_at, delivered_at FROM notifications
+         WHERE tenant_id = $1 AND patient_id = $2 AND status IN ('delivered','partially_delivered')
+         ORDER BY created_at DESC LIMIT 10",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let notifications: Vec<Value> = notifications
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<Uuid, _>("id"),
+                "kind": r.get::<String, _>("kind"),
+                "status": r.get::<String, _>("status"),
+                "created_at": r.get::<DateTime<Utc>, _>("created_at"),
+                "delivered_at": r.get::<Option<DateTime<Utc>>, _>("delivered_at"),
+            })
+        })
+        .collect();
+    let contact = sqlx::query(
+        "SELECT f.id, f.name, fs.time_zone FROM facilities f
+         LEFT JOIN facility_scheduling fs ON fs.facility_id = f.id
+         WHERE f.tenant_id = $1 AND f.id = $2",
+    )
+    .bind(g.tenant_id)
+    .bind(g.patient_facility_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .map(|r| json!({"facility_id": r.get::<Uuid, _>("id"), "facility_name": r.get::<String, _>("name"), "time_zone": r.get::<Option<String>, _>("time_zone")}));
+    audit::emit(
+        &mut *conn,
+        &ctx,
+        "care_ops.patient_care.read",
+        &state.cell,
+        json!({"patient_id": g.patient_id, "episodes": out.len()}),
+        None,
+    )
+    .await?;
+    Ok(Json(json!({
+        "patient_id": g.patient_id,
+        "generated_at": Utc::now(),
+        "episodes": out,
+        "appointments": appointments,
+        "transport": transport,
+        "notifications": notifications,
+        "contact": contact,
     })))
 }

@@ -258,6 +258,22 @@ system; charts carry textual summaries and never encode criticality by
 colour alone; responsive at 1440/1024/390 px, 44 px touch targets,
 reduced-motion, axe checks and a visual-regression Playwright suite.
 
+**Care Operations & Command Center v1** (migration `0019`): runtime
+operational hierarchy with position states and append-only history; durable
+care episodes linking clinical objects by id; placement requests with the
+deterministic `care-placement.v1` matcher, transactional hold/confirm/transfer
+and typed `409` conflicts, release → cleaning → available; accountable
+coordination tasks, draft handoffs and deterministic escalations; emergency
+flow view; perioperative cases with `theatre-conflicts.v1` and reasoned
+overrides; workforce shifts, DST-safe `workforce-coverage.v1` gaps;
+`care-operations-forecast.v1` with honest `insufficient_history`; six
+advisory dMind operations with bilingual evaluation corpus; FHIR R4 read
+subset (`EpisodeOfCare`, `Encounter`, `Location`, `Task`); `/operations*`,
+`/episodes/[id]/coordination`, `/my/care`; integration, upgrade (0018→0019),
+component and Playwright coverage. Hazards H-43–H-49 recorded. Not
+operationally validated: weights, timers and thresholds are synthetic
+fixtures.
+
 ## Next 10 backlog items (priority order)
 
 1. **Identity phase 3B**: IdP-driven user provisioning (SCIM), token-bucket
@@ -310,7 +326,10 @@ reduced-motion, axe checks and a visual-regression Playwright suite.
     bias audits of the supportive no-show factor and forecast accuracy
     evaluation on real (consented) populations, HSM/KMS custody for the
     location keyring.
-14. **Care Operations** (planned, not started).
+14. **Care Operations v2**: ADT/rostering/theatre-system interfaces,
+    on-call escalation delivery, validated matcher weights and forecast
+    accuracy on real (consented) operations data, FHIR search/Bundles for
+    the operational subset.
 
 ## Later
 

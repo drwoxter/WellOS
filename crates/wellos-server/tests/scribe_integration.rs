@@ -843,6 +843,72 @@ impl dmind_gateway::ModelGateway for GatedGateway {
     > {
         self.inner.explain_capacity(req).await
     }
+
+    async fn brief_care_flow(
+        &self,
+        req: &dmind_gateway::care_ops::CareFlowBriefRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<wellos_domain::care_ops_ai::CareFlowBriefV1>,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.brief_care_flow(req).await
+    }
+
+    async fn rank_placements(
+        &self,
+        req: &dmind_gateway::care_ops::PlacementRankingRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<wellos_domain::care_ops_ai::PlacementRankingV1>,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.rank_placements(req).await
+    }
+
+    async fn coordinate_discharge(
+        &self,
+        req: &dmind_gateway::care_ops::DischargeCoordinationRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<
+            wellos_domain::care_ops_ai::DischargeCoordinationV1,
+        >,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.coordinate_discharge(req).await
+    }
+
+    async fn explain_theatre_plan(
+        &self,
+        req: &dmind_gateway::care_ops::TheatrePlanExplanationRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<
+            wellos_domain::care_ops_ai::TheatrePlanExplanationV1,
+        >,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.explain_theatre_plan(req).await
+    }
+
+    async fn explain_operational_forecast(
+        &self,
+        req: &dmind_gateway::care_ops::OperationalForecastExplanationRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<
+            wellos_domain::care_ops_ai::OperationalForecastExplanationV1,
+        >,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.explain_operational_forecast(req).await
+    }
+
+    async fn draft_shift_handoff(
+        &self,
+        req: &dmind_gateway::care_ops::ShiftHandoffDraftRequest,
+    ) -> Result<
+        dmind_gateway::care_ops::CareOpsResponse<wellos_domain::care_ops_ai::ShiftHandoffDraftV1>,
+        dmind_gateway::GatewayError,
+    > {
+        self.inner.draft_shift_handoff(req).await
+    }
 }
 
 /// A diagnosis recorded while the model is structuring the transcript: the

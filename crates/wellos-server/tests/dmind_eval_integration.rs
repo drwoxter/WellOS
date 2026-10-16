@@ -130,10 +130,16 @@ async fn offline_run_is_admin_only_auditor_readable_and_side_effect_free() {
     // Auditor: read-only.
     let (s, suites) = send(&state, "GET", AUDITOR, &format!("{BASE}/suites"), None).await;
     assert_eq!(s, StatusCode::OK, "{suites}");
-    assert_eq!(suites["compiled"]["case_count"], 55);
+    let corpus = wellos_server::eval::corpus::Corpus::load().unwrap();
+    assert!(
+        corpus.cases.len() >= 55,
+        "corpus shrank: {}",
+        corpus.cases.len()
+    );
+    assert_eq!(suites["compiled"]["case_count"], corpus.cases.len());
     assert_eq!(
         suites["compiled"]["operations"].as_array().unwrap().len(),
-        11
+        wellos_server::eval::registry().len()
     );
     assert_eq!(suites["can_manage"], false);
     assert_eq!(suites["live_mode"], "cli_only");

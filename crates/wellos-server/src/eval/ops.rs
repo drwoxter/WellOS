@@ -9,6 +9,11 @@
 use dmind_gateway::access::{
     AccessIntentRequest, CapacityExplanationRequest, RankingRequest, RecoveryRankingRequest,
 };
+use dmind_gateway::care_ops::{
+    self, CareFlowBriefRequest, DischargeCoordinationRequest,
+    OperationalForecastExplanationRequest, PlacementRankingRequest, ShiftHandoffDraftRequest,
+    TheatrePlanExplanationRequest,
+};
 use dmind_gateway::diagnostics::{
     OrderSuggestionRequest, PatientExplanationRequest, ResultSynthesisRequest,
 };
@@ -42,6 +47,12 @@ pub enum CaseInput {
     DiagnosticOrderSuggestion(OrderSuggestionRequest),
     DiagnosticResultSynthesis(ResultSynthesisRequest),
     PatientResultExplanation(PatientExplanationRequest),
+    CareFlowBrief(CareFlowBriefRequest),
+    PlacementRanking(PlacementRankingRequest),
+    DischargeCoordination(DischargeCoordinationRequest),
+    TheatrePlanExplanation(TheatrePlanExplanationRequest),
+    OperationalForecastExplanation(OperationalForecastExplanationRequest),
+    ShiftHandoffDraft(ShiftHandoffDraftRequest),
 }
 
 /// Typed output of one execution, flattened to the parts the rubric needs.
@@ -83,6 +94,14 @@ impl CaseInput {
             CaseInput::AppointmentRanking(_) => Operation::AppointmentRanking,
             CaseInput::CancellationRecovery(_) => Operation::CancellationRecovery,
             CaseInput::CapacityExplanation(_) => Operation::CapacityExplanation,
+            CaseInput::CareFlowBrief(_) => Operation::CareFlowBrief,
+            CaseInput::PlacementRanking(_) => Operation::PlacementRanking,
+            CaseInput::DischargeCoordination(_) => Operation::DischargeCoordination,
+            CaseInput::TheatrePlanExplanation(_) => Operation::TheatrePlanExplanation,
+            CaseInput::OperationalForecastExplanation(_) => {
+                Operation::OperationalForecastExplanation
+            }
+            CaseInput::ShiftHandoffDraft(_) => Operation::ShiftHandoffDraft,
             CaseInput::DiagnosticOrderSuggestion(_) => Operation::DiagnosticOrderSuggestion,
             CaseInput::DiagnosticResultSynthesis(_) => Operation::DiagnosticResultSynthesis,
             CaseInput::PatientResultExplanation(_) => Operation::PatientResultExplanation,
@@ -101,6 +120,12 @@ impl CaseInput {
             CaseInput::AppointmentRanking(r) => Some(&r.language),
             CaseInput::CancellationRecovery(r) => Some(&r.language),
             CaseInput::CapacityExplanation(r) => Some(&r.language),
+            CaseInput::CareFlowBrief(r) => Some(&r.language),
+            CaseInput::PlacementRanking(r) => Some(&r.language),
+            CaseInput::DischargeCoordination(r) => Some(&r.language),
+            CaseInput::TheatrePlanExplanation(r) => Some(&r.language),
+            CaseInput::OperationalForecastExplanation(r) => Some(&r.language),
+            CaseInput::ShiftHandoffDraft(r) => Some(&r.language),
             CaseInput::DiagnosticOrderSuggestion(r) => Some(&r.language),
             CaseInput::DiagnosticResultSynthesis(r) => Some(&r.language),
             CaseInput::PatientResultExplanation(_) => None,
@@ -119,6 +144,12 @@ impl CaseInput {
             CaseInput::AppointmentRanking(r) => hash_json(r),
             CaseInput::CancellationRecovery(r) => hash_json(r),
             CaseInput::CapacityExplanation(r) => hash_json(r),
+            CaseInput::CareFlowBrief(r) => hash_json(r),
+            CaseInput::PlacementRanking(r) => hash_json(r),
+            CaseInput::DischargeCoordination(r) => hash_json(r),
+            CaseInput::TheatrePlanExplanation(r) => hash_json(r),
+            CaseInput::OperationalForecastExplanation(r) => hash_json(r),
+            CaseInput::ShiftHandoffDraft(r) => hash_json(r),
             CaseInput::DiagnosticOrderSuggestion(r) => hash_json(r),
             CaseInput::DiagnosticResultSynthesis(r) => hash_json(r),
             CaseInput::PatientResultExplanation(r) => hash_json(r),
@@ -193,6 +224,12 @@ impl CaseInput {
                 }
                 _ => vec!["forecast:summary".to_string()],
             },
+            CaseInput::CareFlowBrief(r) => r.fact_refs(),
+            CaseInput::PlacementRanking(r) => r.fact_refs(),
+            CaseInput::DischargeCoordination(r) => r.fact_refs(),
+            CaseInput::TheatrePlanExplanation(r) => r.fact_refs(),
+            CaseInput::OperationalForecastExplanation(r) => r.fact_refs(),
+            CaseInput::ShiftHandoffDraft(r) => r.fact_refs(),
             CaseInput::DiagnosticOrderSuggestion(r) => {
                 let mut v = facts(&r.facts);
                 v.extend(r.candidates.iter().map(|c| format!("catalog:{}", c.code)));
@@ -326,6 +363,66 @@ impl CaseInput {
                     g.usage,
                 )
             }
+            CaseInput::CareFlowBrief(r) => {
+                let g = gateway.brief_care_flow(r).await?;
+                out(
+                    &g.output,
+                    g.provider,
+                    &g.prompt_version,
+                    &g.input_hash,
+                    g.usage,
+                )
+            }
+            CaseInput::PlacementRanking(r) => {
+                let g = gateway.rank_placements(r).await?;
+                out(
+                    &g.output,
+                    g.provider,
+                    &g.prompt_version,
+                    &g.input_hash,
+                    g.usage,
+                )
+            }
+            CaseInput::DischargeCoordination(r) => {
+                let g = gateway.coordinate_discharge(r).await?;
+                out(
+                    &g.output,
+                    g.provider,
+                    &g.prompt_version,
+                    &g.input_hash,
+                    g.usage,
+                )
+            }
+            CaseInput::TheatrePlanExplanation(r) => {
+                let g = gateway.explain_theatre_plan(r).await?;
+                out(
+                    &g.output,
+                    g.provider,
+                    &g.prompt_version,
+                    &g.input_hash,
+                    g.usage,
+                )
+            }
+            CaseInput::OperationalForecastExplanation(r) => {
+                let g = gateway.explain_operational_forecast(r).await?;
+                out(
+                    &g.output,
+                    g.provider,
+                    &g.prompt_version,
+                    &g.input_hash,
+                    g.usage,
+                )
+            }
+            CaseInput::ShiftHandoffDraft(r) => {
+                let g = gateway.draft_shift_handoff(r).await?;
+                out(
+                    &g.output,
+                    g.provider,
+                    &g.prompt_version,
+                    &g.input_hash,
+                    g.usage,
+                )
+            }
             CaseInput::DiagnosticOrderSuggestion(r) => {
                 let g = gateway.suggest_orders(r).await?;
                 out(
@@ -430,6 +527,48 @@ impl CaseInput {
             }
             CaseInput::CapacityExplanation(r) => {
                 let g = access::deterministic_capacity(r, info.clone())?;
+                wrap(
+                    serde_json::to_value(g.output).expect("serializable"),
+                    g.prompt_version,
+                )
+            }
+            CaseInput::CareFlowBrief(r) => {
+                let g = care_ops::deterministic_flow_brief(r, info.clone())?;
+                wrap(
+                    serde_json::to_value(g.output).expect("serializable"),
+                    g.prompt_version,
+                )
+            }
+            CaseInput::PlacementRanking(r) => {
+                let g = care_ops::deterministic_placement_ranking(r, info.clone())?;
+                wrap(
+                    serde_json::to_value(g.output).expect("serializable"),
+                    g.prompt_version,
+                )
+            }
+            CaseInput::DischargeCoordination(r) => {
+                let g = care_ops::deterministic_discharge_coordination(r, info.clone())?;
+                wrap(
+                    serde_json::to_value(g.output).expect("serializable"),
+                    g.prompt_version,
+                )
+            }
+            CaseInput::TheatrePlanExplanation(r) => {
+                let g = care_ops::deterministic_theatre_plan(r, info.clone())?;
+                wrap(
+                    serde_json::to_value(g.output).expect("serializable"),
+                    g.prompt_version,
+                )
+            }
+            CaseInput::OperationalForecastExplanation(r) => {
+                let g = care_ops::deterministic_forecast_explanation(r, info.clone())?;
+                wrap(
+                    serde_json::to_value(g.output).expect("serializable"),
+                    g.prompt_version,
+                )
+            }
+            CaseInput::ShiftHandoffDraft(r) => {
+                let g = care_ops::deterministic_handoff_draft(r, info.clone())?;
                 wrap(
                     serde_json::to_value(g.output).expect("serializable"),
                     g.prompt_version,

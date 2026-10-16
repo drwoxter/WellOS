@@ -12,6 +12,11 @@ use crate::access::{
     self, AccessIntentRequest, AccessResponse, CapacityExplanationRequest, RankingRequest,
     RecoveryRankingRequest,
 };
+use crate::care_ops::{
+    self, CareFlowBriefRequest, CareOpsResponse, DischargeCoordinationRequest,
+    OperationalForecastExplanationRequest, PlacementRankingRequest, ShiftHandoffDraftRequest,
+    TheatrePlanExplanationRequest,
+};
 use crate::diagnostics::{
     self, DiagnosticResponse, OrderSuggestionRequest, PatientExplanationRequest,
     ResultSynthesisRequest,
@@ -29,6 +34,10 @@ use wellos_domain::access_ai::{
     AccessIntentV1, AppointmentRankingV1, CancellationRecoveryV1, CapacityExplanationV1,
 };
 use wellos_domain::ai::{ProviderInfo, ResultSummaryV1};
+use wellos_domain::care_ops_ai::{
+    CareFlowBriefV1, DischargeCoordinationV1, OperationalForecastExplanationV1, PlacementRankingV1,
+    ShiftHandoffDraftV1, TheatrePlanExplanationV1,
+};
 use wellos_domain::diagnostics_ai::{
     DiagnosticOrderSuggestionV1, DiagnosticResultSynthesisV1, PatientResultExplanationV1,
 };
@@ -117,6 +126,20 @@ impl ModelGateway for FakeProvider {
             }
             Operation::PatientResultExplanation => {
                 diagnostics::PATIENT_EXPLANATION_DETERMINISTIC_PROMPT_VERSION
+            }
+            Operation::CareFlowBrief => care_ops::CARE_FLOW_BRIEF_DETERMINISTIC_PROMPT_VERSION,
+            Operation::PlacementRanking => care_ops::PLACEMENT_RANKING_DETERMINISTIC_PROMPT_VERSION,
+            Operation::DischargeCoordination => {
+                care_ops::DISCHARGE_COORDINATION_DETERMINISTIC_PROMPT_VERSION
+            }
+            Operation::TheatrePlanExplanation => {
+                care_ops::THEATRE_PLAN_EXPLANATION_DETERMINISTIC_PROMPT_VERSION
+            }
+            Operation::OperationalForecastExplanation => {
+                care_ops::OPERATIONAL_FORECAST_EXPLANATION_DETERMINISTIC_PROMPT_VERSION
+            }
+            Operation::ShiftHandoffDraft => {
+                care_ops::SHIFT_HANDOFF_DRAFT_DETERMINISTIC_PROMPT_VERSION
             }
         }
         .into()
@@ -247,6 +270,54 @@ impl ModelGateway for FakeProvider {
     ) -> Result<AccessResponse<CapacityExplanationV1>, GatewayError> {
         self.ensure_available()?;
         access::deterministic_capacity(req, self.info())
+    }
+
+    async fn brief_care_flow(
+        &self,
+        req: &CareFlowBriefRequest,
+    ) -> Result<CareOpsResponse<CareFlowBriefV1>, GatewayError> {
+        self.ensure_available()?;
+        care_ops::deterministic_flow_brief(req, self.info())
+    }
+
+    async fn rank_placements(
+        &self,
+        req: &PlacementRankingRequest,
+    ) -> Result<CareOpsResponse<PlacementRankingV1>, GatewayError> {
+        self.ensure_available()?;
+        care_ops::deterministic_placement_ranking(req, self.info())
+    }
+
+    async fn coordinate_discharge(
+        &self,
+        req: &DischargeCoordinationRequest,
+    ) -> Result<CareOpsResponse<DischargeCoordinationV1>, GatewayError> {
+        self.ensure_available()?;
+        care_ops::deterministic_discharge_coordination(req, self.info())
+    }
+
+    async fn explain_theatre_plan(
+        &self,
+        req: &TheatrePlanExplanationRequest,
+    ) -> Result<CareOpsResponse<TheatrePlanExplanationV1>, GatewayError> {
+        self.ensure_available()?;
+        care_ops::deterministic_theatre_plan(req, self.info())
+    }
+
+    async fn explain_operational_forecast(
+        &self,
+        req: &OperationalForecastExplanationRequest,
+    ) -> Result<CareOpsResponse<OperationalForecastExplanationV1>, GatewayError> {
+        self.ensure_available()?;
+        care_ops::deterministic_forecast_explanation(req, self.info())
+    }
+
+    async fn draft_shift_handoff(
+        &self,
+        req: &ShiftHandoffDraftRequest,
+    ) -> Result<CareOpsResponse<ShiftHandoffDraftV1>, GatewayError> {
+        self.ensure_available()?;
+        care_ops::deterministic_handoff_draft(req, self.info())
     }
 
     async fn suggest_orders(

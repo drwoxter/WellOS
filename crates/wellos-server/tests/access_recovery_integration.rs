@@ -1555,11 +1555,25 @@ async fn capacity_forecast_reports_insufficient_history_then_seasonal_pressure()
     .await;
     assert_eq!(st, StatusCode::OK, "{season}");
     // Closure and leave land on facility working days (the seeded facility
-    // opens Monday to Friday), so the test is stable whatever today's weekday.
+    // opens Monday to Friday) that are not already zero-demand calendar days
+    // (seeded synthetic holidays), so the test is stable whatever today is.
+    let no_demand: Vec<(NaiveDate, NaiveDate)> = sqlx::query_as(
+        "SELECT starts_on, ends_on FROM operational_calendar_events
+         WHERE tenant_id = $1 AND (facility_id IS NULL OR facility_id = $2)
+           AND active AND demand_multiplier = 0",
+    )
+    .bind(tenant)
+    .bind(fid)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
     let working_day = |from: NaiveDate| {
-        (0..7)
+        (0..14)
             .map(|i| from + Duration::days(i))
-            .find(|d| d.weekday().number_from_monday() <= 5)
+            .find(|d| {
+                d.weekday().number_from_monday() <= 5
+                    && !no_demand.iter().any(|(a, b)| a <= d && d <= b)
+            })
             .unwrap()
     };
     // Late in the horizon: a closure is a hard scheduling constraint, and the
@@ -1675,7 +1689,7 @@ async fn capacity_forecast_reports_insufficient_history_then_seasonal_pressure()
     );
     assert!(
         closed["gap"].as_f64().unwrap() < 0.0,
-        "closure creates a shortfall"
+        "closure creates a shortfall: {closed}"
     );
     let leave = by_date(leave_day);
     assert!(has(&leave, "resource_exceptions"), "{leave}");

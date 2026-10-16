@@ -109,6 +109,31 @@ pub enum ReuseScope {
     CapacityExplanation {
         capacity_forecast_id: Uuid,
     },
+    /// care-flow-brief.v1 bound to one persisted command-center snapshot.
+    CareFlowBrief {
+        care_operations_snapshot_id: Uuid,
+    },
+    /// placement-ranking.v1 bound to one placement request; the input hash
+    /// carries the matcher facts hash and candidate set.
+    PlacementRanking {
+        placement_request_id: Uuid,
+    },
+    /// discharge-coordination.v1 bound to one care episode.
+    DischargeCoordination {
+        care_episode_id: Uuid,
+    },
+    /// theatre-plan-explanation.v1 bound to one theatre session.
+    TheatrePlanExplanation {
+        theatre_session_id: Uuid,
+    },
+    /// operational-forecast-explanation.v1 bound to one persisted forecast.
+    OperationalForecastExplanation {
+        care_operations_forecast_id: Uuid,
+    },
+    /// shift-handoff-draft.v1 bound to one care episode.
+    ShiftHandoffDraft {
+        care_episode_id: Uuid,
+    },
     /// diagnostic-order-suggestion.v1 bound to one consultation (encounter)
     /// snapshot; the input hash carries the candidate set and facts.
     DiagnosticOrderSuggestion {
@@ -139,6 +164,18 @@ pub const ARTIFACT_TYPES: &[(&str, Operation)] = &[
     ("appointment_ranking", Operation::AppointmentRanking),
     ("cancellation_recovery", Operation::CancellationRecovery),
     ("capacity_explanation", Operation::CapacityExplanation),
+    ("care_flow_brief", Operation::CareFlowBrief),
+    ("placement_ranking", Operation::PlacementRanking),
+    ("discharge_coordination", Operation::DischargeCoordination),
+    (
+        "theatre_plan_explanation",
+        Operation::TheatrePlanExplanation,
+    ),
+    (
+        "operational_forecast_explanation",
+        Operation::OperationalForecastExplanation,
+    ),
+    ("shift_handoff_draft", Operation::ShiftHandoffDraft),
     (
         "diagnostic_order_suggestion",
         Operation::DiagnosticOrderSuggestion,
@@ -165,6 +202,12 @@ impl ReuseScope {
             ReuseScope::AppointmentRanking { .. } => "appointment_ranking",
             ReuseScope::CancellationRecovery { .. } => "cancellation_recovery",
             ReuseScope::CapacityExplanation { .. } => "capacity_explanation",
+            ReuseScope::CareFlowBrief { .. } => "care_flow_brief",
+            ReuseScope::PlacementRanking { .. } => "placement_ranking",
+            ReuseScope::DischargeCoordination { .. } => "discharge_coordination",
+            ReuseScope::TheatrePlanExplanation { .. } => "theatre_plan_explanation",
+            ReuseScope::OperationalForecastExplanation { .. } => "operational_forecast_explanation",
+            ReuseScope::ShiftHandoffDraft { .. } => "shift_handoff_draft",
             ReuseScope::DiagnosticOrderSuggestion { .. } => "diagnostic_order_suggestion",
             ReuseScope::DiagnosticResultSynthesis { .. } => "diagnostic_result_synthesis",
             ReuseScope::PatientResultExplanation { .. } => "patient_result_explanation",
@@ -183,6 +226,14 @@ impl ReuseScope {
             ReuseScope::AppointmentRanking { .. } => Operation::AppointmentRanking,
             ReuseScope::CancellationRecovery { .. } => Operation::CancellationRecovery,
             ReuseScope::CapacityExplanation { .. } => Operation::CapacityExplanation,
+            ReuseScope::CareFlowBrief { .. } => Operation::CareFlowBrief,
+            ReuseScope::PlacementRanking { .. } => Operation::PlacementRanking,
+            ReuseScope::DischargeCoordination { .. } => Operation::DischargeCoordination,
+            ReuseScope::TheatrePlanExplanation { .. } => Operation::TheatrePlanExplanation,
+            ReuseScope::OperationalForecastExplanation { .. } => {
+                Operation::OperationalForecastExplanation
+            }
+            ReuseScope::ShiftHandoffDraft { .. } => Operation::ShiftHandoffDraft,
             ReuseScope::DiagnosticOrderSuggestion { .. } => Operation::DiagnosticOrderSuggestion,
             ReuseScope::DiagnosticResultSynthesis { .. } => Operation::DiagnosticResultSynthesis,
             ReuseScope::PatientResultExplanation { .. } => Operation::PatientResultExplanation,
@@ -193,7 +244,13 @@ impl ReuseScope {
     /// scopes skip the per-patient external-processing consent (there is no
     /// patient whose data leaves the cell) but not the deployment switch.
     pub fn requires_patient(self) -> bool {
-        !matches!(self, ReuseScope::CapacityExplanation { .. })
+        !matches!(
+            self,
+            ReuseScope::CapacityExplanation { .. }
+                | ReuseScope::CareFlowBrief { .. }
+                | ReuseScope::TheatrePlanExplanation { .. }
+                | ReuseScope::OperationalForecastExplanation { .. }
+        )
     }
 
     /// The `ai_artifacts` column binding the artifact to its resource. A
@@ -208,6 +265,13 @@ impl ReuseScope {
             ReuseScope::AppointmentRanking { .. } => "matcher_run_id",
             ReuseScope::CancellationRecovery { .. } => "cancellation_event_id",
             ReuseScope::CapacityExplanation { .. } => "capacity_forecast_id",
+            ReuseScope::CareFlowBrief { .. } => "care_operations_snapshot_id",
+            ReuseScope::PlacementRanking { .. } => "placement_request_id",
+            ReuseScope::DischargeCoordination { .. } | ReuseScope::ShiftHandoffDraft { .. } => {
+                "care_episode_id"
+            }
+            ReuseScope::TheatrePlanExplanation { .. } => "theatre_session_id",
+            ReuseScope::OperationalForecastExplanation { .. } => "care_operations_forecast_id",
             ReuseScope::DiagnosticOrderSuggestion { .. } => "encounter_id",
             ReuseScope::DiagnosticResultSynthesis { .. }
             | ReuseScope::PatientResultExplanation { .. } => "diagnostic_report_id",
@@ -229,6 +293,18 @@ impl ReuseScope {
             ReuseScope::CapacityExplanation {
                 capacity_forecast_id,
             } => capacity_forecast_id,
+            ReuseScope::CareFlowBrief {
+                care_operations_snapshot_id,
+            } => care_operations_snapshot_id,
+            ReuseScope::PlacementRanking {
+                placement_request_id,
+            } => placement_request_id,
+            ReuseScope::DischargeCoordination { care_episode_id }
+            | ReuseScope::ShiftHandoffDraft { care_episode_id } => care_episode_id,
+            ReuseScope::TheatrePlanExplanation { theatre_session_id } => theatre_session_id,
+            ReuseScope::OperationalForecastExplanation {
+                care_operations_forecast_id,
+            } => care_operations_forecast_id,
             ReuseScope::DiagnosticOrderSuggestion { encounter_id } => encounter_id,
             ReuseScope::DiagnosticResultSynthesis {
                 diagnostic_report_id,
@@ -742,6 +818,24 @@ mod scope_catalog_tests {
             ReuseScope::CapacityExplanation {
                 capacity_forecast_id: id,
             },
+            ReuseScope::CareFlowBrief {
+                care_operations_snapshot_id: id,
+            },
+            ReuseScope::PlacementRanking {
+                placement_request_id: id,
+            },
+            ReuseScope::DischargeCoordination {
+                care_episode_id: id,
+            },
+            ReuseScope::TheatrePlanExplanation {
+                theatre_session_id: id,
+            },
+            ReuseScope::OperationalForecastExplanation {
+                care_operations_forecast_id: id,
+            },
+            ReuseScope::ShiftHandoffDraft {
+                care_episode_id: id,
+            },
             ReuseScope::DiagnosticOrderSuggestion { encounter_id: id },
             ReuseScope::DiagnosticResultSynthesis {
                 diagnostic_report_id: id,
@@ -762,6 +856,12 @@ mod scope_catalog_tests {
                 | ReuseScope::AppointmentRanking { .. }
                 | ReuseScope::CancellationRecovery { .. }
                 | ReuseScope::CapacityExplanation { .. }
+                | ReuseScope::CareFlowBrief { .. }
+                | ReuseScope::PlacementRanking { .. }
+                | ReuseScope::DischargeCoordination { .. }
+                | ReuseScope::TheatrePlanExplanation { .. }
+                | ReuseScope::OperationalForecastExplanation { .. }
+                | ReuseScope::ShiftHandoffDraft { .. }
                 | ReuseScope::DiagnosticOrderSuggestion { .. }
                 | ReuseScope::DiagnosticResultSynthesis { .. }
                 | ReuseScope::PatientResultExplanation { .. } => {}

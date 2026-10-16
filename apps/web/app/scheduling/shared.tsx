@@ -44,7 +44,8 @@ export type Loaded<T> = {
   loading: boolean;
   error: string | null;
   denied: boolean;
-  reload: () => void;
+  /** Re-runs the loader; resolves once that load has settled. */
+  reload: () => Promise<void>;
 };
 
 /**
@@ -64,8 +65,17 @@ export function useLoader<T>(
   const gen = useRef(0);
   const loadRef = useRef(load);
   loadRef.current = load;
+  const settled = useRef<(() => void)[]>([]);
+  const flush = () => {
+    const waiters = settled.current;
+    settled.current = [];
+    for (const resolve of waiters) resolve();
+  };
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      flush();
+      return;
+    }
     const g = ++gen.current;
     setLoading(true);
     setError(null);
@@ -82,13 +92,22 @@ export function useLoader<T>(
         else setError(errorText(err));
       })
       .finally(() => {
-        if (g === gen.current) setLoading(false);
+        if (g !== gen.current) return;
+        setLoading(false);
+        flush();
       });
     return () => {
       // A newer effect run owns the panel now.
     };
   }, [key, tick, enabled]);
-  const reload = useCallback(() => setTick((n) => n + 1), []);
+  const reload = useCallback(
+    () =>
+      new Promise<void>((resolve) => {
+        settled.current.push(resolve);
+        setTick((n) => n + 1);
+      }),
+    [],
+  );
   return { data, loading, error, denied, reload };
 }
 

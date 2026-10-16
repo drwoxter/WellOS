@@ -367,6 +367,24 @@ validation; never runs on real patients. See
 `docs/architecture/dmind-evaluation.md` and
 `docs/operations/dmind-evaluation-runbook.md`.
 
+## Care Operations & Command Center v1 (synthetic only)
+
+Hospital operations around the clinical loop — runtime
+`facility → department → unit → room → position` hierarchy, durable care
+episodes, deterministic bed placement (`care-placement.v1`) with human hold
+and confirmation, accountable coordination tasks and handoffs, emergency flow
+timers, perioperative readiness (`theatre-conflicts.v1`), workforce coverage
+gaps and deterministic forecasts — with six advisory dMind operations that
+summarise, rank feasible options, explain and draft but never admit, place,
+transfer, discharge, schedule, staff or notify. Sign in as `ops.lopez`,
+`bed.ortiz`, `theatre.ruiz` or `wf.diaz` (dev auth) for `/operations`,
+`/operations/flow`, `/operations/theatres`, `/operations/workforce` and
+`/episodes/{id}/coordination`; `rep.alba` sees `/my/care`. FHIR R4 read subset:
+`EpisodeOfCare`, `Encounter`, `Location`, `Task`. Details:
+`docs/architecture/care-operations.md`, ADR-0014, hazards H-43–H-49. Matcher
+weights, timers and thresholds are synthetic fixtures without operational
+validation.
+
 ## Tests
 
 ```bash

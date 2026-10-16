@@ -2,13 +2,16 @@
 //!
 //! Internal resources are mapped to FHIR R4 JSON at the edge for the subset
 //! WellOS exchanges: `Patient`, `ServiceRequest`, `Specimen`, `Observation`,
-//! `DiagnosticReport`, `DocumentReference`, `ImagingStudy`. Every emitted
+//! `DiagnosticReport`, `DocumentReference`, `ImagingStudy`, and the Care
+//! Operations read subset `EpisodeOfCare`, linked `Encounter`, `Location`,
+//! `Task`. Every emitted
 //! resource satisfies `wellos_domain::fhir::validate`; inbound
 //! `DiagnosticReport` deliveries are validated the same way before they are
 //! issued through the generalized typed result path. This is a facade, not a
 //! FHIR server: no search, no Bundles, no conformance claim.
 
 use crate::auth::AuthContext;
+use crate::care_ops as ops;
 use crate::error::ApiError;
 use crate::policy::{actions, ResourceCtx};
 use crate::routes::diagnostics::documents::{load_document, DocumentRow};
@@ -1113,4 +1116,335 @@ pub async fn ingest_diagnostic_report(
         },
         resource,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Care Operations read subset (EpisodeOfCare, Encounter, Location, Task)
+// ---------------------------------------------------------------------------
+
+const EPISODE_TYPE_SYSTEM: &str = "urn:wellos:episode-type";
+const LOCATION_LEVEL_SYSTEM: &str = "urn:wellos:location-level";
+const LOCATION_TYPE_SYSTEM: &str = "urn:wellos:location-type";
+const TASK_KIND_SYSTEM: &str = "urn:wellos:task-kind";
+const ACT_CODE_SYSTEM: &str = "http://terminology.hl7.org/CodeSystem/v3-ActCode";
+const BED_STATUS_SYSTEM: &str = "http://terminology.hl7.org/CodeSystem/v2-0116";
+const DISCHARGE_READINESS_EXTENSION: &str = "urn:wellos:operational-discharge-readiness";
+
+/// Operational reads are authorised with `care_ops.read` on the owning
+/// facility (and patient when the resource has one); cross-tenant ids are
+/// refused by policy like the clinical facade.
+async fn ops_read_guard(
+    state: &AppState,
+    ctx: &AuthContext,
+    resource: &str,
+    tenant_id: Uuid,
+    facility_id: Uuid,
+    patient_id: Option<Uuid>,
+) -> Result<(), ApiError> {
+    guard(
+        state,
+        ctx,
+        actions::CARE_OPS_READ,
+        resource,
+        Some(ResourceCtx {
+            tenant_id,
+            patient_id,
+            facility_id: Some(facility_id),
+        }),
+    )
+    .await?
+    .record_on_pool(state, ctx)
+    .await
+}
+
+fn episode_fhir_status(s: &str) -> &'static str {
+    match s {
+        "planned" => "planned",
+        "active" | "discharge_preparation" | "discharge_ready" => "active",
+        "completed" => "finished",
+        "cancelled" => "cancelled",
+        _ => "entered-in-error",
+    }
+}
+
+fn encounter_fhir_status(s: &str) -> &'static str {
+    match s {
+        "planned" => "planned",
+        "in_progress" => "in-progress",
+        "closed" | "signed" | "completed" | "finished" => "finished",
+        "cancelled" => "cancelled",
+        _ => "unknown",
+    }
+}
+
+fn location_fhir_status(active: bool, operational_status: &str) -> &'static str {
+    match (active, operational_status) {
+        (false, _) => "inactive",
+        (true, "open") => "active",
+        (true, _) => "suspended",
+    }
+}
+
+/// HL7 v2 table 0116 bed status for a position state; `None` for
+/// non-position locations.
+fn bed_status(position_state: Option<&str>) -> Option<(&'static str, &'static str)> {
+    match position_state? {
+        "available" => Some(("U", "Unoccupied")),
+        "held" | "occupied" => Some(("O", "Occupied")),
+        "cleaning" => Some(("H", "Housekeeping")),
+        "blocked" | "out_of_service" => Some(("C", "Closed")),
+        _ => None,
+    }
+}
+
+fn task_fhir_status(s: &str) -> &'static str {
+    match s {
+        "open" => "requested",
+        "in_progress" => "in-progress",
+        "blocked" => "on-hold",
+        "handed_off" => "ready",
+        "completed" => "completed",
+        "cancelled" => "cancelled",
+        _ => "entered-in-error",
+    }
+}
+
+fn period(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -> Option<Value> {
+    if start.is_none() && end.is_none() {
+        return None;
+    }
+    let mut m = Map::new();
+    if let Some(s) = start {
+        m.insert("start".into(), rfc3339(s));
+    }
+    if let Some(e) = end {
+        m.insert("end".into(), rfc3339(e));
+    }
+    Some(Value::Object(m))
+}
+
+fn insert_opt(m: &mut Map<String, Value>, key: &str, v: Option<Value>) {
+    if let Some(v) = v {
+        m.insert(key.into(), v);
+    }
+}
+
+pub async fn episode_of_care(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let tenant_id = locate(&mut conn, "care_episodes", id).await?;
+    let ep = ops::load_episode(&mut conn, tenant_id, id, false).await?;
+    ops_read_guard(
+        &state,
+        &ctx,
+        "fhir_episode_of_care",
+        ep.tenant_id,
+        ep.facility_id,
+        Some(ep.patient_id),
+    )
+    .await?;
+    let links = ops::episode_links(&mut conn, ep.tenant_id, ep.id).await?;
+    let tasks = ops::list_tasks(&mut conn, ep.tenant_id, Some(ep.id), None, false, 200).await?;
+    let mut m = Map::new();
+    m.insert("resourceType".into(), json!("EpisodeOfCare"));
+    m.insert("id".into(), json!(ep.id));
+    m.insert("status".into(), json!(episode_fhir_status(&ep.status)));
+    m.insert(
+        "type".into(),
+        json!([{ "coding": [coding(EPISODE_TYPE_SYSTEM, &ep.episode_type_code, None)] }]),
+    );
+    m.insert("patient".into(), reference("Patient", ep.patient_id));
+    insert_opt(&mut m, "period", period(ep.started_at, ep.ended_at));
+    if let Some(u) = ep.responsible_user_id {
+        m.insert("careManager".into(), reference("Practitioner", u));
+    }
+    // Operational readiness (`discharge_ready` is not medical clearance),
+    // linked encounters and coordination tasks travel as extensions: FHIR R4
+    // EpisodeOfCare has no native element for them.
+    let mut ext = vec![json!({ "url": DISCHARGE_READINESS_EXTENSION, "valueCode": ep.status })];
+    ext.extend(
+        links
+            .iter()
+            .filter(|l| l.link_type == "encounter")
+            .map(|l| json!({ "url": "urn:wellos:linked-encounter", "valueReference": reference("Encounter", l.link_id) })),
+    );
+    ext.extend(
+        tasks
+            .iter()
+            .map(|t| json!({ "url": "urn:wellos:coordination-task", "valueReference": reference("Task", t.id) })),
+    );
+    m.insert("extension".into(), Value::Array(ext));
+    checked(Value::Object(m))
+}
+
+pub async fn encounter(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let row = sqlx::query(
+        "SELECT id, tenant_id, facility_id, patient_id, status, started_at FROM encounters WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    let tenant_id: Uuid = row.get("tenant_id");
+    let facility_id: Uuid = row.get("facility_id");
+    let patient_id: Uuid = row.get("patient_id");
+    ops_read_guard(
+        &state,
+        &ctx,
+        "fhir_encounter",
+        tenant_id,
+        facility_id,
+        Some(patient_id),
+    )
+    .await?;
+    let episodes: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT episode_id FROM care_episode_links
+         WHERE tenant_id = $1 AND link_type = 'encounter' AND link_id = $2 ORDER BY created_at",
+    )
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut m = Map::new();
+    m.insert("resourceType".into(), json!("Encounter"));
+    m.insert("id".into(), json!(id));
+    m.insert(
+        "status".into(),
+        json!(encounter_fhir_status(&row.get::<String, _>("status"))),
+    );
+    m.insert(
+        "class".into(),
+        json!({ "system": ACT_CODE_SYSTEM, "code": "AMB", "display": "ambulatory" }),
+    );
+    m.insert("subject".into(), reference("Patient", patient_id));
+    m.insert(
+        "episodeOfCare".into(),
+        Value::Array(
+            episodes
+                .iter()
+                .map(|e| reference("EpisodeOfCare", e))
+                .collect(),
+        ),
+    );
+    insert_opt(
+        &mut m,
+        "period",
+        period(Some(row.get::<DateTime<Utc>, _>("started_at")), None),
+    );
+    m.insert(
+        "serviceProvider".into(),
+        reference("Organization", facility_id),
+    );
+    checked(Value::Object(m))
+}
+
+pub async fn location(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let tenant_id = locate(&mut conn, "operational_locations", id).await?;
+    let loc = ops::load_location(&mut conn, tenant_id, id, false).await?;
+    ops_read_guard(
+        &state,
+        &ctx,
+        "fhir_location",
+        loc.tenant_id,
+        loc.facility_id,
+        None,
+    )
+    .await?;
+    let mut m = Map::new();
+    m.insert("resourceType".into(), json!("Location"));
+    m.insert("id".into(), json!(loc.id));
+    m.insert(
+        "status".into(),
+        json!(location_fhir_status(loc.active, &loc.operational_status)),
+    );
+    m.insert("name".into(), json!(loc.name_en));
+    m.insert("alias".into(), json!([loc.name_es, loc.code]));
+    m.insert("mode".into(), json!("instance"));
+    m.insert(
+        "physicalType".into(),
+        json!({ "coding": [coding(LOCATION_LEVEL_SYSTEM, &loc.level, None)] }),
+    );
+    m.insert(
+        "type".into(),
+        json!([{ "coding": [coding(LOCATION_TYPE_SYSTEM, &loc.type_code, None)] }]),
+    );
+    if let Some(parent) = loc.parent_id {
+        m.insert("partOf".into(), reference("Location", parent));
+    }
+    m.insert(
+        "managingOrganization".into(),
+        reference("Organization", loc.facility_id),
+    );
+    if let Some((code, display)) = bed_status(loc.position_state.as_deref()) {
+        m.insert(
+            "operationalStatus".into(),
+            coding(BED_STATUS_SYSTEM, code, Some(display)),
+        );
+    }
+    checked(Value::Object(m))
+}
+
+pub async fn task(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let tenant_id = locate(&mut conn, "care_coordination_tasks", id).await?;
+    let t = ops::load_task(&mut conn, tenant_id, id, false).await?;
+    ops_read_guard(
+        &state,
+        &ctx,
+        "fhir_task",
+        t.tenant_id,
+        t.facility_id,
+        Some(t.patient_id),
+    )
+    .await?;
+    let mut m = Map::new();
+    m.insert("resourceType".into(), json!("Task"));
+    m.insert("id".into(), json!(t.id));
+    m.insert("status".into(), json!(task_fhir_status(&t.status)));
+    m.insert("intent".into(), json!("order"));
+    m.insert(
+        "code".into(),
+        json!({ "coding": [coding(TASK_KIND_SYSTEM, &t.kind, None)], "text": t.title_en }),
+    );
+    m.insert("description".into(), json!(t.title_en));
+    m.insert("for".into(), reference("Patient", t.patient_id));
+    m.insert(
+        "basedOn".into(),
+        json!([reference("EpisodeOfCare", t.episode_id)]),
+    );
+    m.insert("authoredOn".into(), rfc3339(t.created_at));
+    if let Some(u) = t.accountable_user_id {
+        m.insert("owner".into(), reference("Practitioner", u));
+    }
+    insert_opt(
+        &mut m,
+        "restriction",
+        period(None, t.due_at).map(|p| json!({ "period": p })),
+    );
+    if t.status == "completed" {
+        if let Some(done) = t.completed_at {
+            m.insert("lastModified".into(), rfc3339(done));
+        }
+    }
+    m.insert(
+        "partOf".into(),
+        Value::Array(t.depends_on.iter().map(|d| reference("Task", d)).collect()),
+    );
+    checked(Value::Object(m))
 }

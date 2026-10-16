@@ -44,6 +44,12 @@ pub fn registry() -> Vec<RegisteredOperation> {
                     ("diagnostics", false)
                 }
                 Operation::PatientResultExplanation => ("diagnostics", true),
+                Operation::CareFlowBrief
+                | Operation::PlacementRanking
+                | Operation::DischargeCoordination
+                | Operation::TheatrePlanExplanation
+                | Operation::OperationalForecastExplanation
+                | Operation::ShiftHandoffDraft => ("operations", false),
             };
             RegisteredOperation {
                 operation,

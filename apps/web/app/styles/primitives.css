@@ -2609,3 +2609,23 @@ details.accordion .accordion-body {
     transition: none;
   }
 }
+
+/* Selectable rows in operational worklists (button-per-row lists). */
+.listrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.25rem 0.4rem;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.listrow[aria-pressed="true"],
+.listrow.selected {
+  border-color: var(--primary);
+  background: var(--primary-softer);
+}

@@ -11,6 +11,7 @@ import {
 } from "react";
 import type { SchedulingCapabilities } from "./access";
 import type { DiagnosticsCapabilities } from "./diagnostics";
+import type { CareOpsCapabilities } from "./care-ops";
 import type { AiCapabilities } from "./capabilities";
 import { installHistoryIndex } from "./history-index";
 import type { Lang } from "./i18n";
@@ -27,7 +28,12 @@ export type Facility = {
 
 export type TenantMeta = {
   tenant: { id: string; name: string; cell: string };
-  user: { username: string; display_name: string; roles: string[] };
+  user: {
+    id?: string;
+    username: string;
+    display_name: string;
+    roles: string[];
+  };
   facilities: Facility[];
   /** Runtime environment and whether this tenant's data is synthetic. */
   environment?: { name: string; synthetic_data: boolean };
@@ -35,6 +41,7 @@ export type TenantMeta = {
   ai_capabilities?: AiCapabilities;
   scheduling_capabilities?: SchedulingCapabilities;
   diagnostics_capabilities?: DiagnosticsCapabilities;
+  care_ops_capabilities?: CareOpsCapabilities;
 };
 
 type Session = {
